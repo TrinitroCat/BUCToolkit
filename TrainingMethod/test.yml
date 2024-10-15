@@ -1,0 +1,15 @@
+DATA_PATH: '/home/ppx/PythonProjects/DataBases/MP_Graphdata/'
+EPOCH: 1000
+BATCH_SIZE: 128
+
+ACCUMULATE_STEP: 1
+REDIRECT: True
+DEBUG_MODE: False
+
+MODEL_CONFIG:
+  Embeddim: 64
+  Layers: 6
+
+OPTIM_CONFIG:
+  lr: 1e-4
+  
