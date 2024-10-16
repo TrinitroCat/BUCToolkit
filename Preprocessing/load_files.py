@@ -595,12 +595,12 @@ class ASEDB2Feat(BatchStructures):
 
 if __name__ == '__main__':
     tst = time.perf_counter()
-    f = OUTCAR2Feat('/home/ppx/PythonProjects/DataBases/PropDehydro/OUTCARs', verbose=1)
+    f = OUTCAR2Feat('/DataBases/PropDehydro/OUTCARs', verbose=1)
     f.read_files(n_core=6, )
     print(f'TIME: {-tst + time.perf_counter()}')
     del f
     tst = time.perf_counter()
-    f = OUTCAR2Feat('/home/ppx/PythonProjects/DataBases/PropDehydro/OUTCARs', verbose=1)
+    f = OUTCAR2Feat('/DataBases/PropDehydro/OUTCARs', verbose=1)
     f.read_files(n_core=1, )
     print(f'TIME: {-tst + time.perf_counter()}')
     pass

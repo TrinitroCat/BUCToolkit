@@ -3,7 +3,7 @@
 import torch as th
 
 def supercells(cell_vectors:th.Tensor, r_cut_off:float, device:str|th.device='cpu') -> th.Tensor:
-    r'''
+    r"""
     Generate the indices of all lattices within r_cut_off for each input cell.
     return the supercell indices with shape (n_cell, 3) where "3" represents expansion directions.
 
@@ -11,9 +11,9 @@ def supercells(cell_vectors:th.Tensor, r_cut_off:float, device:str|th.device='cp
         cell_vectors: Tensor(n_batch, 3, 3), a batch of lattice vectors.
         r_cut_off: float, the cut-off radius.
         device: str, the device that calculation performed.
-    
+
     Returns: Tensor(n_cell, 3), the tensor of all supercell indices for the given batch.
-    '''
+    """
     # Volume, Areas, and Height of cells
     V = th.linalg.det(cell_vectors) # (n_batch)
     s_ab = th.linalg.cross(cell_vectors[:,0,:], cell_vectors[:,1,:]) # (n_batch, 3)

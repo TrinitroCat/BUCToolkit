@@ -10,6 +10,7 @@ import time
 import traceback
 import warnings
 from itertools import accumulate
+import hashlib
 from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple, Any, Hashable
 
 import multiprocessing as mp
@@ -106,6 +107,8 @@ class BatchStructures(object):
         self.Dist_mat_ = None  # distance matrices of structures. None | List[np.NdArray[N, N]]
         # Others
         self.Labels_ = None  # structure labels
+        # Security
+        self._checksum = None
 
         # logging
         self.logger = logging.getLogger('Main.BS')
@@ -124,6 +127,19 @@ class BatchStructures(object):
     @Sample_ids.setter
     def Sample_ids(self, val):
         raise ValueError('Sample_ids cannot be modified')
+
+    def _generate_checksum_in_mem(self, ):
+        checksum = hashlib.sha256()
+        checksum.update(pickle.dumps(self))
+        return checksum.hexdigest()
+
+    def _hash_check_in_mem(self, ):
+        if self._checksum is None:
+            warnings.warn('Could not check data integrity due to missing checksum. It would be generate right now.', RuntimeWarning)
+            self._checksum = self._generate_checksum_in_mem()
+        else:
+            if self._checksum != self._generate_checksum_in_mem():
+                raise RuntimeError('Hash check failed. Data might be modified.')
 
     def _clear_np(self, ):
         """
@@ -158,12 +174,23 @@ class BatchStructures(object):
         self.Fixed = np.split(self.Fixed_, self.Batch_indices_[1:-1], )
         if self.Forces_ is not None: self.Forces = np.split(self.Forces_, self.Batch_indices_[1:-1], )
 
-        self.Numbers = np.split(self.Numbers_, self.Elements_batch_indices_[1:-1], )
-        self.Elements = np.split(self.Elements_, self.Elements_batch_indices_[1:-1], )
+        #self.Numbers = np.split(self.Numbers_, self.Elements_batch_indices_[1:-1], )
+        #self.Elements = np.split(self.Elements_, self.Elements_batch_indices_[1:-1], )
+
+        self.Numbers = [
+            self.Numbers_[_indx: self.Elements_batch_indices_[i+1]].tolist()
+            for i, _indx in enumerate(self.Elements_batch_indices_[:-1])
+        ]
+        self.Elements = [
+            self.Elements_[_indx: self.Elements_batch_indices_[i + 1]].tolist()
+            for i, _indx in enumerate(self.Elements_batch_indices_[:-1])
+        ]
 
         self.Cells = [_ for _ in self.Cells_]
 
         if release_mem:
+            self.Numbers_ = None
+            self.Elements_ = None
             self._Sample_ids = self._Sample_ids_.tolist()
             self._Sample_ids_ = None
             self.Coords_type = self.Coords_type_.tolist()
@@ -198,9 +225,9 @@ class BatchStructures(object):
                 self.Forces_ = np.concatenate(self.Forces, dtype=np.float32)
                 self.Forces = None
             # Element_batch_indices control the Elements, Numbers
-            self.Numbers_ = np.asarray(flatten(self.Numbers), dtype=np.int32)
+            self.Numbers_ = np.asarray(flatten(self.Numbers, 1), dtype=np.int32)
             self.Numbers = list()
-            self.Elements_ = np.asarray(flatten(self.Elements), dtype='<U3')
+            self.Elements_ = np.asarray(flatten(self.Elements, 1), dtype='<U3')
             self.Elements = list()
             # Others are sequentially filled
             self.Cells_ = np.asarray(self.Cells, dtype=np.float32)
@@ -294,7 +321,7 @@ class BatchStructures(object):
             self.Labels_
         )
         if mode == 'w':
-            head_info = {'which_None': set()}
+            head_info = {'which_None': set(), 'n_batch': len(self)}
             for i, filename in enumerate(self._ATTR_NAMES):
                 if _temp_attr_list[i] is not None:
                     _dtype = _temp_attr_list[i].dtype.str
@@ -333,7 +360,7 @@ class BatchStructures(object):
                         raise ValueError(f'The existing data {filename} is not None, while appending data is None. The type of both should match.')
                     _dtype = '|O'
                     _shape = (1,)
-                    head_info['which_None'].add(filename)
+                    new_head_info['which_None'].add(filename)
                 # check consistency of old & new data
                 if old_shape[1:] != _temp_attr_list[i].shape[1:]:
                     raise RuntimeError(f'The existing file has a shape on non-1st dim {old_shape[1:]} '
@@ -355,6 +382,7 @@ class BatchStructures(object):
                     new_head_info[filename] = head_info[filename]
 
             # Update head file
+            new_head_info['n_batch'] = head_info['n_batch'] + len(self)
             with open(os.path.join(path, 'head'), 'wb') as head:
                 head_info = pickle.dumps(new_head_info)
                 head.write(head_info)
@@ -385,18 +413,53 @@ class BatchStructures(object):
             head_info = pickle.load(head)
         # Read mmap file
         _data_dict = dict()
-        for i, filename in enumerate(self._ATTR_NAMES):
-            _dtype, _shape = head_info[filename]
-            if filename not in head_info['which_None']:
-                _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
-                if data_slice is None:
+        if data_slice is None:
+            for i, filename in enumerate(self._ATTR_NAMES):
+                _dtype, _shape = head_info[filename]
+                if filename not in head_info['which_None']:
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
                     _data_dict[filename] = np.asarray(_mmdata)
+                    del _mmdata
+                    gc.collect()
                 else:
+                    _data_dict[filename] = None
+        else:
+            #if data_slice[1] > head_info['n_batch']: raise ValueError(f'`data_slice` out of range. Sample number: {head_info['n_batch']}')
+            _dtype, _shape = head_info['Batch_indices']
+            natom_slice = np.memmap(os.path.join(path, 'Batch_indices'), dtype=_dtype, mode='c', shape=_shape)
+            natom_slice = np.asarray(natom_slice[data_slice[0] : data_slice[1]+1])
+            _dtype, _shape = head_info['Elements_batch_indices']
+            elem_slice = np.memmap(os.path.join(path, 'Elements_batch_indices'), dtype=_dtype, mode='c', shape=_shape)
+            elem_slice = np.asarray(elem_slice[data_slice[0] : data_slice[1]+1])
+            for filename in ('Coords', 'Fixed', 'Forces'):
+                if filename not in head_info['which_None']:
+                    _dtype, _shape = head_info[filename]
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
+                    _data_dict[filename] = np.asarray(_mmdata[natom_slice[0]:natom_slice[-1]])
+                    del _mmdata
+                    gc.collect()
+                else:
+                    _data_dict[filename] = None
+            for filename in ('Elements', 'Numbers'):
+                if filename not in head_info['which_None']:
+                    _dtype, _shape = head_info[filename]
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
+                    _data_dict[filename] = np.asarray(_mmdata[elem_slice[0]:elem_slice[-1]])
+                    del _mmdata
+                    gc.collect()
+                else:
+                    _data_dict[filename] = None
+            for filename in ('Sample_ids', 'Cells', 'Coords_type', 'Energies', 'Labels'):
+                if filename not in head_info['which_None']:
+                    _dtype, _shape = head_info[filename]
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
                     _data_dict[filename] = np.asarray(_mmdata[data_slice[0]:data_slice[1]])
-                del _mmdata
-                gc.collect()
-            else:
-                _data_dict[filename] = None
+                    del _mmdata
+                    gc.collect()
+                else:
+                    _data_dict[filename] = None
+            _data_dict['Batch_indices'] = natom_slice - natom_slice[0]
+            _data_dict['Elements_batch_indices'] = elem_slice - elem_slice[0]
 
         # load to memory
         if mode == 'w':
@@ -473,7 +536,8 @@ class BatchStructures(object):
         if self.Mode == 'A':
             self._np2list()
             is_convert = True
-        else: is_convert = False
+        else:
+            is_convert = False
 
         try:
             if file_format == 'POSCAR':
@@ -490,7 +554,7 @@ class BatchStructures(object):
                     sub_self.Coords_type,
                     ncore
                 )
-            else: # TODO: write to `xyz`, `cif` format.
+            else:  # TODO: write to `xyz`, `cif` format.
                 raise NotImplementedError
         except Exception as e:
             self.logger.error(f'An error occurred:\n\t{e}\ntraceback:\n\t{traceback.print_exc()}')
@@ -1190,4 +1254,3 @@ class BatchStructures(object):
             'Label': label
         }
         """
-

@@ -50,7 +50,7 @@ def flatten(x, flat_num: int=-1, ncore: int=-1):
         warnings.warn('Windows OS does not support multi-process yet. `ncore` was automatically set to 1.', RuntimeWarning)
         ncore = 1
 
-    n_chunk = len(x)//ncore
+    n_chunk = len(x)//(ncore - 1)
     if n_chunk == 0: n_chunk = len(x)
     # Process Pools
     pools = mp.Pool(ncore)
