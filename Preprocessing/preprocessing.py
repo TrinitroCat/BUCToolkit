@@ -27,7 +27,7 @@ from torch_geometric.data import Data as pygData
 from torch_geometric.data import Batch as pygBatch
 
 from .load_files import POSCARs2Feat, load_from_csv
-from .supercells import supercells
+from .supercells import supercells_indices_within_cutoff
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
 
 
@@ -231,81 +231,7 @@ def EIGENVAL2array(file='./EIGENVAL', *args, **kwargs) -> Tuple[np.ndarray[Any, 
     return k_coords[:, :-1], eigs
 
 
-class Feat2LMDB():  # TODO: Imperfect.
-    r""" Convert tensor type features into LMDB """
-
-    def __init__(self, lmdb_path: str, max_alloc_memory: int = 10737418240) -> None:
-        self.lmdb_path = lmdb_path
-        self.max_alloc_memory = max_alloc_memory
-
-    def write(self, ids: List[str], cells: List[th.Tensor], atoms: List[th.Tensor], coords: List[th.Tensor], labels: List, progress_bar: bool = False) -> None:
-        """
-        
-        """
-        if len(ids) != len(cells) != len(atoms) != len(coords) != len(labels):
-            raise ValueError(f'ids, cells, atoms, coords, and labels must have the same length, but occurred {len(ids), len(cells), len(atoms), len(coords), len(labels)}')
-        try:
-            env = lmdb.open(self.lmdb_path, map_size=self.max_alloc_memory)
-            k = 1
-
-            for i, id_ in enumerate(ids):
-                txn = env.begin(write=True)
-                # load data
-                n_atom = len(atoms[i])
-                _key = f'{n_atom}'.encode()
-                # check whether n_atom in dict
-                _batch = txn.get(_key)
-                if _batch is None:
-                    _batch = [[], [], [], [], []]  # [id, cell, atoms, coords, label]
-                else:
-                    _batch = pkl.loads(_batch)
-                # insert data
-                _batch[0].append(id_)
-                _batch[1].append(cells[i])
-                _batch[2].append(atoms[i])
-                _batch[3].append(coords[i])
-                _batch[4].append(labels[i])
-                # write in lmdb
-                txn.put(key=_key, value=pkl.dumps(_batch))
-                txn.commit()
-                # progress bar
-                if progress_bar:
-                    _prog_piece = len(ids) // 20
-                    if i > _prog_piece * k:
-                        print(f'PROGRESS: ' + '>' * k + f'{100 * (i / len(ids)):.2f}%', end='\r')
-                        k += 1
-
-        except Exception as e:
-            print(f'An ERROR occurred.\nERROR: {e}')
-            traceback.print_exc()
-
-        finally:
-            env.close()  # type: ignore
-
-    def read(self, keys: Sequence):
-        """
-        """
-        try:
-            env = lmdb.open(self.lmdb_path, map_size=self.max_alloc_memory)
-
-            batch_dict = dict()
-            for k in keys:
-                _key = k.encode()
-                txn = env.begin()
-
-                if k not in batch_dict:
-                    batch_dict[k] = list()
-
-                batch_dict[k].append(pkl.loads(txn.get(key=_key)))
-
-        except Exception as e:
-            print(f'An ERROR occurred.\nERROR: {e}')
-
-        finally:
-            env.close()  # type: ignore
-            return batch_dict  # type: ignore
-
-
+'''
 class Create_Graphs():  # TODO: Deprecated.
     r"""
     Create DGL-type graphs and I/O created graphs list.
@@ -553,9 +479,9 @@ class Create_Graphs():  # TODO: Deprecated.
             _dat = self.create_overlap(*tb_, device=device)
             graph_list.extend(_dat)
         return graph_list
+'''
 
-
-class Create_ASE():
+class Create_ASE:
     r"""
     Create a List[ASE.Atoms] by input crystal information.
 

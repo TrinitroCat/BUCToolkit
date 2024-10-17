@@ -1,16 +1,19 @@
 """
 FIRE Optimization Algorithm. Phys. Rev. Lett., 2006, 97:170201.
 """
-
-from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
+import logging
+import sys
 import time
 import warnings
+from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
+import numpy as np
 import torch as th
 from torch import nn
-from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
 
-from ..._Masses import MASS, N_MASS
+from BM4Ckit._Masses import MASS, N_MASS
+from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
+from .._utils._warnings import FaildToConvergeWarning
 
 
 class FIRE:
@@ -61,6 +64,16 @@ class FIRE:
 
         self.device = device
         self.verbose = verbose
+
+        # logger
+        self.logger = logging.getLogger('Main.OPT')
+        self.logger.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(message)s')
+        if not self.logger.hasHandlers():
+            log_handler = logging.StreamHandler(sys.stdout, )
+            log_handler.setLevel(logging.INFO)
+            log_handler.setFormatter(formatter)
+            self.logger.addHandler(log_handler)
 
     def run(self,
             func: Any | nn.Module, X: th.Tensor, grad_func: Any | nn.Module = None,
@@ -153,9 +166,9 @@ class FIRE:
             F = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
         if self.verbose:
-            print('-' * 100)
-            print('Iteration Scheme: FIRE')
-            print('-' * 100)
+            self.logger.info('-' * 100)
+            self.logger.info('Iteration Scheme: FIRE')
+            self.logger.info('-' * 100)
         # MAIN LOOP
         ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         for i in range(self.maxiter):  # Simple Euler
@@ -166,11 +179,14 @@ class FIRE:
                 E_eps = th.abs(y - y0)
                 F_eps = th.abs(F)
                 converge_mask = (E_eps < self.E_threshold).unsqueeze(-1).unsqueeze(-1) * (F_eps < self.F_threshold)
-                if self.verbose > 0: print(f'ITERATION {i:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, '
+                if self.verbose > 0: self.logger.info(f'ITERATION {i:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, '
                                            f'MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s')
-                if self.verbose > 1: print(f'Energies: {y.detach().cpu().numpy()}')
-                if self.verbose > 1: print(f'step length: {t[:, 0, 0].squeeze().detach().cpu().numpy()}')
-                if self.verbose > 1: print(f'Converged: {th.all(converge_mask, dim=(1, 2)).cpu().numpy()}\n')
+                if self.verbose > 1:
+                    X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    self.logger.info(f'\n{X_str}\n')
+                    self.logger.info(f'Energies: {y.detach().cpu().numpy()}')
+                    self.logger.info(f'step length: {t[:, 0, 0].squeeze().detach().cpu().numpy()}')
+                    self.logger.info(f'Converged: {th.all(converge_mask, dim=(1, 2)).cpu().numpy()}\n')
                 # Criteria
                 if th.all(converge_mask):
                     is_main_loop_converge = True
@@ -206,9 +222,9 @@ class FIRE:
 
         if self.verbose > 0:
             if is_main_loop_converge:
-                print('-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s')
+                self.logger.info('-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s')
             else:
-                print('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
+                self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
         else:
             if not is_main_loop_converge: warnings.warn('Some Structures were NOT Converged yet!', FaildToConvergeWarning)
         # output

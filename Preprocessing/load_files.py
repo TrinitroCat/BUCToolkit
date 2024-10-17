@@ -253,7 +253,7 @@ class POSCARs2Feat(BatchStructures):
         atom_coord = np.array(atom_coord, dtype=np.float32)
         atom_fixed = np.array(atom_fixed, dtype=np.int8)
 
-        if self.Coords_type == in_coord_type:
+        if self.Coords_type[0] == in_coord_type:
             pass
         elif in_coord_type == 'D':
             atom_coord = atom_coord @ cell
@@ -528,8 +528,9 @@ class OUTCAR2Feat(BatchStructures):
             self.Energies.extend(energies)
             self.Forces.extend(forces)
             self.Fixed.extend(fixed)
+            self.Coords_type.append('C')
 
-    def read_files(self, file_list: Optional[List[str]] = None, n_core: int = -1, backend: str = 'loky'):
+    def read(self, file_list: Optional[List[str]] = None, n_core: int = -1, backend: str = 'loky'):
         r"""
         Parameters:
             file_list: List[str], the list of files to read. Default for all files under given path.
@@ -574,6 +575,7 @@ class OUTCAR2Feat(BatchStructures):
                 self.Energies.extend(temp[5])
                 self.Forces.extend(temp[6])
                 self.Fixed.extend(temp[7])
+            self.Coords_type.extend(['C', ] * len(_dat))
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
 
 
@@ -596,11 +598,11 @@ class ASEDB2Feat(BatchStructures):
 if __name__ == '__main__':
     tst = time.perf_counter()
     f = OUTCAR2Feat('/DataBases/PropDehydro/OUTCARs', verbose=1)
-    f.read_files(n_core=6, )
+    f.read(n_core=6, )
     print(f'TIME: {-tst + time.perf_counter()}')
     del f
     tst = time.perf_counter()
     f = OUTCAR2Feat('/DataBases/PropDehydro/OUTCARs', verbose=1)
-    f.read_files(n_core=1, )
+    f.read(n_core=1, )
     print(f'TIME: {-tst + time.perf_counter()}')
     pass

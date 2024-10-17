@@ -1,5 +1,8 @@
-# ruff: noqa: E701, E702, E703, F401
-
+""" Conjugate gradient algorithm for structure optimization """
+import logging
+import sys
+import time
+import warnings
 from typing import (
     Dict,
     Any,
@@ -7,13 +10,14 @@ from typing import (
     Optional,
     Sequence,
 )
-import time
-import warnings
 
+import numpy as np
 import torch as th
 from torch import nn
-from BM4Ckit.BatchOptim._utils._line_search import _LineSearch
-from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
+
+from .._utils._line_search import _LineSearch
+from .._utils._warnings import FaildToConvergeWarning
+from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class CG:
@@ -67,9 +71,7 @@ class CG:
 
         """
         warnings.filterwarnings("always", category=FaildToConvergeWarning)
-        warnings.filterwarnings(
-            "always",
-        )
+        warnings.filterwarnings("always")
 
         self.iterform: str = iter_scheme
         self.linesearch: str = linesearch
@@ -86,9 +88,20 @@ class CG:
             steplength=steplength,
             factor=linesearch_factor,
         )
+        assert (maxiter > 0) and isinstance(maxiter, int), f'Invalid `maxiter` value: {maxiter}. It must be a positive integer.'
         self.E_threshold = E_threshold
         self.F_threshold = F_threshold
         self.maxiter = maxiter
+
+        # logger
+        self.logger = logging.getLogger('Main.OPT')
+        self.logger.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(message)s')
+        if not self.logger.hasHandlers():
+            log_handler = logging.StreamHandler(sys.stdout, )
+            log_handler.setLevel(logging.INFO)
+            log_handler.setFormatter(formatter)
+            self.logger.addHandler(log_handler)
 
     def run(
             self,
@@ -190,11 +203,11 @@ class CG:
         converge_mask = th.full(
             (n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool
         )
-        ptlist = [X[:, None, :, 0].numpy(force=True)]
+        ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<
         if self.verbose:
-            print("-" * 100)
-            print(f"Iteration Scheme: {self.iterform}")
-            print("-" * 100)
+            self.logger.info("-" * 100)
+            self.logger.info(f"Iteration Scheme: {self.iterform}")
+            self.logger.info("-" * 100)
         # MAIN LOOP
         for numit in range(maxiter):  # type: ignore
             # backward & obtain grad
@@ -232,21 +245,24 @@ class CG:
                 if th.all(converge_mask):
                     is_main_loop_converge = True
                     if self.verbose > 0:
-                        print(
+                        self.logger.info(
                             f"ITERATION {numit:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s"
                         )
                     if self.verbose > 1:
-                        print(f"Energies: {energies.detach().cpu().numpy()}")
-                    if self.verbose > 1:
-                        print(f"Converged: {converge_mask[:, 0, 0].cpu().numpy()}\n")
+                        X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        self.logger.info(f'\n{X_str}\n')
+                        self.logger.info(f"Energies: {energies.detach().cpu().numpy()}")
+                        self.logger.info(f"Converged: {converge_mask[:, 0, 0].cpu().numpy()}\n")
                     break
                 # Verbose
                 if self.verbose > 0:
-                    print(
+                    self.logger.info(
                         f"ITERATION {numit:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s"
                     )
                 if self.verbose > 1:
-                    print(f"Energies: {energies.detach().cpu().numpy()}")
+                    X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    self.logger.info(f'\n{X_str}\n')
+                    self.logger.info(f"Energies: {energies.detach().cpu().numpy()}")
                 t_st = time.perf_counter()
 
                 # Conj. form
@@ -271,7 +287,7 @@ class CG:
                     is_restart = (ggo >= 0) * (gg > ggo) * (gogo >= gg)
                     beta = th.where(is_restart, 0.0, beta)
                     if self.verbose > 1:
-                        print(f"Restart: {is_restart.flatten().cpu().numpy()}")
+                        self.logger.info(f"Restart: {is_restart.flatten().cpu().numpy()}")
                     # update old grad
                     g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
                     # update directions
@@ -295,26 +311,26 @@ class CG:
             )
             with th.no_grad():
                 if self.verbose > 1:
-                    print(
+                    self.logger.info(
                         f"step length: {alpha[:, 0, 0].squeeze().detach().cpu().numpy()}"
                     )
                 if self.verbose > 1:
-                    print(f"Converged: {converge_mask[:, 0, 0].cpu().numpy()}\n")
+                    self.logger.info(f"Converged: {converge_mask[:, 0, 0].cpu().numpy()}\n")
                 # update X
                 X = X + alpha * p.view(n_batch, n_atom, n_dim) # (n_batch, n_atom, 3) + (n_batch, 1, 1) * (n_batch, n_atom, 3) * (n_batch, n_atom, 3)
-                ptlist.append(X[:, None, :, 0].numpy(force=True))  # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                 # Check NaN
                 if th.any(energies != energies):
                     raise RuntimeError(f"NaN Occurred in output: {energies}")
 
         if self.verbose > 0:
             if is_main_loop_converge:
-                print(
+                self.logger.info(
                     "-" * 100
                     + f"\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s"
                 )
             else:
-                print(
+                self.logger.info(
                     "-" * 100
                     + "\nSome Structures were NOT Converged yet!\nMAIN LOOP Done."
                 )
@@ -328,4 +344,4 @@ class CG:
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X, ptlist  # type: ignore
+            return energies, X, ptlist  # test <<<<<<<<<<<<<<<<

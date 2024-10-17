@@ -46,7 +46,7 @@ class Energy_Force_Loss(nn.Module):
         self.coeff_F = coeff_F
     
     def forward(self, pred:Dict[Literal['energy', 'forces'], th.Tensor], label:Dict[Literal['energy', 'forces'], th.Tensor]):
-        loss = self.coeff_E * self.loss_E(label['energy'], pred['energy']) + self.coeff_F * self.loss_F(label['forces'], pred['forces'])
+        loss = self.coeff_E * self.loss_E(pred['energy'], label['energy']) + self.coeff_F * self.loss_F(pred['forces'], label['forces'])
         return loss
 
 class Energy_Loss(nn.Module):
@@ -61,16 +61,19 @@ class Energy_Loss(nn.Module):
         label: Dict[Literal['energy'], th.Tensor], labels.
 
     """
-    def __init__(self,
-                 loss_E: Literal['MAE', 'MSE'] | nn.Module = 'MAE',) -> None:
+    def __init__(self, loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE',) -> None:
         super().__init__()
         if loss_E == 'MAE':
+            self.loss_E = nn.L1Loss()
+        elif loss_E == 'SmoothMAE':
             self.loss_E = nn.SmoothL1Loss()
         elif loss_E == 'MSE':
             self.loss_E = nn.MSELoss()
+        elif loss_E == 'Huber':
+            self.loss_E = nn.HuberLoss()
         else:
             self.loss_E = loss_E
 
     def forward(self, pred: Dict[Literal['energy'], th.Tensor], label: Dict[Literal['energy'], th.Tensor]):
-        loss = self.loss_E(label['energy'], pred['energy'])
+        loss = self.loss_E(pred['energy'], label['energy'])
         return loss

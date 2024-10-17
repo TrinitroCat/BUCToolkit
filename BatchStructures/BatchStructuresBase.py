@@ -268,7 +268,7 @@ class BatchStructures(object):
             id_set = set(self._Sample_ids_.tolist())
 
         if len(id_set) != len(self):
-            raise RuntimeError('There are duplicate names in the Sample_ids')
+            raise RuntimeError(f'There are duplicate names in the Sample_ids: {set([x for x in self._Sample_ids if self._Sample_ids.count(x) > 1])}')
 
     def save2file(self, path: str, mode: Literal['w', 'a'] = 'w'):
         """
@@ -362,7 +362,7 @@ class BatchStructures(object):
                     _shape = (1,)
                     new_head_info['which_None'].add(filename)
                 # check consistency of old & new data
-                if old_shape[1:] != _temp_attr_list[i].shape[1:]:
+                if old_shape[1:] != _shape[1:]:
                     raise RuntimeError(f'The existing file has a shape on non-1st dim {old_shape[1:]} '
                                        f'does not match the new data {_temp_attr_list[i].shape[1:]}')
                 if old_dtype != _dtype:

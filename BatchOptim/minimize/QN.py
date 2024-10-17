@@ -1,12 +1,16 @@
 # ruff: noqa: E701, F401, E703
+import logging
+import sys
 from typing import Dict, Any, Literal, Optional, Sequence
 import time
 import warnings
 
+import numpy as np
 import torch as th
 from torch import nn
 from BM4Ckit.BatchOptim._utils._line_search import _LineSearch
 from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
+from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class QN:
@@ -71,7 +75,16 @@ class QN:
         self.E_threshold = E_threshold
         self.F_threshold = F_threshold
         self.maxiter = maxiter
-        pass
+
+        # logger
+        self.logger = logging.getLogger('Main.OPT')
+        self.logger.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(message)s')
+        if not self.logger.hasHandlers():
+            log_handler = logging.StreamHandler(sys.stdout, )
+            log_handler.setLevel(logging.INFO)
+            log_handler.setFormatter(formatter)
+            self.logger.addHandler(log_handler)
 
     def run(self, func: Any | nn.Module, X: th.Tensor, grad_func: Any | nn.Module = None,
             func_args: Sequence = tuple(), func_kwargs: Dict | None = None, grad_func_args: Sequence = tuple(),
@@ -136,7 +149,7 @@ class QN:
         if (not isinstance(maxiter, int)) or (maxiter <= 0):
             raise ValueError(f'Invalid value of maxiter: {maxiter}. It would be an integer greater than 0.')
 
-        # set varibles device
+        # set variables device
         if isinstance(func, nn.Module):
             func = func.to(self.device)
             func.eval()
@@ -187,9 +200,12 @@ class QN:
                 # Verbose
                 if self.verbose > 0: print(
                     f'ITERATION {numit:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s')
-                if self.verbose > 1: print(f'Energies: {energies.detach().cpu().numpy()}')
-                if self.verbose > 1: print(f'step length: {alpha[:, 0, 0].squeeze().detach().cpu().numpy()}')
-                if self.verbose > 1: print(f'Converged: {th.all(converge_mask, dim=(1, 2)).cpu().numpy()}\n')
+                if self.verbose > 1:
+                    print(f'Energies: {energies.detach().cpu().numpy()}')
+                    X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    self.logger.info(f'\n{X_str}\n')
+                    print(f'step length: {alpha[:, 0, 0].squeeze().detach().cpu().numpy()}')
+                    print(f'Converged: {th.all(converge_mask, dim=(1, 2)).cpu().numpy()}\n')
 
                 # judge thres
                 if th.all(converge_mask):
@@ -230,7 +246,7 @@ class QN:
                     # (n_batch, n_atom*n_dim, n_atom*n_dim) - (n_batch, 1, 1) * (n_batch, n_atom*n_dim, 1)@(n_batch, 1, n_atom*n_dim)
                     H_inv = th.where(converge_mask[:, :1, :1],
                                      0.,
-                                     (Ident - gamma * displace @ (g_go.mT)) @ H_inv @ (Ident - gamma * g_go @ (displace.mT)) + gamma * displace @ (displace.mT))
+                                     (Ident - gamma * displace @ g_go.mT) @ H_inv @ (Ident - gamma * g_go @ displace.mT) + gamma * displace @ displace.mT)
 
             elif self.iterform == 'XWW':  # Xiao-Wei-Wang # TODO
                 p = -H_inv @ g  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
@@ -294,4 +310,4 @@ class QN:
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X, ptlist  # type: ignore
+            return energies, X, ptlist  # test <<<

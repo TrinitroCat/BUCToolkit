@@ -1,3 +1,4 @@
 1. To implement the irregular tensor optimization
-2. To implement removing converged samples
-3. To implement the transition state search (NEB, Dimer, etc.)
+2. To output more detailed information of optimization
+3. To implement removing converged samples
+4. To implement the transition state search (NEB, Dimer, etc.)
