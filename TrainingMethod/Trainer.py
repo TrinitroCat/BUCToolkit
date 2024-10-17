@@ -6,7 +6,7 @@ import time
 import os
 import re
 import traceback
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Literal, List
 
 import numpy as np
 
@@ -95,9 +95,9 @@ class Trainer(_CONFIGS):
         n_trn_samp = len(self.TRAIN_DATA['data'])  # sample number
         n_val_samp = len(self.VALID_DATA['data'])
         n_batch = n_trn_samp // self.BATCH_SIZE + 1  # total batch number per epoch
-        history = {'train_loss': list(), 'val_loss': list()}
+        history: Dict[Literal['train_loss', 'val_loss'], List[float]] = {'train_loss': list(), 'val_loss': list()}
         OPTIMIZER.zero_grad()
-        i = 0
+        i = epoch_now
 
         try:
             # I/O
@@ -291,9 +291,10 @@ class Trainer(_CONFIGS):
                 self.logger.info(f'*** STOPPED AT {time.strftime("%Y%m%d_%H:%M:%S")} ***')
                 if self.SAVE_CHK:
                     states = {
-                        'epoch': self.EPOCH,
+                        'epoch': i,
                         'model_state_dict': _model.state_dict(),
                         'optimizer_state_dict': OPTIMIZER.state_dict(),
+                        'val_loss': th.inf
                     }
                     if len(history['val_loss']) == 0:
                         states['val_loss'] = th.inf
