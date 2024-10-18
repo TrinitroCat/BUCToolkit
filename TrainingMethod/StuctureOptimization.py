@@ -185,7 +185,9 @@ class StructureOptimization(_CONFIGS):
                     cell_str = np.array2string(
                         val_data.cell.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " "
                                                                                                          )  # TODO, Support other various type.
-                    self.logger.info(f'Structure names: {val_data.idx.numpy(force=True)}\n')
+                    self.logger.info(f'Structure names: {
+                    str(val_data.idx).replace('[','').replace(']', '').replace(',', '  ')
+                    }\n')
                     self.logger.info(f'Cell Vectors:\n{cell_str}\n')
                     self.logger.info('*' * 100)
 
