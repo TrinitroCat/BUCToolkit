@@ -3,11 +3,13 @@ import time
 import warnings
 from typing import Any
 
+import numpy as np
 import torch as th
 from torch import nn
 
 from BM4Ckit.BatchOptim.minimize import CG, QN, Mix, FIRE
 from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg
+from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class StructureOptimization(_CONFIGS):
@@ -178,7 +180,14 @@ class StructureOptimization(_CONFIGS):
                     continue
                 # relax
                 if self.verbose > 0:
-                    self.logger.info(f'Relaxing Batch {n_c}. Entering Relaxation Main Loop...')
+                    self.logger.info('*' * 100)
+                    self.logger.info(f'Relaxation Batch {n_c}.')
+                    cell_str = np.array2string(
+                        val_data.cell.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " "
+                                                                                                         )  # TODO, Support other various type.
+                    self.logger.info(f'Structure names: {val_data.idx.numpy(force=True)}\n')
+                    self.logger.info(f'Cell Vectors:\n{cell_str}\n')
+                    self.logger.info('*' * 100)
 
                 min_ener, min_x, min_force = optimizer.run(model_wrap.Energy,
                                                            val_data.pos.unsqueeze(0),  # TODO, Support other various type instead of only PygData.

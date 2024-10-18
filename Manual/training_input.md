@@ -38,14 +38,14 @@ The log file name will be f"`time.strftime("%Y%m%d_%H_%M_%S")`_`OUTPUT_POSTFIX`.
   7. "custom": Any, need to set custom loss function manually by `Trainer.set_loss_fn(loss_fn, loss_config: Optional[Dict] = None)`
      
   )
-  * `LOSS_CONFIG`: Dict, the kwargs of `LOSS`.
-    1. for `LOSS` == "Energy_Force_Loss": 
-       * loss_E: Literal["MAE", "MSE"], the loss function of energies.
-       * loss_F: Literal["MAE", "MSE"], the loss function of forces.
-       * coeff_E: float, coefficient of energies loss.
-       * coeff_F: float, coefficient of forces loss.
-    2. for `LOSS` == "Energy_Loss":
-       * loss_E: Literal["MAE", "MSE", "SmoothMAE", "Hubber"], the loss function of energies.
+* `LOSS_CONFIG`: Dict, the kwargs of `LOSS`.
+  1. for `LOSS` == "Energy_Force_Loss": 
+     * loss_E: Literal["MAE", "MSE"], the loss function of energies.
+     * loss_F: Literal["MAE", "MSE"], the loss function of forces.
+     * coeff_E: float, coefficient of energies loss.
+     * coeff_F: float, coefficient of forces loss.
+  2. for `LOSS` == "Energy_Loss":
+     * loss_E: Literal["MAE", "MSE", "SmoothMAE", "Hubber"], the loss function of energies.
        
 * `METRICS`: Tuple of [E_MAE, F_MAE, F_MaxE, E_R2, MSE, MAE, R2, RMSE], the metrics function of training and validation results.
 

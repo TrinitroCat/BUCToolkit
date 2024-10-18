@@ -199,7 +199,7 @@ class CG:
         g_old = th.full(
             (n_batch, n_atom * n_dim, 1), 1e-6, dtype=th.float32, device=self.device
         )  # initial old grad
-        beta = 0.0  # coefficient of conjagate direction: p(k+1) = - g(k) + beta * p(k)
+        beta = 0.0  # coefficient of conjugate direction: p(k+1) = - g(k) + beta * p(k)
         converge_mask = th.full(
             (n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool
         )
