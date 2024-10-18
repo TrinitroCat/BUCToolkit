@@ -8,8 +8,8 @@
   2. 1: load checkpoint from `LOAD_CHK_FILE_PATH`
   
   )
-* `EPOCH`: _int_, number of total epochs that model will train.
-* `BATCH_SIZE`: _int_, batch size of training samples.
+* `EPOCH`: _int_, number of total epochs that model will train. **Default**: 0.
+* `BATCH_SIZE`: _int_, batch size of training samples. **Default**: 1.
 * `VAL_BATCH_SIZE`: _int_, batch size of validation samples. **Default**: the same as `BATCH_SIZE`.
 * `VAL_PER_STEP`: _int_, the validation frequency. Model will validate per `VAL_PER_STEP` training step. **Default**: 10.
 * `ACCUMULATE_STEP`: _int_, the step number of gradient accumulation. **Default**: 1.

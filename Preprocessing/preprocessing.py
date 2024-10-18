@@ -1,44 +1,35 @@
-# Preprocessings
+""" Preprocessing """
 
+import copy
+import importlib
 # basic modules
 import re
-import copy
 import time
-import traceback
-import importlib
-from typing import Dict, Set, Tuple, List, Optional, Sequence, Any, Union
 import warnings
-import dgl
-
-import lmdb
-
-import pickle as pkl
-
-import torch as th
-
-import numpy as np
+from typing import Dict, Set, Tuple, List, Sequence, Any, Union
 
 import joblib as jb
+import numpy as np
+import torch as th
 
-import ase
-
-import torch_geometric as pyg
-from torch_geometric.data import Data as pygData
-from torch_geometric.data import Batch as pygBatch
-
-from .load_files import POSCARs2Feat, load_from_csv
-from .supercells import supercells_indices_within_cutoff
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
 
 
-# Check modules func # TODO
-def check_module(module_name):
+# Check modules func
+def check_module(module_name, pkg_name: None | str = None):
     try:
-        pkg = importlib.import_module(module_name)
+        pkg = importlib.import_module(module_name, pkg_name)
         return pkg
     except ImportError:
         warnings.warn(f'Package {module_name} was not found, therefore some related methods would be unavailable.')
+        return None
 
+
+ase = check_module('ase')
+_pyg = check_module('torch_geometric.data')
+if _pyg is not None:
+    pygData = _pyg.Data
+else: pygData = None
 
 """ Constance """
 ALL_ELEMENT = {'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
@@ -52,7 +43,7 @@ ALL_ELEMENT = {'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg',
 """ screening samples """
 
 
-class Screen_samp_by_element():
+class ScreenSampleByElement:
     """
     Screening samples by given conditions.
 
@@ -231,257 +222,7 @@ def EIGENVAL2array(file='./EIGENVAL', *args, **kwargs) -> Tuple[np.ndarray[Any, 
     return k_coords[:, :-1], eigs
 
 
-'''
-class Create_Graphs():  # TODO: Deprecated.
-    r"""
-    Create DGL-type graphs and I/O created graphs list.
-
-    Saved Graph information:
-        edges: the atom pair with distance less than r_cut_off
-        node_features['Z']: the atomic number
-        node_features['X']: the atomic coordinates
-        edge_features['R']: the coordinates difference between 2 nodes
-
-    Init Parameters:
-        r_cut_off: float, spatial distance cut-off. Unit: Angstrom.
-
-    Methods:
-        create_primitive:
-            parameters:
-                cell_vectors: tensor with shape (batch_size, 3, 3), batch of cell vectors.
-                atomic_numbers: tensor with shape (batch_size, n_atom), batch of atomic numbers in each cell.
-                atomic_coordinates: tensor with shape (batch_size, n_atom, 3), batch of Cartesian coordinates x,y,z in each cell.
-                supercell_index: tensor with shape (3,), the index of cell with respect to the original cell.
-            return:
-                List[dgl.Graph] with length batch_size
-
-        create_supercells:
-            parameters:
-                cell_vectors: tensor with shape (batch_size, 3, 3), batch of cell vectors.
-                atomic_numbers: tensor with shape (batch_size, n_atom), batch of atomic numbers in each cell.
-                atomic_coordinates: tensor with shape (batch_size, n_atom, 3), batch of Cartesian coordinates x,y,z in each cell.
-                supercell_index: tensor with shape (3,), the index of cell with respect to the original cell.
-            return:
-                List[dgl.Graph] with length batch_size
-        
-        create_overlap:
-            parameters:
-                cell_vectors: tensor with shape (batch_size, 3, 3), batch of cell vectors.
-                atomic_numbers: tensor with shape (batch_size, n_atom), batch of atomic numbers in each cell.
-                atomic_coordinates: tensor with shape (batch_size, n_atom, 3), batch of Cartesian coordinates x,y,z in each cell.
-                supercell_index: tensor with shape (3,), the index of cell with respect to the original cell.
-            return:
-                List[dgl.Graph] with length batch_size
-
-        create_save:
-            parameters:
-                path: str, the path to save graphs.
-                cell_vectors: tensor with shape (batch_size, 3, 3), batch of cell vectors.
-                atomic_numbers: tensor with shape (batch_size, n_atom), batch of atomic numbers in each cell.
-                atomic_coordinates: tensor with shape (batch_size, n_atom, 3), batch of Cartesian coordinates x,y,z in each cell.
-                supercell_index: tensor with shape (3,), the index of cell with respect to the original cell.
-            return:
-                None
-    """
-
-    def __init__(self, r_cut_off: float = 6., verbose: int = 0, *args, **kwargs) -> None:
-        super().__init__()
-        self.r_cut_off = r_cut_off
-        self.verbose = verbose
-
-    def _overlap_int(self, a: th.Tensor, R1: th.Tensor, R2: th.Tensor):
-        r"""
-        a: (n_batch, n_atom, n_zeta)
-        R1: (n_batch, n_atom, 3)
-        R2: (n_batch, n_supercell, n_atom, 3)
-        """
-        if th.any(a <= 0): raise ValueError('exponential "a" must be greater than 0.')
-        a1, a2 = th.broadcast_tensors(a.unsqueeze(2), a.unsqueeze(1))  # (n_batch, n_atom, n_atom, n_zeta)
-        zeta: th.Tensor = -a1 * a2 / (a1 + a2)  # (n_batch, n_atom, n_atom, n_zeta)
-        r_AB = R1.unsqueeze(1).unsqueeze(-2) - R2.unsqueeze(2)  # (n_batch, n_supercell, n_atom1, n_atom2, 3)
-        y = ((th.pi / ((a1 + a2).unsqueeze(1))) ** 1.5) * th.exp(zeta.unsqueeze(1) * (th.norm(r_AB, p=2, dim=-1,
-                                                                                              keepdim=True)) ** 2)  # (n_batch, 1, n_atom1, n_atom2, n_zeta) * ((n_batch, n_supercell, n_atom1, n_atom2, 3) @ (..., 3, 1)) -> (n_batch, n_supercell, n_atom1, n_atom2, n_zeta)
-        y = th.sum(y, dim=(1,))  # (n_batch, n_atom1, n_atom2, n_zeta)
-        return y
-
-    def create_primitive(self,
-                         cell_vectors: th.Tensor,
-                         atomic_numbers: th.Tensor,
-                         atomic_coordinates: th.Tensor) -> List[dgl.DGLGraph]:
-        r"""
-        Creat a list of Hetrogeneous graphs that G({Atom-Bond-Atom}, {Cell-Dispersion-Cell})
-        """
-        # TODO
-        raise NotImplementedError
-        device = atomic_coordinates.device
-        n_batch, n_atom = atomic_numbers.shape
-        supercell_indices = supercells(cell_vectors, self.r_cut_off, device=device)  # (n_cell, 3)
-        n_cell = len(supercell_indices)
-        # calculate cross-cell dist.; cell_diff = supercell_indices @ cell_vec; <<<
-        # shape: (1, n_prim_cells, 1, 3)@(n_batch, 1, 3, 3) -> (n_batch, n_prim_cells, 1, 3)
-        cell_diff = (supercell_indices.unsqueeze(-2).unsqueeze(0)) @ (cell_vectors.unsqueeze(1))
-        cell_diff.squeeze_(-2)  # (n_batch, n_prim_cells, 3)
-        # calculate in-cell coordinate dist.
-        # shape: (n_batch, n_atom, 1, 3) - (n_batch, 1, n_atom, 3) -> (n_batch, n_atom, n_atom, 3)
-        coord_diff = atomic_coordinates.unsqueeze(2) - atomic_coordinates.unsqueeze(1)
-        # dist. mat.: shape: (n_batch, n_atom, n_atom)
-        sparse_dist = th.linalg.norm(coord_diff, ord=2, dim=-1)
-        # gaussian dist: dist = e^(-a*(R)^2), where a = 9.2103/r_cutoff^2 to ensure dist < 1e-4 when R > r_cutoff
-        sparse_dist = (th.where(sparse_dist < self.r_cut_off, th.exp(-(9.2103 / (self.r_cut_off) ** 2) * (sparse_dist) ** 2), 0.)).to_sparse()
-
-        Graph_list = list()
-        for batch_indx, samp in enumerate(sparse_dist):
-            index = (samp.coalesce()).indices()
-            sing_gra_dict = {('Atom', 'Bond', 'Atom'): (index[0], index[1]),
-                             ('Cell', 'Dispersion', 'Cell'): (th.zeros(n_cell, dtype=th.int32, device=device), th.arange(0, n_cell, dtype=th.int32, device=device))}
-            n_node_dict = {'Atom': n_atom, 'Cell': n_cell}
-            single_graph: dgl.DGLHeteroGraph = dgl.heterograph(sing_gra_dict, n_node_dict)  # type: ignore
-            single_graph.nodes['Atom'].data['Z'] = atomic_numbers[batch_indx]
-            single_graph.nodes['Atom'].data['X'] = atomic_coordinates[batch_indx]
-            single_graph.edges['Bond'].data['R'] = coord_diff[batch_indx, index[0], index[1]]
-            single_graph.edges['Dispersion'].data['R'] = cell_diff[batch_indx]
-            Graph_list.append(single_graph)
-
-        return Graph_list
-
-    def create_supercells(self,
-                          cell_vectors: th.Tensor,
-                          atomic_numbers: th.Tensor,
-                          atomic_coordinates: th.Tensor,
-                          device: th.device | str | None = None) -> List[dgl.DGLGraph]:
-        r"""
-        Creat a list of DGLGraph that Nodes are all atoms in r_cut_off.
-        """
-        # TODO
-        raise NotImplementedError
-        if device is None:
-            device = atomic_coordinates.device
-        else:
-            cell_vectors = cell_vectors.to(device)
-            atomic_numbers = atomic_numbers.to(device)
-            atomic_coordinates = atomic_coordinates.to(device)
-        supercell_indices = supercells(cell_vectors, self.r_cut_off, device=device)  # (n_cell, 3)
-        # calculate cross-cell dist.; cell_diff = supercell_indices @ cell_vec; <<<
-        # shape: (1, n_prim_cells, 1, 3)@(n_batch, 1, 3, 3) -> (n_batch, n_prim_cells, 1, 3)
-        cell_diff = (supercell_indices.unsqueeze(-2).unsqueeze(0)) @ (cell_vectors.unsqueeze(1))
-        # calculate the atom coords across cells (x_j + R_k) <<<
-        # shape: (n_batch, 1, n_atom, 3) + (n_batch, n_prim_cells, 1, 3)
-        #     -> (n_batch, n_prim_cells, n_atom, 3) -flat-> (n_batch, n_prim_cells*n_atom, 3)
-        coord_cross = atomic_coordinates.unsqueeze(1) + cell_diff
-        n_batch, n_prim_cells, n_atom, _ = coord_cross.shape
-        coord_cross = coord_cross.flatten(1, 2)
-        # calculate actual dist. vec.; dist_vec = r_ijk = ||x_i - (x_j + R_k)|| where R_k is the cell vector; <<<
-        # shape: (n_batch, n_atom, 1, 3) - (n_batch, 1, n_prim_cells*n_atom, 3)
-        #        -> (n_batch, n_atom, n_prim_cells*n_atom, 3)  # coord_diff
-        #   -norm-> (n_batch, n_atom, n_prim_cells*n_atom)    # euclid distance
-        distance = atomic_coordinates.unsqueeze(2) - coord_cross.unsqueeze(1)
-        distance = th.linalg.norm(distance, ord=2, dim=-1)
-        # cut-off to create COO sparse tensor of pairwise distance. Indices: (ind_batch, ind_atom1, ind_atom2); Values: distance.
-        sparse_distance = (th.where(distance < self.r_cut_off, th.exp(-(9.2103 / (self.r_cut_off) ** 2) * (distance) ** 2), 0.))
-        sparse_distance = sparse_distance.to_sparse()
-
-        # update atomic number tensor
-        atomic_numbers = th.broadcast_to(atomic_numbers.unsqueeze(1), (n_batch, n_prim_cells, n_atom))  # (n_batch, n_atom) -brod-> (n_batch, n_prim_cells, n_atom)
-        atomic_numbers = th.flatten(atomic_numbers, -2, -1)
-        #atomic_numbers = th.broadcast_to(atomic_numbers, (n_batch, n_atom, n_atom*n_prim_cells))
-
-        # generate graph
-        Graph_list = list()
-        for batch_indx, samp in enumerate(sparse_distance):
-            index = (samp.coalesce()).indices()
-            single_graph = dgl.graph((index[0], index[1]), num_nodes=n_prim_cells * n_atom)
-            single_graph.ndata['Z'] = atomic_numbers[batch_indx]
-            single_graph.ndata['X'] = coord_cross[batch_indx]
-            single_graph.edata['R'] = distance[batch_indx, index[0], index[1]]
-            Graph_list.append(single_graph)
-
-        return Graph_list
-
-    def create_overlap(self,
-                       cell_vectors: th.Tensor | np.ndarray,
-                       atomic_numbers: th.Tensor | np.ndarray,
-                       atomic_coordinates: th.Tensor | np.ndarray, *,
-                       zeta_range: Tuple[float, float, int] = (0.2, 10, 30), overlap_thres: float = 1e-5,
-                       device: str | th.device | None = None
-                       ) -> List[dgl.DGLGraph]:
-        r"""
-        
-        """
-        if isinstance(cell_vectors, np.ndarray):
-            cell_vectors = th.from_numpy(cell_vectors)
-        if isinstance(atomic_numbers, np.ndarray):
-            atomic_numbers = th.from_numpy(atomic_numbers)
-        if isinstance(atomic_coordinates, np.ndarray):
-            atomic_coordinates = th.from_numpy(atomic_coordinates)
-
-        n_batch, n_atom, _ = atomic_coordinates.shape
-        a = (th.linspace(*zeta_range, device=device)).unsqueeze(0).unsqueeze(0)  # alpha, coeff of exp.
-        a = th.broadcast_to(a, (n_batch, n_atom, -1))
-        if device is None:
-            device = atomic_coordinates.device
-        else:
-            cell_vectors = cell_vectors.to(device)
-            atomic_coordinates = atomic_coordinates.to(device)
-            atomic_numbers = atomic_numbers.to(device)
-
-        supercell_indices = supercells(cell_vectors, self.r_cut_off, device=device)  # (n_cell, 3)
-        # calculate cross-cell dist.; cell_diff = supercell_indices @ cell_vec; <<<
-        # shape: (1, n_prim_cells, 1, 3)@(n_batch, 1, 3, 3) -> (n_batch, n_prim_cells, 1, 3)
-        cell_diff = (supercell_indices.unsqueeze(-2).unsqueeze(0)) @ (cell_vectors.unsqueeze(1))
-        # calculate the atom coords across cells (x_j + R_k) <<<
-        # shape: (n_batch, 1, n_atom, 3) + (n_batch, n_prim_cells, 1, 3)
-        #     -> (n_batch, n_prim_cells, n_atom, 3)
-        coord_cross = atomic_coordinates.unsqueeze(1) + cell_diff
-        n_batch, n_prim_cells, n_atom, _ = coord_cross.shape
-        # calculate overlap matrix;
-        # shape: (n_batch, n_atom1, n_atom2)
-        overlap = self._overlap_int(a, atomic_coordinates, coord_cross)
-        indices = th.where(overlap[..., 0] > overlap_thres)
-
-        # generate graph
-        Graph_list = list();
-        ori_b_indx = 0;
-        k = 0;
-        k_old = 0;
-        batch_indx = 0;
-        atom1_indx, atom2_indx = indices[1], indices[2]
-        for i, batch_indx in enumerate(indices[0]):
-            if batch_indx == ori_b_indx:
-                k += 1
-            else:
-                single_graph = dgl.graph((atom1_indx[k_old:k], atom2_indx[k_old:k]), num_nodes=n_atom)
-                single_graph.ndata['Z'] = atomic_numbers[batch_indx - 1]
-                single_graph.ndata['X'] = atomic_coordinates[batch_indx - 1]
-                single_graph.edata['R'] = overlap[batch_indx - 1, atom1_indx[k_old:k], atom2_indx[k_old:k]]
-                Graph_list.append(single_graph)
-
-                ori_b_indx += 1
-                k_old = copy.deepcopy(k)
-                k += 1
-        # The last sample
-        single_graph = dgl.graph((atom1_indx[k_old:k], atom2_indx[k_old:k]), num_nodes=n_atom)
-        single_graph.ndata['Z'] = atomic_numbers[batch_indx]
-        single_graph.ndata['X'] = atomic_coordinates[batch_indx]
-        single_graph.edata['R'] = overlap[batch_indx, atom1_indx[k_old:k], atom2_indx[k_old:k]]
-        Graph_list.append(single_graph)
-
-        #Graph_batch = dgl.batch(Graph_list)
-
-        return Graph_list
-
-    def feat2graphs(self, feat: BatchStructures, n_core: int = 1, device: str | th.device | None = None):
-        r"""
-        Conver BatchStructures to list of dgl.graph
-        """
-        graph_list = list()
-        training_batches, val_batches, training_labels, val_labels, training_args, val_args = feat.rearrange(list(range(len(feat._Sample_ids))), 0., n_core, self.verbose)
-        for tb_ in training_batches:
-            _dat = self.create_overlap(*tb_, device=device)
-            graph_list.extend(_dat)
-        return graph_list
-'''
-
-class Create_ASE:
+class CreateASE:
     r"""
     Create a List[ASE.Atoms] by input crystal information.
 
@@ -500,6 +241,9 @@ class Create_ASE:
     """
 
     def __init__(self, verbose: int = 0) -> None:
+        # check model
+        if ase is None:
+            raise ImportError('`CreateASE` requires package `ase` which could not be imported.')
         self.verbose = verbose
         pass
 
@@ -509,7 +253,8 @@ class Create_ASE:
 
         Parameters:
             feat: feat instance that generated by POSCARs2Feat or ConcatPOSCAR2Feat.
-            set_tags: bool, whether set Atoms.tags = np.ones(n_atom) automatically.
+            set_tags: bool, whether set Atoms. tags = np.ones(n_atom) automatically.
+            n_core: number of CPU cores in parallel.
         
         Returns:
             List[ase.Atoms], the list of Atoms instances.
@@ -518,7 +263,8 @@ class Create_ASE:
         feat.generate_atom_list()
         if self.verbose: print('Converting to ASE.Atoms ...')
 
-        def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True), set_tags: bool = True) -> ase.Atoms:
+        def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
+                          set_tags: bool = True) -> ase.Atoms:
             samp = ase.Atoms(symbols=symb, positions=pos, cell=cell, pbc=pbc)
             if set_tags:
                 samp.set_tags(np.ones(len(samp)))
@@ -532,7 +278,8 @@ class Create_ASE:
 
         return ase_list
 
-    def array2ase(self, symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True), set_tags: bool = True, n_core: int = -1) -> List[
+    def array2ase(self, symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
+                  set_tags: bool = True, n_core: int = -1) -> List[
         ase.Atoms]:
         r"""
         Convert to ase.Atoms from the given Sequence of symbols, positions, cell vectors and pbc information.
@@ -549,7 +296,8 @@ class Create_ASE:
         t_st = time.perf_counter()
         if self.verbose: print('Converting to ASE.Atoms ...')
 
-        def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True), set_tags: bool = True) -> ase.Atoms:
+        def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
+                          set_tags: bool = True) -> ase.Atoms:
             samp = ase.Atoms(symbols=symb, positions=pos, cell=cell, pbc=pbc)
             if set_tags:
                 samp.set_tags(np.ones(len(samp)))
@@ -593,12 +341,15 @@ class Create_ASE:
         return ase_dict
 
 
-class Create_PyGdata():
+class CreatePygData:
     r"""
     create torch-geometric.data.Data or Batch from various types.
     """
 
     def __init__(self, verbose: int = 0) -> None:
+        # check module
+        if _pyg is None:
+            raise ImportError('`CreatePygData` requires package `torch-geometric` which could not be imported.')
         self.verbose = verbose
         pass
 
@@ -608,9 +359,6 @@ class Create_PyGdata():
 
         Args:
             atoms (ase.atoms.Atoms): An ASE atoms object.
-
-            sid (uniquely identifying object): An identifier that can be used to track the structure in downstream
-            tasks. Common sids used in OCP datasets include unique strings or integers.
 
         Returns:
             data (torch_geometric.data.Data): A geometric data object with positions, atomic_numbers, tags,
@@ -668,7 +416,7 @@ class Create_PyGdata():
             atomic_numbers = th.tensor(_atomic_numbers)  # type: ignore
             natoms = len(atomic_numbers)
             tags = th.ones_like(atomic_numbers, dtype=th.float32)
-            fixed = th.from_numpy(_fix)#.unsqueeze(0)  # fixme
+            fixed = th.from_numpy(_fix)  #.unsqueeze(0)  # fixme
             pbc = th.tensor([True, True, True])
             # put the minimum data in th geometric data object
             _data = pygData(

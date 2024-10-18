@@ -554,8 +554,7 @@ class OUTCAR2Feat(BatchStructures):
         if n_core == 1:
             if self.verbose: print('Sequential Reading...');print('Progress: 0%', end='\r')
             for i, fi_name in enumerate(file_list):
-                path_ = os.path.join(self.path, fi_name)
-                self._read_single_file(path_, parallel=False)
+                self._read_single_file(fi_name, parallel=False)
                 if self.verbose > 0:
                     if (i + 1) % 50 == 0:
                         prog_ = (i + 1) / len(file_list)

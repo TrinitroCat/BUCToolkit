@@ -142,7 +142,7 @@ class MolecularDynamics(_CONFIGS):
             # MAIN LOOP
             # TODO: print the Batch of `cell vectors` and `atomic numbers`
             model_wrap = _Model_Wrapper_pyg(_model)
-            optimizer = self.MDType(**self.MD_config)
+            mole_dynam = self.MDType(**self.MD_config)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1
             X_dict = dict()
@@ -161,7 +161,7 @@ class MolecularDynamics(_CONFIGS):
 
                 batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
 
-                optimizer.run(model_wrap.Energy,
+                mole_dynam.run(model_wrap.Energy,
                               val_data.pos.unsqueeze(0),  # TODO, Support other various type instead of only PygData.
                               val_data.atomic_numbers.unsqueeze(0).tolist(),
                               V_init=None,  # TODO, Support user-defined initial velocities.

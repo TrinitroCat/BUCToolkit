@@ -18,13 +18,23 @@ from ._io import _CONFIGS, _LoggingEnd
 
 class Trainer(_CONFIGS):
     r"""
-    A Base Trainer class.
+    The Trainer class.
     Users need to set the dataset and dataloader manually.
 
     Args:
         config_file: the path of input file
         verbose: control the verboseness of output
         device: the device that models run on
+
+    Methods:
+        train(model: torch.nn.Module), run model training.
+        set_device(device: str | torch.device), manually set model and data running device.
+        set_loss_fn(loss_fn: Any, loss_config: Optional[Dict] = None), manually set loss function which can be customized.
+        set_metrics(metrics_fn: Dict[str, Callable], metrics_fn_config: Dict[str, Dict] | None = None), manually set metrics functions which can be customized.
+        set_model_config(model_config: Dict[str, Any] | None = None), manually (re)set the configs (hyperparameters) of model.
+        set_lr_scheduler(lr_scheduler: th.optim.lr_scheduler.LRScheduler, lr_scheduler_config: Optional[Dict[str, Any]] = None), set the learning rate scheduler.
+        set_model_param(model_state_dict: Dict, is_strict: bool = True, is_assign: bool = False), manually set model parameters by giving model state dict.
+
     """
 
     def __init__(self, config_file: str, verbose: int = 0, device: str | th.device = 'cpu') -> None:

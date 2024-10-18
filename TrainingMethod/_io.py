@@ -93,7 +93,7 @@ class _CONFIGS(object):
 
     def set_model_config(self, model_config: Dict[str, Any] | None = None) -> None:
         """
-        Set the new configs of model.
+        Set the new configs (hyperparameters) of model.
         """
         if model_config is None: model_config = dict()
         if not isinstance(model_config, Dict): raise TypeError('model_config must be a dictionary.')
@@ -178,8 +178,8 @@ class _CONFIGS(object):
         if self.START == 'resume' or self.START == 1:
             self.LOAD_CHK_FILE_PATH = self.config['LOAD_CHK_FILE_PATH']
             if not isinstance(self.LOAD_CHK_FILE_PATH, str): raise TypeError('LOAD_CHK_FILE_PATH must be a str.')
-        self.EPOCH: int = self.config['EPOCH']
-        self.BATCH_SIZE: int = self.config['BATCH_SIZE']
+        self.EPOCH: int = self.config.get('EPOCH', 0)
+        self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', 1)
         self.VAL_PER_STEP: int = self.config.get('VAL_PER_STEP', 10)
         self.VAL_BATCH_SIZE: int = self.config.get('VAL_BATCH_SIZE', self.BATCH_SIZE)
 
@@ -257,6 +257,9 @@ class _CONFIGS(object):
         formatter = logging.Formatter('%(message)s')
         if self.REDIRECT:
             output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+            # check whether path exist
+            if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
+            # set log handler
             self.log_handler = logging.FileHandler(output_file, 'w', delay=True)
             self.log_handler.setLevel(logging.INFO)
             self.log_handler.setFormatter(formatter)
