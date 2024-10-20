@@ -11,38 +11,46 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BM4Ckit._Masses import MASS, N_MASS
+from BM4Ckit.utils._Masses import MASS, N_MASS
 from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
 from .._utils._warnings import FaildToConvergeWarning
 
 
 class FIRE:
-    r"""
+    def __init__(
+            self,
+            E_threshold: float = 1e-3,
+            F_threshold: float = 0.05,
+            maxiter: int = 100,
+            steplength: float = 1.,
+            alpha: float = 0.1,
+            alpha_fac: float = 0.99,
+            fac_inc: float = 1.1,
+            fac_dec: float = 0.5,
+            N_min: int = 5,
+            device: str | th.device = 'cpu',
+            verbose: int = 2,
+            **kwargs
+    ) -> None:
+        r"""
         FIRE Algorithm for optimization.
 
-        Parameters:
+        Args:
             E_threshold: float, threshold of difference of func between 2 iteration.
             F_threshold: float, threshold of gradient of func.
             maxiter: int, the maximum iteration steps.
             steplength: The initial step length i.e. the BatchMD time step.
+            alpha:
+            alpha_fac:
+            fac_inc:
+            fac_dec:
+            N_min:
             device: The device that program runs on.
             verbose: amount of print information.
 
         Method:
             run: running the main optimization program.
         """
-
-    def __init__(self,
-                 E_threshold: float = 1e-3, F_threshold: float = 0.05, maxiter: int = 100,
-                 steplength: float = 1.,
-                 alpha: float = 0.1,
-                 alpha_fac: float = 0.99,
-                 fac_inc: float = 1.1,
-                 fac_dec: float = 0.5,
-                 N_min: int = 5,
-                 device: str | th.device = 'cpu',
-                 verbose: int = 2,
-                 **kwargs) -> None:
 
         if not (0. < alpha_fac < 1.):
             raise ValueError('alpha_fac must between 0 and 1.')
@@ -75,12 +83,20 @@ class FIRE:
             log_handler.setFormatter(formatter)
             self.logger.addHandler(log_handler)
 
-    def run(self,
-            func: Any | nn.Module, X: th.Tensor, grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(), func_kwargs: Dict | None = None, grad_func_args: Sequence = tuple(), grad_func_kwargs: Dict | None = None,
-            is_grad_func_contain_y: bool = True, output_grad: bool = False,
+    def run(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            grad_func: Any | nn.Module = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            grad_func_args: Sequence = tuple(),
+            grad_func_kwargs: Dict | None = None,
+            is_grad_func_contain_y: bool = True,
+            output_grad: bool = False,
             fixed_atom_tensor: Optional[th.Tensor] = None,
-            elements: Sequence[Sequence[str | int]] | None = None):
+            elements: Sequence[Sequence[str | int]] | None = None
+    ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
         r"""
         Run the Conjugate gradient
 
@@ -100,6 +116,7 @@ class FIRE:
         Return:
             min func: Tensor(n_batch, ), the minimum of func.
             argmin func: Tensor(X.shape), the X corresponds to min func.
+            grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
         """
 
         t_main = time.perf_counter()
@@ -151,7 +168,8 @@ class FIRE:
                 masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
             masses = th.tensor(masses, dtype=th.float32, device=self.device)
             masses = masses.unsqueeze(-1).expand_as(X)  # (n_batch, n_atom, n_dim)
-        else: raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
+        else:
+            raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
 
         y0 = th.inf
         y = func(X, *func_args, **func_kwargs)
@@ -170,7 +188,7 @@ class FIRE:
             self.logger.info('Iteration Scheme: FIRE')
             self.logger.info('-' * 100)
         # MAIN LOOP
-        ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         for i in range(self.maxiter):  # Simple Euler
             with th.no_grad():
                 t_st = time.perf_counter()
@@ -180,7 +198,7 @@ class FIRE:
                 F_eps = th.abs(F)
                 converge_mask = (E_eps < self.E_threshold).unsqueeze(-1).unsqueeze(-1) * (F_eps < self.F_threshold)
                 if self.verbose > 0: self.logger.info(f'ITERATION {i:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, '
-                                           f'MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s')
+                                                      f'MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s')
                 if self.verbose > 1:
                     X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
                     self.logger.info(f'\n{X_str}\n')
@@ -194,7 +212,7 @@ class FIRE:
 
                 # Forward Euler Algo. to update X & v
                 v = v + F * t / masses  # (n_batch, n_atom, n_dim)
-                X = X + v * t #* atom_masks
+                X = X + v * t  #* atom_masks
             y0 = y.detach().clone()
             X.requires_grad_()
             y = func(X, *func_args, **func_kwargs)
@@ -205,7 +223,8 @@ class FIRE:
 
             with th.no_grad():
                 F_hat = F / th.linalg.norm(F, dim=(-2, -1), keepdim=True)
-                p = (F.flatten(-2, -1).unsqueeze(1)) @ (v.flatten(-2, -1).unsqueeze(-1))  # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
+                p = (F.flatten(-2, -1).unsqueeze(1)) @ (
+                    v.flatten(-2, -1).unsqueeze(-1))  # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
                 # update velocity
                 v = (1 - a) * v + a * th.linalg.norm(v, dim=(-2, -1), keepdim=True) * F_hat
                 # if P > 0.
@@ -218,7 +237,7 @@ class FIRE:
                 v = th.where(p <= 0., 0., v)
                 a = th.where(p <= 0., self.alpha, a)
 
-            ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
@@ -231,4 +250,4 @@ class FIRE:
         if output_grad:
             return y, X, F
         else:
-            return y, X, ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            return y, X  #, ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<

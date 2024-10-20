@@ -1,7 +1,7 @@
 # ruff: noqa: E701, F401, E703
 import logging
 import sys
-from typing import Dict, Any, Literal, Optional, Sequence
+from typing import Dict, Any, Literal, Optional, Sequence, Tuple
 import time
 import warnings
 
@@ -14,33 +14,36 @@ from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class QN:
-    """  """
-
-    def __init__(self,
-                 iter_scheme: Literal['BFGS', 'Newton'] = 'BFGS',
-                 E_threshold: float = 1e-3, F_threshold: float = 0.05, maxiter: int = 100,
-                 linesearch: Literal['Backtrack', 'Wolfe', 'Golden', 'Newton', 'None'] = 'Backtrack',
-                 linesearch_maxiter: int = 10,
-                 linesearch_thres: float = 0.02,
-                 linesearch_factor: float = 0.6,
-                 steplength: float = 0.5,
-                 device: str | th.device = 'cpu',
-                 verbose: int = 2) -> None:
+    def __init__(
+            self,
+            iter_scheme: Literal['BFGS', 'Newton'] = 'BFGS',
+            E_threshold: float = 1e-3,
+            F_threshold: float = 0.05,
+            maxiter: int = 100,
+            linesearch: Literal['Backtrack', 'Wolfe', 'Golden', 'Newton', 'None'] = 'Backtrack',
+            linesearch_maxiter: int = 10,
+            linesearch_thres: float = 0.02,
+            linesearch_factor: float = 0.6,
+            steplength: float = 0.5,
+            device: str | th.device = 'cpu',
+            verbose: int = 2
+    ) -> None:
         r"""
         Quasi-Newton Algorithm for optimization.
         
-        Parameters:
+        Args:
             iter_scheme: Iterative scheme of conjugate gradient algorithm. 
-                "BFGS" for Broyden, Fletcher, Goldfarb, Shanno scheme [1-4].
+                "BFGS" for Broyden, Fletcher, Goldfarb, Shanno scheme [1].
                 "XWW" for Xiao-Wei-Wang scheme [5].
             E_threshold: float, threshold of difference of func between 2 iteration.
             F_threshold: float, threshold of gradient of func.
             maxiter: int, max iterations.
             linesearch: Scheme of linesearch.
                 "None" for fixed steplength.
-                "Backtrack" for backtracking while Armijo's condition [5] was satisfied.
+                "Backtrack" for backtracking until Armijo's condition [5] was satisfied.
                 "Golden" for golden section algo.
                 "Newton" for 1D Newton algo., which was modified to avoid divergence.
+                "Wolfe" for quadratic interpolation search until weak Wolfe condition was satisfied.
             linesearch_maxiter: Max iterations for linesearch.
             linesearch_thres: Threshold for linesearch. Only for "Golden" and "Newton".
             linesearch_factor: A factor in linesearch. Shrinkage factor for "Backtrack", scaling factor in interval search for "Golden" and line steplength for "Newton".
@@ -52,10 +55,7 @@ class QN:
             run: running the main optimization program.
 
         References:
-            [1] 
-            [2] 
-            [3] 
-            [4] 
+            [1]
             [5] Comput. Math. Appl., 2008, 56: 1001.
 
         """
@@ -86,12 +86,19 @@ class QN:
             log_handler.setFormatter(formatter)
             self.logger.addHandler(log_handler)
 
-    def run(self, func: Any | nn.Module, X: th.Tensor, grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(), func_kwargs: Dict | None = None, grad_func_args: Sequence = tuple(),
+    def run(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            grad_func: Any | nn.Module = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            grad_func_args: Sequence = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             output_grad: bool = False,
-            fixed_atom_tensor: Optional[th.Tensor] = None, ):
+            fixed_atom_tensor: Optional[th.Tensor] = None,
+    ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
         Run the Quasi-Newton Algorithm.
 
@@ -103,13 +110,15 @@ class QN:
             func_kwargs: optional, other input of func.
             grad_func_args: optional, other input of grad_func.
             grad_func_kwargs: optional, other input of grad_func.
-            is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X i.e., grad = grad_func(X, y, ...), else grad = grad_func(X, ...)
+            is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X
+                i.e., grad = grad_func(X, y, *grad_func_args, **grad_func_kwargs), else grad = grad_func(X, *grad_func_args, **grad_func_kwargs)
             output_grad: bool, whether output gradient of last step.
             fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
 
         Return:
             min func: Tensor(n_batch, ), the minimum of func.
             argmin func: Tensor(X.shape), the X corresponds to min func.
+            grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
         """
         t_main = time.perf_counter()
         if func_kwargs is None:
@@ -168,15 +177,16 @@ class QN:
         is_main_loop_converge = False
         t_st = time.perf_counter()
         p = 0.  # descent direction
-        H_inv = (th.eye(n_atom * n_dim, device=self.device).unsqueeze(0)).expand(n_batch, -1, -1)  # Initial quasi-inverse Hessian Matrix  (n_batch, n_atom*n_dim, n_atom*n_dim)
+        H_inv = (th.eye(n_atom * n_dim, device=self.device).unsqueeze(0)).expand(n_batch, -1,
+                                                                                 -1)  # Initial quasi-inverse Hessian Matrix  (n_batch, n_atom*n_dim, n_atom*n_dim)
         Ident = (th.eye(n_atom * n_dim, device=self.device).unsqueeze(0)).expand(n_batch, -1, -1)  # prepared identity matrix
         alpha = th.full_like(X, self.steplength)  # steplength
         converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
-        ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc.
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
-            print('-' * 100)
-            print(f'Iteration Scheme: {self.iterform}')
-        print('-' * 100)
+            self.logger.info('-' * 100)
+            self.logger.info(f'Iteration Scheme: {self.iterform}')
+        self.logger.info('-' * 100)
         # MAIN LOOP
         X.requires_grad_()
         energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
@@ -198,14 +208,14 @@ class QN:
                 converge_mask = (E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) * th.all(F_eps < F_threshold, dim=(1, 2),
                                                                                            keepdim=True)  # To stop the update of converged samples.
                 # Verbose
-                if self.verbose > 0: print(
+                if self.verbose > 0: self.logger.info(
                     f'ITERATION {numit:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s')
                 if self.verbose > 1:
-                    print(f'Energies: {energies.detach().cpu().numpy()}')
+                    self.logger.info(f'Energies: {energies.detach().cpu().numpy()}')
                     X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
                     self.logger.info(f'\n{X_str}\n')
-                    print(f'step length: {alpha[:, 0, 0].squeeze().detach().cpu().numpy()}')
-                    print(f'Converged: {th.all(converge_mask, dim=(1, 2)).cpu().numpy()}\n')
+                    self.logger.info(f'step length: {alpha[:, 0, 0].squeeze().detach().cpu().numpy()}')
+                    self.logger.info(f'Converged: {th.all(converge_mask, dim=(1, 2)).cpu().numpy()}\n')
 
                 # judge thres
                 if th.all(converge_mask):
@@ -246,7 +256,8 @@ class QN:
                     # (n_batch, n_atom*n_dim, n_atom*n_dim) - (n_batch, 1, 1) * (n_batch, n_atom*n_dim, 1)@(n_batch, 1, n_atom*n_dim)
                     H_inv = th.where(converge_mask[:, :1, :1],
                                      0.,
-                                     (Ident - gamma * displace @ g_go.mT) @ H_inv @ (Ident - gamma * g_go @ displace.mT) + gamma * displace @ displace.mT)
+                                     (Ident - gamma * displace @ g_go.mT) @ H_inv @ (
+                                                 Ident - gamma * g_go @ displace.mT) + gamma * displace @ displace.mT)
 
             elif self.iterform == 'XWW':  # Xiao-Wei-Wang # TODO
                 p = -H_inv @ g  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
@@ -295,14 +306,14 @@ class QN:
             # Check NaN
             if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
 
-            ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+            #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
-                print(
+                self.logger.info(
                     '-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s')
             else:
-                print('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
+                self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
         else:
             if not is_main_loop_converge: warnings.warn('Some Structures were NOT Converged yet!',
                                                         FaildToConvergeWarning)
@@ -310,4 +321,4 @@ class QN:
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X, ptlist  # test <<<
+            return energies, X  #, ptlist  # test <<<

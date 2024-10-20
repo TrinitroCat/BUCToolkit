@@ -2,14 +2,12 @@
 
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 import time
-import logging
 
 import torch as th
-from torch import nn
 
 import numpy as np
 
-from .._Masses import ATOMIC_NUMBER, ATOMIC_SYMBOL
+from BM4Ckit.utils._Masses import ATOMIC_SYMBOL
 
 
 class RandReplace:

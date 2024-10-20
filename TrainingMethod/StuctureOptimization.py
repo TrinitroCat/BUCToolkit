@@ -7,9 +7,10 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BM4Ckit.BatchOptim.minimize import CG, QN, Mix, FIRE
+from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
 from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg
 from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.utils import IrregularTensorReformat
 
 
 class StructureOptimization(_CONFIGS):
@@ -51,7 +52,7 @@ class StructureOptimization(_CONFIGS):
         self._has_load_data = False
         self._data_loader = None
 
-        __relax_dict = {'CG': CG, 'BFGS': QN, 'MIX': Mix, 'FIRE': FIRE}
+        __relax_dict = {'CG': CG, 'BFGS': QN, 'FIRE': FIRE}
         if self.RELAXATION is None:
             raise RuntimeError('Structure Optimization Algorithm was NOT Set.')
         if self.RELAXATION['ALGO'] == 'BFGS':
@@ -171,13 +172,18 @@ class StructureOptimization(_CONFIGS):
 
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1
+            # To record the minimized X, Force, and Energies.
             X_dict = dict()
+            F_dict = dict()
+            E_dict = dict()
             for val_data, val_label in val_set:
                 t_bt = time.perf_counter()
                 # to avoid get an empty batch
                 if len(val_data) <= 0:
                     if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
                     continue
+                # batch indices
+                batch_indx = th.sum(th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1)
                 # relax
                 if self.verbose > 0:
                     self.logger.info('*' * 100)
@@ -185,30 +191,35 @@ class StructureOptimization(_CONFIGS):
                     cell_str = np.array2string(
                         val_data.cell.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " "
                                                                                                          )  # TODO, Support other various type.
-                    self.logger.info(f'Structure names: {val_data.idx.numpy(force=True)}\n')
+                    self.logger.info(f'Structure names: {val_data.idx}\n')
                     self.logger.info(f'Cell Vectors:\n{cell_str}\n')
                     self.logger.info('*' * 100)
 
                 min_ener, min_x, min_force = optimizer.run(model_wrap.Energy,
                                                            val_data.pos.unsqueeze(0),  # TODO, Support other various type instead of only PygData.
                                                            model_wrap.Grad,
-                                                           func_args=(val_data,), grad_func_args=(val_data,),
-                                                           is_grad_func_contain_y=False, output_grad=True,
+                                                           func_args=(val_data,),
+                                                           grad_func_args=(val_data,),
+                                                           is_grad_func_contain_y=False,
+                                                           output_grad=True,
+                                                           batch_indices=batch_indx,
                                                            fixed_atom_tensor=val_data.fixed.unsqueeze(0), )
                 with th.no_grad():
+                    min_ener.detach_()
+                    min_x.detach_()
+                    min_force.detach_()
+
                     min_x = min_x.cpu().squeeze(0)
                     min_force = min_force.cpu().squeeze(0)
-                    min_ener = min_ener
-                    data_batch = val_data.batch.cpu()
-
-                    x_list = [min_x[th.where(data_batch == i)] for i in range(val_data.batch_size)]
-                    f_list = [min_force[th.where(data_batch == i)] for i in range(val_data.batch_size)]
-
-                X_dict.update({_id: x_list[i] for i, _id in enumerate(val_data.idx)})
+                    min_ener = min_ener.cpu()
+                    x_list = th.split(min_x, batch_indx.tolist())
+                    f_list = th.split(min_force, batch_indx.tolist())
+                    X_dict.update({_id: x_list[i] for i, _id in enumerate(val_data.idx)})
+                    F_dict.update({_id: f_list[i] for i, _id in enumerate(val_data.idx)})
+                    E_dict.update({_id: min_ener[i] for i, _id in enumerate(val_data.idx)})
                 # Print info
                 if self.verbose > 0:
                     self.logger.info('-' * 100)
-                    self.logger.info(f'batch {n_c}, time: {time.perf_counter() - t_bt:<5.4f}')
                 n_c += 1
 
             if self.verbose: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
@@ -216,7 +227,7 @@ class StructureOptimization(_CONFIGS):
                 t_save = time.perf_counter()
                 with _LoggingEnd(self.log_handler):
                     if self.verbose: self.logger.info(f'SAVING RESULTS...')
-                th.save(X_dict, self.PREDICTIONS_SAVE_FILE)
+                th.save({'Coordinates': X_dict, 'Forces': F_dict, 'Energies': E_dict}, self.PREDICTIONS_SAVE_FILE)
                 if self.verbose: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
             else:
                 return X_dict

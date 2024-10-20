@@ -33,8 +33,8 @@ The log file name will be f"`time.strftime("%Y%m%d_%H_%M_%S")`_`OUTPUT_POSTFIX`.
   2. "MAE": nn.L1Loss
   3. "Hubber": nn.HuberLoss
   4. "CrossEntropy": nn.CrossEntropyLoss 
-  5. "Energy_Force_Loss": Energy_Force_Loss, loss = coeff_E * loss_E(x, y) + coeff_F * loss_F(x, y)
-  6. "Energy_Loss": Energy_Loss, loss = coeff_E * loss_E(x, y)
+  5. "Energy_Force_Loss": $loss = coeff\_E * loss\_E(x, y) + coeff\_F * loss\_F(x, y)$
+  6. "Energy_Loss": $loss = coeff\_E * loss\_E(x, y)$
   7. "custom": Any, need to set custom loss function manually by `Trainer.set_loss_fn(loss_fn, loss_config: Optional[Dict] = None)`
      
   )

@@ -3,21 +3,17 @@ import logging
 import sys
 import time
 import warnings
-from typing import (
-    Dict,
-    Any,
-    Literal,
-    Optional,
-    Sequence,
-)
+from itertools import accumulate
+from typing import Dict, Any, Literal, Optional, Sequence, Tuple, List
 
 import numpy as np
 import torch as th
 from torch import nn
 
+from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from utils import IrregularTensorReformat
 from .._utils._line_search import _LineSearch
 from .._utils._warnings import FaildToConvergeWarning
-from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class CG:
@@ -93,6 +89,11 @@ class CG:
         self.F_threshold = F_threshold
         self.maxiter = maxiter
 
+        # shape of X
+        self.n_dim = None
+        self.n_atom = None
+        self.n_batch = None
+
         # logger
         self.logger = logging.getLogger('Main.OPT')
         self.logger.setLevel(logging.INFO)
@@ -106,7 +107,7 @@ class CG:
     def run(
             self,
             func: Any | nn.Module,
-            X: th.Tensor,
+            X: th.Tensor | List[th.Tensor],
             grad_func: Any | nn.Module = None,
             func_args: Sequence = tuple(),
             func_kwargs:Dict | None=None,
@@ -114,12 +115,13 @@ class CG:
             grad_func_kwargs: Dict | None=None,
             is_grad_func_contain_y: bool = True,
             output_grad: bool = False,
+            batch_indices: List | Tuple | th.Tensor = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
-    ):
+    ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
         r"""
         Run the Conjugate gradient
 
-        Parameters:
+        Args:
             func: the main function of instantiated torch.nn.Module class.
             X: Tensor[n_batch, n_atom, 3], the atom coordinates that input to func.
             grad_func: user-defined function that grad_func(X, ...) return the func's gradient at X. if None, grad_func(X, ...) = th.autograd.grad(func(X, ...), X).
@@ -129,26 +131,56 @@ class CG:
             grad_func_kwargs: optional, other input of grad_func.
             is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X i.e., grad = grad_func(X, y, ...), else grad = grad_func(X, ...)
             output_grad: bool, whether output gradient of last step.
+            batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
+                the format of batch_indices is same as `split_size_or_sections` in torch.split:
+                batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
             fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
 
         Return:
             min func: Tensor(n_batch, ), the minimum of func.
             argmin func: Tensor(X.shape), the X corresponds to min func.
+            grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
         """
-
+        # check vars
         if grad_func_kwargs is None:
             grad_func_kwargs = dict()
         if func_kwargs is None:
             func_kwargs = dict()
+        if isinstance(X, th.Tensor):
+            n_batch, n_atom, n_dim = X.shape
+            irr_tensor_converter = None
+        elif isinstance(X, List):
+            irr_tensor_converter = IrregularTensorReformat()
+            X, pad_mask = irr_tensor_converter.regularize(X)
+            n_batch, n_atom, n_dim = X.shape
+        else:
+            raise TypeError(f'`X` must be torch.Tensor or List[torch.Tensor], but occurred {type(X)}.')
+        # Check batch indices; irregular batch
+        if batch_indices is not None:
+            if n_batch != 1:
+                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
+            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
+                batch_indices = batch_indices.tolist()
+            elif not isinstance(batch_indices, (Tuple, List)):
+                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
+                                f'It must be Sequence[int] | th.Tensor | np.ndarray | None')
+            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
+            n_inner_batch = len(batch_indices)
+            batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
+            batch_indx_dict = {i: slice(_, batch_slice_indx[i + 1]) for i, _ in enumerate(batch_slice_indx[:-1])}  # dict of {batch indx: split point slice}
+        else:
+            n_inner_batch = 1
+            batch_slice_indx = []
+            batch_indx_dict = dict()
+
         t_main = time.perf_counter()
         E_threshold = self.E_threshold
         F_threshold = self.F_threshold
         maxiter = self.maxiter
-        n_batch, n_atom, n_dim = X.shape
         self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
         if grad_func is None:
             is_grad_func_contain_y = True
-
+            # default grad function
             def grad_func_(x, y, grad_shape=None):
                 if grad_shape is None:
                     grad_shape = th.ones_like(y)
@@ -162,30 +194,18 @@ class CG:
         elif fixed_atom_tensor.shape == X.shape:
             atom_masks = fixed_atom_tensor.to(self.device)
         else:
-            raise RuntimeError(
-                f"fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not have the same shape of X (shape: {X.shape})."
-            )
-        # other check
-        if (not isinstance(maxiter, int)) or (maxiter <= 0):
-            raise ValueError(
-                f"Invalid value of maxiter: {maxiter}. It would be an integer greater than 0."
-            )
+            raise RuntimeError(f"fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not have the same shape of X (shape: {X.shape}).")
+        if irr_tensor_converter is not None: atom_masks = atom_masks * pad_mask
 
-        # set variables device
+        # set variables to given device
         if isinstance(func, nn.Module):
             func = func.to(self.device)
             func.eval()
             func.zero_grad()
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
-
         X = X.to(self.device)
-        for _args in (
-                func_args,
-                func_kwargs.values(),
-                grad_func_args,
-                grad_func_kwargs.values(),
-        ):
+        for _args in (func_args, func_kwargs.values(), grad_func_args, grad_func_kwargs.values()):
             for _arg in _args:
                 if isinstance(_arg, th.Tensor):
                     _arg.to(self.device)
@@ -196,14 +216,12 @@ class CG:
         t_st = time.perf_counter()
         p = 0.0  # descent direction
         F_eps = 0.0
-        g_old = th.full(
-            (n_batch, n_atom * n_dim, 1), 1e-6, dtype=th.float32, device=self.device
-        )  # initial old grad
-        beta = 0.0  # coefficient of conjugate direction: p(k+1) = - g(k) + beta * p(k)
+        g_old = th.full((n_batch, n_atom * n_dim, 1), 1e-6, dtype=th.float32, device=self.device)  # initial old grad
+        beta = 0.0  # deprecated, the coefficient of conjugate direction: p(k+1) = - g(k) + beta * p(k)
         converge_mask = th.full(
             (n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool
         )
-        ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # test plot <<<
         if self.verbose:
             self.logger.info("-" * 100)
             self.logger.info(f"Iteration Scheme: {self.iterform}")
@@ -213,9 +231,14 @@ class CG:
             # backward & obtain grad
             #th.cuda.empty_cache()
             X.requires_grad_()
-            energies: th.Tensor = th.where(
-                converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs)
-            )
+            energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+            # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
+            if energies.shape[0] != self.n_batch:
+                assert batch_indices is not None, f"batch indices is None while shape of model output ({energies.shape}) does not match batch size."
+                assert energies.shape[0] == n_inner_batch, f"shape of output ({energies.shape}) does not match given batch indices"
+                self.is_concat_X = True
+            else:
+                self.is_concat_X = False
             if is_grad_func_contain_y:
                 X_grad = th.where(
                     converge_mask,
@@ -228,41 +251,69 @@ class CG:
                     F_eps,
                     grad_func_(X, *grad_func_args, **grad_func_kwargs),
                 )
-            X_grad = X_grad * atom_masks
+            X_grad = X_grad.detach() * atom_masks
             X = X.detach()
+            energies.detach_()
             with th.no_grad():
                 if X_grad.shape != X.shape:
-                    raise RuntimeError(
-                        f"X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes."
-                    )
-                # judge thres
-                E_eps = th.abs(energies - energies_old)  # (n_batch, )
+                    raise RuntimeError(f"X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.")
+                # calc. criteria
+                E_eps = th.abs(energies - energies_old)  # (n_inner_batch, )
                 energies_old = energies.detach().clone()
-                F_eps = th.abs(X_grad)  # (n_batch, n_atom, 3)
-                converge_mask = (E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) * th.all(
-                    F_eps < F_threshold, dim=(1, 2), keepdim=True
-                )  # To stop the update of converged samples.
+                if self.is_concat_X:
+                    F_eps = th.abs(X_grad)  # (1, n_batch*n_atom, 3)
+                    # TODO NOW , complete the irregular tensor's converge mask <<<<
+                    f_converge = th.cat([th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < F_threshold)) for i in range(n_inner_batch)])  # Tensor[bool], length == n_inner_batch
+                    converge_mask = (E_eps < E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
+                    converge_str = converge_mask.numpy(force=True)
+                    converge_mask = th.repeat_interleave(
+                        converge_mask.unsqueeze(0).unsqueeze(-1),
+                        th.tensor(batch_indices, device=self.device),
+                        dim=1
+                    )  # (1, n_inner_batch*n_atom, 1)
+                else:
+                    F_eps = th.abs(X_grad)  # (n_batch, n_atom, 3)
+                    converge_mask = (E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) * th.all(F_eps < F_threshold, dim=(1, 2), keepdim=True)  # To stop the update of converged samples.
+                    converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
+                # split batches if specified batch
+                if batch_indices is not None:
+                    X_tup = th.split(X, batch_indices, dim=1)
+                    #F_tup = th.split(- X_grad, batch_indices)
+                else:
+                    X_tup = (X, )
+                    #F_tup = (- X_grad, )
+                # judge & print
                 if th.all(converge_mask):
                     is_main_loop_converge = True
                     if self.verbose > 0:
-                        self.logger.info(
-                            f"ITERATION {numit:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s"
-                        )
+                        self.logger.info(f"ITERATION {numit:>5d}\n "
+                                         f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                         f"MAX_F: {th.max(F_eps):>5.7e}]\n "
+                                         f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
                     if self.verbose > 1:
-                        X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                        self.logger.info(f'\n{X_str}\n')
-                        self.logger.info(f"Energies: {energies.detach().cpu().numpy()}")
-                        self.logger.info(f"Converged: {converge_mask[:, 0, 0].cpu().numpy()}\n")
+                        self.logger.info(f" Coordinates:\n")
+                        X_str = [
+                            np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                            for xi in X_tup
+                        ]
+                        [self.logger.info(f'{x_str}\n') for x_str in X_str]
+                        self.logger.info(f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}")
+                        self.logger.info(f"Converged: {converge_str}\n")
                     break
                 # Verbose
                 if self.verbose > 0:
-                    self.logger.info(
-                        f"ITERATION {numit:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s"
-                    )
+                    self.logger.info(f"ITERATION {numit:>5d}\n "
+                                     f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                     f"MAX_F: {th.max(F_eps):>5.7e}\n "
+                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
                 if self.verbose > 1:
-                    X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                    self.logger.info(f'\n{X_str}\n')
-                    self.logger.info(f"Energies: {energies.detach().cpu().numpy()}")
+                    self.logger.info(f" Coordinates:\n")
+                    X_str = [
+                        np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        for xi in X_tup
+                    ]
+                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
+                    self.logger.info(f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}")
                 t_st = time.perf_counter()
 
                 # Conj. form
@@ -312,13 +363,13 @@ class CG:
             with th.no_grad():
                 if self.verbose > 1:
                     self.logger.info(
-                        f"step length: {alpha[:, 0, 0].squeeze().detach().cpu().numpy()}"
+                        f"step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}"
                     )
                 if self.verbose > 1:
-                    self.logger.info(f"Converged: {converge_mask[:, 0, 0].cpu().numpy()}\n")
+                    self.logger.info(f"Converged: {converge_str}\n")
                 # update X
                 X = X + alpha * p.view(n_batch, n_atom, n_dim) # (n_batch, n_atom, 3) + (n_batch, 1, 1) * (n_batch, n_atom, 3) * (n_batch, n_atom, 3)
-                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test plot <<<
                 # Check NaN
                 if th.any(energies != energies):
                     raise RuntimeError(f"NaN Occurred in output: {energies}")
@@ -341,7 +392,10 @@ class CG:
                 )
 
         # output
+        if irr_tensor_converter is not None:
+            X = irr_tensor_converter.recover(X)
+            X_grad = irr_tensor_converter.recover(X_grad)
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X, ptlist  # test <<<<<<<<<<<<<<<<
+            return energies, X  #, ptlist  # test plot <<<

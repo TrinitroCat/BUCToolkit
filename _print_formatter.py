@@ -6,7 +6,7 @@ e.g., numpy.array2string(Array, **FLOAT_ARRAY_FORMAT)
 import numpy as np
 
 FLOAT_ARRAY_FORMAT = {
-    'max_line_width': 120,
+    'max_line_width': 256,
     'precision': 8,
     'separator': '  ',
     'sign': ' ',
@@ -32,7 +32,7 @@ STRING_ARRAY_FORMAT = {
 }
 
 SCIENTIFIC_ARRAY_FORMAT = {
-    'max_line_width': 120,
+    'max_line_width': 256,
     'precision': 8,
     'separator': '  ',
     'sign': ' ',

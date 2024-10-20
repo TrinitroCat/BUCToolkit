@@ -1,0 +1,86 @@
+# input template
+
+# global configs
+START: 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH
+REDIRECT: true    # whether output training logs to OUTPUT_PATH or directlt print on screen.
+SAVE_PREDICTIONS: false  # only for predictions. Whether output predictions to a npz file.
+BATCH_SIZE: 1
+
+# I/O configs
+LOAD_CHK_FILE_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/energy/best_checkpoint.pt
+OUTPUT_PATH: /home/ppx/PythonProjects/FAIR_CHEM/Relaxation_test
+OUTPUT_POSTFIX: OPT
+PREDICTIONS_SAVE_FILE: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/Predictions.npz  # path of saving predictions
+
+# relaxation
+RELAXATION:
+  ALGO: 'CG'  # CG, BFGS, FIRE
+  ITER_SCHEME: 'PR+'  # only for ALGO=CG, 'PR+', 'FR', 'PR', 'WYL'
+  E_THRES: 1.e-4  # threshold of difference of Energy
+  F_THRES: 0.1  # threshold of max Force
+  MAXITER: 300
+  STEPLENGTH: 0.5
+  LINESEARCH: 'Wolfe'  # 'Backtrack' with Armijo's cond., 'Golden' for exact line search by golden section algo., 'Wolfe' for advance & retreat algo. with weak Wolfe cond.
+  LINESEARCH_MAXITER: 20  # max iterations of linear search.
+  LINESEARCH_THRES: 0.02  # only for LINESEARCH = 'Golden', threshold of exact line search.
+  LINESEARCH_FACTOR: 0.5  # A factor in linesearch. Shrinkage factor for "Backtrack", scaling factor in interval search for "Golden"
+
+# model configs
+MODEL_NAME: GemNet_OC
+MODEL_CONFIG:
+  num_atoms: 0
+  bond_feat_dim: 0
+  num_targets: 1
+  activation: silu
+  atom_edge_interaction: true
+  atom_interaction: true
+  cbf:
+    name: spherical_harmonics
+  cutoff: 12.0
+  cutoff_aeaint: 12.0
+  cutoff_aint: 12.0
+  cutoff_qint: 12.0
+  direct_forces: false
+  edge_atom_interaction: true
+  emb_size_aint_in: 64
+  emb_size_aint_out: 64
+  emb_size_atom: 256
+  emb_size_cbf: 16
+  emb_size_edge: 512
+  emb_size_quad_in: 32
+  emb_size_quad_out: 32
+  emb_size_rbf: 16
+  emb_size_sbf: 32
+  emb_size_trip_in: 64
+  emb_size_trip_out: 64
+  envelope:
+    exponent: 5
+    name: polynomial
+  extensive: true
+  forces_coupled: false
+  max_neighbors: 30
+  max_neighbors_aeaint: 20
+  max_neighbors_aint: 1000
+  max_neighbors_qint: 8
+  num_after_skip: 2
+  num_atom: 3
+  num_atom_emb_layers: 2
+  num_before_skip: 2
+  num_blocks: 4
+  num_concat: 1
+  num_global_out_layers: 2
+  num_output_afteratom: 3
+  num_radial: 128
+  num_spherical: 7
+  otf_graph: true
+  output_init: HeOrthogonal
+  qint_tags:
+  - 1
+  - 2
+  quad_interaction: true
+  rbf:
+    name: gaussian
+  regress_forces: true
+  sbf:
+    name: legendre_outer
+  symmetric_edge_symmetrization: false
