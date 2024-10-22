@@ -2,6 +2,7 @@ r"""
 Methods of reading and transform various files
 """
 import re
+import sys
 from typing import Any, Dict, List, Sequence, Set, Tuple, Optional
 import time
 import os
@@ -90,6 +91,7 @@ class POSCARs2Feat(BatchStructures):
         super().__init__()
         self.path = path
         self.verbose = verbose
+        self.files_list = list()
 
     def para_read(self,
                   file_list: Optional[List] = None,
@@ -154,10 +156,15 @@ class POSCARs2Feat(BatchStructures):
         # loading files
         if self.verbose > 0: print('*' * 60 + '\nReading files...\n')
         if file_list is None:
-            self.files_list = os.listdir(self.path)
+            self.files_list = [__f.name for __f in os.scandir(self.path) if __f.is_file()]
         else:
-            self.files_list = file_list
+            for __f in file_list:
+                if os.path.isfile(os.path.join(self.path, __f)):
+                    self.files_list.append(__f)
+                else:
+                    warnings.warn(f'No such file: {os.path.join(self.path, __f)}, skipped.', RuntimeWarning)
         self.n_samp = len(self.files_list)
+        if self.n_samp == 0: raise RuntimeError('Occurred empty file_list. No file could be read.')
 
         # check vars
         _type_converter = {'cartesian': 'C', 'direct': 'D'}

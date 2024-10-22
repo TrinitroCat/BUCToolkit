@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 import warnings
+from itertools import accumulate
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
 import numpy as np
@@ -12,7 +13,7 @@ import torch as th
 from torch import nn
 
 from BM4Ckit.utils._Masses import MASS, N_MASS
-from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from .._utils._warnings import FaildToConvergeWarning
 
 
@@ -95,6 +96,7 @@ class FIRE:
             is_grad_func_contain_y: bool = True,
             output_grad: bool = False,
             fixed_atom_tensor: Optional[th.Tensor] = None,
+            batch_indices: List | Tuple | th.Tensor = None,
             elements: Sequence[Sequence[str | int]] | None = None
     ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
         r"""
@@ -111,6 +113,9 @@ class FIRE:
             is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X i.e., grad = grad_func(X, y, ...), else grad = grad_func(X, ...)
             output_grad: bool, whether output gradient of last step.
             fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
+            batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
+                the format of batch_indices is same as `split_size_or_sections` in torch.split:
+                batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
             elements: Optional[Sequence[Sequence[str | int]]], the Element of each given atom in X.
 
         Return:
@@ -122,7 +127,6 @@ class FIRE:
         t_main = time.perf_counter()
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
-        n_batch, n_atom, n_dim = X.shape
         # grad func
         if grad_func is None:
             is_grad_func_contain_y = True
@@ -134,6 +138,29 @@ class FIRE:
                 return g[0]
         else:
             grad_func_ = grad_func
+        # check batch indices
+        if isinstance(X, th.Tensor):
+            n_batch, n_atom, n_dim = X.shape
+            self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
+        else:
+            raise TypeError(f'`X` must be torch.Tensor or List[torch.Tensor], but occurred {type(X)}.')
+        # Check batch indices; irregular batch
+        if batch_indices is not None:
+            if n_batch != 1:
+                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
+            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
+                batch_indices = batch_indices.tolist()
+            elif not isinstance(batch_indices, (Tuple, List)):
+                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
+                                f'It must be Sequence[int] | th.Tensor | np.ndarray | None')
+            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
+            n_inner_batch = len(batch_indices)
+            batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
+            batch_indx_dict = {i: slice(_, batch_slice_indx[i + 1]) for i, _ in enumerate(batch_slice_indx[:-1])}  # dict of {batch indx: split point slice}
+        else:
+            n_inner_batch = 1
+            batch_slice_indx = []
+            batch_indx_dict = dict()
         # Selective dynamics
         if fixed_atom_tensor is None:
             atom_masks = th.ones_like(X, device=self.device)
@@ -172,7 +199,15 @@ class FIRE:
             raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
 
         y0 = th.inf
+        X.requires_grad_()
         y = func(X, *func_args, **func_kwargs)
+        # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
+        if y.shape[0] != self.n_batch:
+            assert batch_indices is not None, f"batch indices is None while shape of model output ({y.shape}) does not match batch size."
+            assert y.shape[0] == n_inner_batch, f"shape of output ({y.shape}) does not match given batch indices"
+            self.is_concat_X = True
+        else:
+            self.is_concat_X = False
         is_main_loop_converge = False
         converge_mask = th.full((n_batch, 1, 1), False, device=self.device)
         t = th.full((n_batch, 1, 1), self.steplength, device=self.device)
@@ -183,28 +218,60 @@ class FIRE:
         else:
             F = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
+        y = y.detach()
+        F = F.detach()
+        X = X.detach()
+
         if self.verbose:
             self.logger.info('-' * 100)
             self.logger.info('Iteration Scheme: FIRE')
             self.logger.info('-' * 100)
         # MAIN LOOP
         #ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        for i in range(self.maxiter):  # Simple Euler
+        for numit in range(self.maxiter):  # Simple Euler
             with th.no_grad():
                 t_st = time.perf_counter()
-
+                # split batches if specified batch
+                if batch_indices is not None:
+                    X_tup = th.split(X, batch_indices, dim=1)
+                    # F_tup = th.split(- X_grad, batch_indices)
+                else:
+                    X_tup = (X,)
+                    # F_tup = (- X_grad, )
                 # Verbose
                 E_eps = th.abs(y - y0)
-                F_eps = th.abs(F)
-                converge_mask = (E_eps < self.E_threshold).unsqueeze(-1).unsqueeze(-1) * (F_eps < self.F_threshold)
-                if self.verbose > 0: self.logger.info(f'ITERATION {i:>5d}: MAD_energies: {th.mean(E_eps):>5.7e}, '
-                                                      f'MAX_F: {th.max(F_eps):>5.7e}, TIME: {time.perf_counter() - t_st:>6.4f} s')
+                if self.is_concat_X:
+                    F_eps = th.abs(F)  # (1, n_batch*n_atom, 3)
+                    f_converge = th.cat([th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < self.F_threshold)) for i in
+                                         range(n_inner_batch)])  # Tensor[bool], length == n_inner_batch
+                    converge_mask = (E_eps < self.E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
+                    converge_str = converge_mask.numpy(force=True)
+                    converge_mask = th.repeat_interleave(
+                        converge_mask.unsqueeze(0).unsqueeze(-1),
+                        th.tensor(batch_indices, device=self.device),
+                        dim=1
+                    )  # (1, n_inner_batch*n_atom, 1)
+                else:
+                    F_eps = th.abs(F)  # (n_batch, n_atom, 3)
+                    converge_mask = (E_eps < self.E_threshold).unsqueeze(-1).unsqueeze(-1) * th.all(F_eps < self.F_threshold, dim=(1, 2),
+                                                                                               keepdim=True)  # To stop the update of converged samples.
+                    converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
+
+                if self.verbose > 0:
+                    self.logger.info(f"ITERATION {numit:>5d}\n "
+                                     f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                     f"MAX_F: {th.max(F_eps):>5.7e}\n "
+                                     f"Energies: {np.array2string(y.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                     f"Converged: {converge_str}\n "
+                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
                 if self.verbose > 1:
-                    X_str = np.array2string(X.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                    self.logger.info(f'\n{X_str}\n')
-                    self.logger.info(f'Energies: {y.detach().cpu().numpy()}')
-                    self.logger.info(f'step length: {t[:, 0, 0].squeeze().detach().cpu().numpy()}')
-                    self.logger.info(f'Converged: {th.all(converge_mask, dim=(1, 2)).cpu().numpy()}\n')
+                    self.logger.info(f" Coordinates:\n")
+                    X_str = [
+                        np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        for xi in X_tup
+                    ]
+                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
+
                 # Criteria
                 if th.all(converge_mask):
                     is_main_loop_converge = True
@@ -221,6 +288,9 @@ class FIRE:
             else:
                 F = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
+            y = y.detach()
+            F = F.detach()
+            X = X.detach()
             with th.no_grad():
                 F_hat = F / th.linalg.norm(F, dim=(-2, -1), keepdim=True)
                 p = (F.flatten(-2, -1).unsqueeze(1)) @ (

@@ -13,7 +13,7 @@ class IrregularTensorReformat:
         self._length_record = None
         self.__shape_check = None
 
-    def regularize(self, X: List[th.Tensor], padding_value:float=th.nan) -> Tuple[th.Tensor, th.Tensor]:
+    def regularize(self, X: List[th.Tensor], padding_value:float=0.) -> Tuple[th.Tensor, th.Tensor]:
         """
         Regularize the List of Tensors.
         Args:

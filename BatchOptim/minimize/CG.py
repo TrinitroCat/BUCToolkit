@@ -253,16 +253,16 @@ class CG:
                 )
             X_grad = X_grad.detach() * atom_masks
             X = X.detach()
-            energies.detach_()
+            energies = energies.detach()
             with th.no_grad():
                 if X_grad.shape != X.shape:
                     raise RuntimeError(f"X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.")
                 # calc. criteria
                 E_eps = th.abs(energies - energies_old)  # (n_inner_batch, )
                 energies_old = energies.detach().clone()
+                # manage the irregular tensors
                 if self.is_concat_X:
                     F_eps = th.abs(X_grad)  # (1, n_batch*n_atom, 3)
-                    # TODO NOW , complete the irregular tensor's converge mask <<<<
                     f_converge = th.cat([th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < F_threshold)) for i in range(n_inner_batch)])  # Tensor[bool], length == n_inner_batch
                     converge_mask = (E_eps < E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
                     converge_str = converge_mask.numpy(force=True)
@@ -283,28 +283,13 @@ class CG:
                     X_tup = (X, )
                     #F_tup = (- X_grad, )
                 # judge & print
-                if th.all(converge_mask):
-                    is_main_loop_converge = True
-                    if self.verbose > 0:
-                        self.logger.info(f"ITERATION {numit:>5d}\n "
-                                         f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                         f"MAX_F: {th.max(F_eps):>5.7e}]\n "
-                                         f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
-                    if self.verbose > 1:
-                        self.logger.info(f" Coordinates:\n")
-                        X_str = [
-                            np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                            for xi in X_tup
-                        ]
-                        [self.logger.info(f'{x_str}\n') for x_str in X_str]
-                        self.logger.info(f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}")
-                        self.logger.info(f"Converged: {converge_str}\n")
-                    break
                 # Verbose
                 if self.verbose > 0:
                     self.logger.info(f"ITERATION {numit:>5d}\n "
                                      f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"MAX_F: {th.max(F_eps):>5.7e}\n "
+                                     f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                     f"Converged: {converge_str}\n "
                                      f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
                 if self.verbose > 1:
                     self.logger.info(f" Coordinates:\n")
@@ -313,7 +298,11 @@ class CG:
                         for xi in X_tup
                     ]
                     [self.logger.info(f'{x_str}\n') for x_str in X_str]
-                    self.logger.info(f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}")
+
+                if th.all(converge_mask):
+                    is_main_loop_converge = True
+                    break
+
                 t_st = time.perf_counter()
 
                 # Conj. form
@@ -337,7 +326,7 @@ class CG:
                     # Restart
                     is_restart = (ggo >= 0) * (gg > ggo) * (gogo >= gg)
                     beta = th.where(is_restart, 0.0, beta)
-                    if self.verbose > 1:
+                    if self.verbose > 0:
                         self.logger.info(f"Restart: {is_restart.flatten().cpu().numpy()}")
                     # update old grad
                     g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
@@ -361,12 +350,10 @@ class CG:
                 ),
             )
             with th.no_grad():
-                if self.verbose > 1:
+                if self.verbose > 0:
                     self.logger.info(
                         f"step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}"
                     )
-                if self.verbose > 1:
-                    self.logger.info(f"Converged: {converge_str}\n")
                 # update X
                 X = X + alpha * p.view(n_batch, n_atom, n_dim) # (n_batch, n_atom, 3) + (n_batch, 1, 1) * (n_batch, n_atom, 3) * (n_batch, n_atom, 3)
                 #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test plot <<<

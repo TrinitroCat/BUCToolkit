@@ -29,10 +29,10 @@ class _LineSearch:
         if func_kwargs is None:
             func_kwargs = dict()
         with th.no_grad():
-            y1 = func(X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs)
-            if self.is_concat_X: y1 = th.sum(y1)
-        a:th.Tensor = (y1 <= (y0 + rho * steplength.squeeze(-1, -2) * (grad.mT@p).squeeze(-1, -2)))  # Tensor[bool]: (n_batch, ) = (n_batch, ) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
-        return a.unsqueeze(-1).unsqueeze(-1) # (n_batch, 1, 1)
+            y1 = func(X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
+            if self.is_concat_X: y1 = th.sum(y1, keepdim=True)
+        a:th.Tensor = (y1 <= (y0 + rho * steplength * (grad.mT@p)))  # Tensor[bool]: (n_batch, ) = (n_batch, ) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
+        return a  # (n_batch, 1, 1)
     
     def _Wolfe_cond(self, func:Any|nn.Module, X0:th.Tensor, y0:th.Tensor, grad:th.Tensor, p:th.Tensor, steplength:th.Tensor, rho:float=0.5,
                     func_args:Sequence=tuple(), func_kwargs=None) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
@@ -58,17 +58,21 @@ class _LineSearch:
             func_kwargs = dict()
         Xn = X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim) # (n_batch, n_atom, n_dim)
         Xn.requires_grad_()
-        y1 = func(Xn, *func_args, **func_kwargs)
-        if self.is_concat_X: y1 = th.sum(y1)
+        y1 = (func(Xn, *func_args, **func_kwargs)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
+        if self.is_concat_X: y1 = th.sum(y1, keepdim=True)
         dy1 = th.autograd.grad(y1, Xn, th.ones_like(y1))[0] # (n_batch, n_atom, n_dim)
+        # detach grad graph
+        dy1 = dy1.detach()
+        y1 = y1.detach()
+        Xn = Xn.detach()
         dy1 = dy1.flatten(-2, -1).unsqueeze(-1) #(n_batch, n_atom*n_dim, 1)
         with th.no_grad():
             direct_grad0 = grad.mT @ p
             direct_grad1 = dy1.mT @ p
-            a:th.Tensor = (y1 <= (y0 + rho * steplength.squeeze(-1, -2) * (grad.mT@p).squeeze(-1, -2))) # descent cond
+            a:th.Tensor = (y1 <= (y0 + rho * steplength * (grad.mT@p))) # descent cond
             b = (direct_grad1 > rho * direct_grad0) # curve cond
-            y1.detach_()
-        return a.unsqueeze(-1).unsqueeze(-1), b, y1, direct_grad0, direct_grad1
+
+        return a, b, y1, direct_grad0, direct_grad1
 
     def __call__(
             self,
@@ -84,10 +88,11 @@ class _LineSearch:
         if func_kwargs is None:
             func_kwargs = dict()
         self.n_batch, self.n_atom, self.n_dim = X0.shape
+        y0 = y0.unsqueeze(-1).unsqueeze(-1)
         # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
         if self.n_batch != y0.shape[0]:
             if self.n_batch == 1:
-                y0 = th.sum(y0)
+                y0 = th.sum(y0, keepdim=True)
                 self.is_concat_X = True
             else:
                 raise RuntimeError(f'Batch size of X ({self.n_batch}) and y ({y0.shape[0]}) do not match.')

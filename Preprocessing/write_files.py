@@ -56,7 +56,8 @@ class WritePOSCARs:
         if isinstance(coord_type, str):
             coord_type = [coord_type] * n_batch
         elif (not isinstance(coord_type, (List, Tuple))) or (len(coord_type) != n_batch):
-            raise ValueError(f'Invalid value of `coord_type`: type: {type(coord_type)}, length: {len(coord_type)}')
+            raise ValueError(f'Invalid value of `coord_type`: type: {type(coord_type)}, length: {len(coord_type)}.'
+                             f' It should be type: List | Tuple, length: {n_batch}')
         if fixed is None:
             fixed = [np.full_like(_, 1, dtype=np.int8) for _ in coords]
         # check parallel
@@ -70,7 +71,7 @@ class WritePOSCARs:
             ncore = tot_cores
 
         if ncore != 1:
-            _para = jb.Parallel(ncore, )
+            _para = jb.Parallel(ncore, backend="threading")
             _para(
                 jb.delayed(self.__write)(
                     cell,
