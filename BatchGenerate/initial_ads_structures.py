@@ -118,6 +118,7 @@ class InitAdsStructure:
             raise TypeError('`ads_site` must be a List[int].')
         # calc. force
         loss_fn = _Loss()
+        #self._random_perturbate()
 
         # optimize
         optimizer = FIRE(
@@ -165,43 +166,79 @@ class InitAdsStructure:
 
     def _random_perturbate(self, ):
         """
-        Ramdom perturbate adsorptions to search more configuration.
+        Ramdom perturbate adsorptions by orthogonal and translational transform to search more configuration.
         Returns:
 
         """
-        pass
+        ln = len(self.ads)
+        rx = th.rand(ln) * 2 * th.pi
+        ry = th.rand(ln) * 2 * th.pi
+        rz = th.rand(ln) * 2 * th.pi
+        tx = th.randn(ln) * 0.05
+        ty = th.randn(ln) * 0.05
+        tz = th.randn(ln) * 0.05
 
-    def _distance_preserv_transform(self, rx, ry, rz, tx, ty, tz, X) -> th.Tensor:
+        self.ads = self._distance_preserv_transform(rx, ry ,rz, tx, ty, tz, self.ads)
+
+    def _distance_preserv_transform(
+            self,
+            rx: th.Tensor,
+            ry: th.Tensor,
+            rz: th.Tensor,
+            tx: th.Tensor,
+            ty: th.Tensor,
+            tz: th.Tensor,
+            X: th.Tensor
+    ) -> th.Tensor:
+        """
+        Orthogonal and transitional transform on input X.
+        Args:
+            rx: rotation degree around X-axis.
+            ry: rotation degree around Y-axis.
+            rz: rotation degree around Z-axis.
+            tx: transition along X-axis.
+            ty: transition along Y-axis.
+            tz: transition along Z-axis.
+            X: the coordinated to transform.
+
+        Returns:
+
+        """
+        ln = len(X)
+        if not (len(rx) == len(ry) == len(rz) == len(tx) == len(ty) == len(tz) == ln):
+            raise RuntimeError(f'Incompatible shape of rx~rz & tx~tz & X. They must have same batch number.')
+        # mass center
+        center = th.sum(X, dim=1, keepdim=True)  # (n_batch, 1, 3)
+        # rotation matrix
         rot_x = th.tensor(
             [
-                [1.,         0.,          0.],
-                [0., th.cos(rx), -th.sin(rx)],
-                [0., th.sin(rx),  th.cos(rx)]
+                [[1.]*ln,             [0.]*ln,              [0.]*ln],
+                [[0.]*ln, th.cos(rx).tolist(), th.sin(-rx).tolist()],
+                [[0.]*ln, th.sin(rx).tolist(),  th.cos(rx).tolist()]
             ],
             device=self.device
         )
         rot_y = th.tensor(
             [
-                [th.cos(ry), 0.,  th.sin(ry)],
-                [0.,         1.,          0.],
-                [-th.sin(ry), 0., th.cos(ry)]
+                [th.cos(ry).tolist(), [0.]*ln,  th.sin(ry).tolist()],
+                [[0.]*ln,             [1.]*ln,              [0.]*ln],
+                [th.sin(-ry).tolist(), [0.]*ln, th.cos(ry).tolist()]
             ],
             device=self.device
         )
         rot_z = th.tensor(
             [
-                [th.cos(rz), -th.sin(rz), 0.],
-                [th.sin(rz),  th.cos(rz), 0.],
-                [0.,         0.,          1.]
+                [th.cos(rz).tolist(), th.sin(-rz).tolist(), [0.]*ln],
+                [th.sin(rz).tolist(),  th.cos(rz).tolist(), [0.]*ln],
+                [            [0.]*ln,              [0.]*ln, [1.]*ln]
             ],
             device=self.device
         )
-        trans = th.tensor(
-            [[tx, ty, tz]],
-            device=self.device,
-            dtype=th.float32
-        )  # (1, 3)
-        X_trans = rot_z @ rot_y @ rot_x @ X + trans # (n_batch, n_atom, 3)
+        rot_x = rot_x.transpose(0, -1)
+        rot_y = rot_y.transpose(0, -1)
+        rot_z = rot_z.transpose(0, -1)
+        trans = th.cat((tx.unsqueeze(-1).unsqueeze(-1), ty.unsqueeze(-1).unsqueeze(-1), tz.unsqueeze(-1).unsqueeze(-1)), dim=-1)  # (n_batch, 1, 3)
+        X_trans = rot_z @ rot_y @ rot_x @ (X - center) + center + trans # (n_batch, n_atom, 3)
 
         return X_trans
 
@@ -289,7 +326,7 @@ class _Loss(nn.Module):
         # (n_batch, n_atom, 1, n_dim) - (n_batch, 1, n_mol_atom, n_dim) -> (n_batch, n_atom, n_mol_atom, n_dim) -> (n_batch, n_atom, n_mol_atom)
         dist_nb = th.linalg.norm(X_slab.unsqueeze(2) - X_ads.unsqueeze(1), dim=-1)
         # exponential repulsive
-        n_b_loss = th.where(dist_nb < 3., th.exp(8./dist_nb) - 1, 0.)  # (n_batch, n_atom, n_mol_atom)
+        n_b_loss = th.where(dist_nb < 3., th.exp(6./dist_nb) - 1, 0.)  # (n_batch, n_atom, n_mol_atom)
         # polynomial repulsive
         #n_b_loss = (th.linalg.norm(dist_nb, dim=-1) - 3.5)**3
         #n_b_loss = th.where(n_b_loss < 0., 0., n_b_loss) # (n_batch, n_atom, n_mol_atom)
@@ -311,15 +348,22 @@ if __name__ == '__main__':
     from BM4Ckit.Preprocessing.load_files import POSCARs2Feat
     f0 = POSCARs2Feat('/home/ppx/PythonProjects/test_files/test_Slabs')
     f0.read()
-    mol_elems = {'C': 1, 'O': 2}
+    mol_elems = {'C': 3, 'H': 7}
     mol_coords = th.tensor(
-        [[5.0, 5.0, 5.0],
-         [5.0, 5.0, 6.2],
-         [5.0, 5.0, 3.8]], device='cpu'
+        [[4.366752869     ,    5.194936163     ,   7.370416754     ],
+             [5.706862669,         5.375525243,        8.078497269],
+             [6.210541270,         6.812369109,        8.183432195],
+             [3.961925510,         4.184904780,        7.545806886],
+             [3.623250069,         5.927264731,        7.728475650],
+             [6.477085363,         4.734992709,        7.601127703],
+             [5.597747186,         4.968108932,        9.104960900],
+             [6.320431086,         7.273528606,        7.180864998],
+             [7.193091322,         6.860955256,        8.675641514],
+             [5.507056659,         7.444790778,        8.749347576]], device='cpu'
     )
 
     slab_site = get_highest_atom_indices(f0)
 
     a = InitAdsStructure(f0, mol_coords, mol_elems, 'z', 'cpu', 1)
-    result = a.run(slab_site, [1,], 2.)
+    result = a.run(slab_site, [0,], 2., 100., 0.3, 2.)
     result.write2text(output_path='/home/ppx/PythonProjects/test_files/test_Slabs/results')

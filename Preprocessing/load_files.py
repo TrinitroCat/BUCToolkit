@@ -450,6 +450,7 @@ class OUTCAR2Feat(BatchStructures):
             r"(?<=TOTAL-FORCE.\(eV/Angst\)\n.-----------------------------------------------------------------------------------\n)\s+[-|0-9\s\n.]+")
         self.__energy_partt = re.compile(r'FREE ENERGIE OF THE ION-ELECTRON SYSTEM.*\n.*\n.*\n.*\n.*energy\(sigma->0\) =\s*([0-9\-.]+)\n')
         self.__cell_partt = re.compile(r'VOLUME and BASIS-vectors are now.*\n.*\n.*\n.*\n.*direct lattice vectors.*\n(.*\n.*\n.*)')
+        self.__is_converge_partt = re.compile(r'aborting loop .')
 
     @staticmethod
     def _get_atom_info(data: str) -> Tuple[List, List]:
@@ -482,10 +483,16 @@ class OUTCAR2Feat(BatchStructures):
         with open(full_path, "r") as file:  #打开文件
             data = file.read()  #读取文件
         n_atom = re.search(self.__n_atom_partt, data)  #从OUTCAR文件搜索原子数
-        if n_atom is None: raise RuntimeError('No atoms matched.')
+        if n_atom is None:
+            warnings.warn(f'No atoms matched in {file_name}, skipped.', RuntimeWarning)
+            if parallel:
+                return [], [], [], [], [], [], [], []
+            else:
+                return None
         n_atom = int(n_atom.group())  #将输出的原子个数保存为整数形式
         position_iter = re.finditer(self.__pos_force_partt, data)  #通过re匹配的迭代器函数，找到原子坐标
-        energies = re.findall(self.__energy_partt, data)
+        _energies = re.findall(self.__energy_partt, data)
+        is_converged = re.findall(self.__is_converge_partt, data)
 
         # ATOM & Number
         atoms, numbers = self._get_atom_info(data)
@@ -498,19 +505,22 @@ class OUTCAR2Feat(BatchStructures):
         cells = cells[:, :, :3]
 
         _data = list()
-        energies = [float(_en) for _en in energies]
-        for match_for in position_iter:  #循环的取每次迭代找到的一个结构的原子坐标与受力信息
-            _dat = re.split(r"\n+", match_for.group())  #通过换行符进行划分
-            _dat = [re.split(r'[0-9][\n\s\t]+', dat_) for dat_ in _dat[:-2]]  #去除空字符或都是横线的行，然后循环的对每一行进行划分 <<< # TODO
-            _data.append(_dat)  #将原子坐标的列表添加进列表中
+        energies = list()
+        for i, match_for in enumerate(position_iter):  #循环的取每次迭代找到的一个结构的原子坐标与受力信息
+            # if SCF converged, content in OUTCAR would be 'aborting loop because ...' else 'aborting loop EDIFF was not reached ...'
+            if is_converged[i][-1] == 'b':
+                _dat = re.split(r"\n+", match_for.group())  #通过换行符进行划分
+                _dat = [re.split(r'[0-9][\n\s\t]+', dat_) for dat_ in _dat[:-2]]  #去除空字符或都是横线的行，然后循环的对每一行进行划分 <<< # TODO
+                _data.append(_dat)  #将原子坐标的列表添加进列表中
+                energies.append(float(_energies[i]))
 
         _data = np.array(_data, dtype=np.float32)  # (n_step, n_atom, 3)
         if len(_data) == 0:
             warnings.warn(f'Occurred empty data in file {file_name}, skipped.', RuntimeWarning)
             if parallel:
-                return [], [], [], [], [], []
+                return [], [], [], [], [], [], [], []
             else:
-                return
+                return None
 
         # formatted
         n_step, n_atom, _ = _data.shape

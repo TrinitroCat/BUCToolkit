@@ -65,7 +65,7 @@ class Trainer(_CONFIGS):
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
             epoch_now = chk_data['epoch']
-            val_loss_old = chk_data['val_loss']
+            val_loss_old = chk_data['val_loss'] if isinstance(chk_data['val_loss'], float) else chk_data['val_loss'][0]
         elif self.START == 'from_scratch' or self.START == 0:
             epoch_now = 0
             if self.param is not None:
@@ -108,6 +108,10 @@ class Trainer(_CONFIGS):
         history: Dict[Literal['train_loss', 'val_loss'], List[float]] = {'train_loss': list(), 'val_loss': list()}
         OPTIMIZER.zero_grad()
         i = epoch_now
+        if not os.path.isdir(self.CHK_SAVE_PATH):
+            os.makedirs(self.CHK_SAVE_PATH, )
+        if not os.path.isdir(self.CHK_SAVE_PATH):
+            os.makedirs(self.CHK_SAVE_PATH, )
 
         try:
             # I/O
@@ -256,19 +260,22 @@ class Trainer(_CONFIGS):
                                         self.logger.info(f', {_name}: {_metr:> 4.4e}')
                                 self.logger.info(f', time: {time.perf_counter() - time_val:<.4f}')
 
-                            if self.SAVE_CHK and (_val_loss < val_loss_old):
-                                with _LoggingEnd(self.log_handler):
-                                    if self.verbose: self.logger.info('Validation loss descent. Saving checkpoint file...')
-                                val_loss_old = copy.deepcopy(_val_loss)
-                                states = {
-                                    'epoch': i,
-                                    'model_state_dict': _model.state_dict(),
-                                    'optimizer_state_dict': OPTIMIZER.state_dict(),
-                                    'val_loss': _val_loss,
-                                }
-                                if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
-                                th.save(states, os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
-                                if self.verbose: self.logger.info('Done.')
+                            if self.SAVE_CHK:
+                                if _val_loss < val_loss_old:
+                                    with _LoggingEnd(self.log_handler):
+                                        if self.verbose: self.logger.info('Validation loss descent. Saving checkpoint file...')
+                                    val_loss_old = copy.deepcopy(_val_loss)
+                                    states = {
+                                        'epoch': i,
+                                        'model_state_dict': _model.state_dict(),
+                                        'optimizer_state_dict': OPTIMIZER.state_dict(),
+                                        'val_loss': _val_loss,
+                                    }
+                                    if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
+                                    th.save(states, os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
+                                    if self.verbose: self.logger.info('Done.')
+                                else:
+                                    if self.verbose: self.logger.info(f'Validation loss NOT descent. Minimum loss: {val_loss_old:< 4.4e}.')
 
                     time_gp = time.perf_counter()
                     num_step += 1
@@ -306,13 +313,11 @@ class Trainer(_CONFIGS):
                         'optimizer_state_dict': OPTIMIZER.state_dict(),
                         'val_loss': th.inf
                     }
-                    if len(history['val_loss']) == 0:
-                        states['val_loss'] = th.inf
-                    else:
+                    if len(history['val_loss']) != 0:
                         states['val_loss'] = history['val_loss'][-1],
                     if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
-                    th.save(states, os.path.join(self.CHK_SAVE_PATH, f'checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
-                    self.logger.info(f'*** Checkpoint file was saved in {os.path.join(self.CHK_SAVE_PATH, f"checkpoint{self.CHK_SAVE_POSTFIX}.pt")}')
+                    th.save(states, os.path.join(self.CHK_SAVE_PATH, f'stop_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
+                    self.logger.info(f'*** Checkpoint file was saved in {os.path.join(self.CHK_SAVE_PATH, f"stop_checkpoint{self.CHK_SAVE_POSTFIX}.pt")}')
 
     def _val(self, model, LOSS) -> Tuple[float, Dict]:
         """
@@ -341,7 +346,7 @@ class Trainer(_CONFIGS):
             _num_step += 1
         _val_loss = _val_loss / _num_step
         if len(self.METRICS) > 0:
-            _metr_list = {_name: _val / _num_step for _name, _val in _metr_list.items()}  # type: ignore
+            _metr_list = {_name: _val / _num_step for _name, _val in _metr_list.items()}  # note: mean value per batch.
         else:
             _metr_list = dict()
         return _val_loss, _metr_list

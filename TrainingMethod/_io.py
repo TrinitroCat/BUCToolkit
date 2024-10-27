@@ -97,7 +97,7 @@ class _CONFIGS(object):
         """
         if model_config is None: model_config = dict()
         if not isinstance(model_config, Dict): raise TypeError('model_config must be a dictionary.')
-        self.LOSS_CONFIG = model_config
+        self.MODEL_CONFIG = model_config
 
     def set_lr_scheduler(self, lr_scheduler, lr_scheduler_config: Optional[Dict[str, Any]] = None) -> None:
         """
