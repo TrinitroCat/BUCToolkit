@@ -486,7 +486,7 @@ class OUTCAR2Feat(BatchStructures):
         if n_atom is None:
             warnings.warn(f'No atoms matched in {file_name}, skipped.', RuntimeWarning)
             if parallel:
-                return [], [], [], [], [], [], [], []
+                return [], [], [], [], [], [], [], [], []
             else:
                 return None
         n_atom = int(n_atom.group())  #将输出的原子个数保存为整数形式
@@ -499,11 +499,9 @@ class OUTCAR2Feat(BatchStructures):
         atoms = np.array(atoms, dtype='<U4')
         numbers = np.array(numbers, dtype=np.int32)
         # Cell Vectors
-        cells = re.findall(self.__cell_partt, data, )
-        cells = [_cell.split() for _cell in cells]
-        cells = np.array(cells, dtype=np.float32).reshape(-1, 3, 6)
-        cells = cells[:, :, :3]
+        cells_str = re.findall(self.__cell_partt, data, )
 
+        cells = list()
         _data = list()
         energies = list()
         for i, match_for in enumerate(position_iter):  #循环的取每次迭代找到的一个结构的原子坐标与受力信息
@@ -513,12 +511,15 @@ class OUTCAR2Feat(BatchStructures):
                 _dat = [re.split(r'[0-9][\n\s\t]+', dat_) for dat_ in _dat[:-2]]  #去除空字符或都是横线的行，然后循环的对每一行进行划分 <<< # TODO
                 _data.append(_dat)  #将原子坐标的列表添加进列表中
                 energies.append(float(_energies[i]))
+                cells.append(cells_str[i].split())
 
+        cells = np.array(cells, dtype=np.float32).reshape(-1, 3, 6)
+        cells = cells[:, :, :3]
         _data = np.array(_data, dtype=np.float32)  # (n_step, n_atom, 3)
         if len(_data) == 0:
             warnings.warn(f'Occurred empty data in file {file_name}, skipped.', RuntimeWarning)
             if parallel:
-                return [], [], [], [], [], [], [], []
+                return [], [], [], [], [], [], [], [], []
             else:
                 return None
 
@@ -535,7 +536,7 @@ class OUTCAR2Feat(BatchStructures):
         _id = [file_name + f'_{i}' for i in range(n_step)]
         # output
         if parallel:
-            return _id, atoms, numbers, cells, coords, energies, forces, fixed
+            return _id, atoms, numbers, cells, coords, energies, forces, fixed, ['C',] * n_step
         else:
             self._Sample_ids.extend(_id)
             self.Elements.extend(atoms.tolist())
@@ -545,7 +546,7 @@ class OUTCAR2Feat(BatchStructures):
             self.Energies.extend(energies)
             self.Forces.extend(forces)
             self.Fixed.extend(fixed)
-            self.Coords_type.append('C')
+            self.Coords_type.extend(["C"] * n_step)
 
     def read(self, file_list: Optional[List[str]] = None, n_core: int = -1, backend: str = 'loky'):
         r"""
@@ -591,7 +592,7 @@ class OUTCAR2Feat(BatchStructures):
                 self.Energies.extend(temp[5])
                 self.Forces.extend(temp[6])
                 self.Fixed.extend(temp[7])
-            self.Coords_type.extend(['C', ] * len(_dat))
+                self.Coords_type.extend(temp[8])
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
 
 

@@ -11,7 +11,7 @@ import torch as th
 from torch import nn
 
 from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from utils import IrregularTensorReformat
+from BM4Ckit.utils import IrregularTensorReformat
 from .._utils._line_search import _LineSearch
 from .._utils._warnings import FaildToConvergeWarning
 
