@@ -1,11 +1,13 @@
 # INPUT PARAMETERS
 
 ## global configs
-* `START`: _Literal[0, 1]_, whether to load model checkpoint file.
+* `START`: _Literal[0, 1, 2]_, whether to load model checkpoint file.
 
   (
   1. 0: **Default**, from scratch.                
-  2. 1: load checkpoint from `LOAD_CHK_FILE_PATH`
+  2. 1: load checkpoint of model parameters, optimizer state, current minimum validation error,
+        and lr_scheduler state (if set) from `LOAD_CHK_FILE_PATH`.
+  3. 2: only load model parameters from `LOAD_CHK_FILE_PATH`.
   
   )
 * `EPOCH`: _int_, number of total epochs that model will train. **Default**: 0.

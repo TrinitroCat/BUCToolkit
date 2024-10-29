@@ -58,21 +58,26 @@ class Trainer(_CONFIGS):
         """
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
-        if self.START == 'resume' or self.START == 1:
+        if self.START != 'from_scratch' and self.START != 0:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH)
             if self.param is None:
                 _model.load_state_dict(chk_data['model_state_dict'])
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
-            val_loss_old = chk_data['val_loss'] if isinstance(chk_data['val_loss'], float) else chk_data['val_loss'][0]
+            if self.START == 'resume' or self.START == 1:
+                epoch_now = chk_data['epoch']
+                val_loss_old = chk_data['val_loss'] if isinstance(chk_data['val_loss'], float) else chk_data['val_loss'][0]
+            elif self.START == 'param_only' or self.START == 2:
+                epoch_now = 0
+                val_loss_old = th.inf
+            else:
+                raise ValueError('Invalid START value. It should be "from_scratch" / 0 , "resume" / 1 , "param_only" / 2')
         elif self.START == 'from_scratch' or self.START == 0:
             epoch_now = 0
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
             val_loss_old = th.inf
-        else:
-            raise ValueError('Invalid START value. It should be "from_scratch" / 0 or "resume" / 1 ')
+
         # model vars
         _model = _model.to(self.DEVICE)
         # loss & eval vars
@@ -122,8 +127,10 @@ class Trainer(_CONFIGS):
                 self.logger.info(' TASK: TRAINING & VALIDATION <<')
                 if (self.START == 0) or (self.START == 'from_scratch'):
                     self.logger.info(' FROM_SCRATCH <<')
-                else:
+                elif (self.START == 1) or (self.START == 'resume'):
                     self.logger.info(' RESUME <<')
+                else:
+                    self.logger.info(' RESUME (ONLY MODEL PARAMETERS) <<')
                 self.logger.info(f' I/O INFORMATION:')
                 if not self.REDIRECT:
                     self.logger.info('\tTRAINING LOG OUTPUT TO SCREEN')

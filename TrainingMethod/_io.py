@@ -174,8 +174,8 @@ class _CONFIGS(object):
         self.config = config
 
         # global information
-        self.START = self.config.get('START', 'from_scratch')
-        if self.START == 'resume' or self.START == 1:
+        self.START = self.config.get('START', 0)
+        if self.START != 'from_scratch' and self.START != 0:
             self.LOAD_CHK_FILE_PATH = self.config['LOAD_CHK_FILE_PATH']
             if not isinstance(self.LOAD_CHK_FILE_PATH, str): raise TypeError('LOAD_CHK_FILE_PATH must be a str.')
         self.EPOCH: int = self.config.get('EPOCH', 0)
