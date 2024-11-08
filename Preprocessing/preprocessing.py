@@ -1,7 +1,6 @@
 """ Preprocessing """
 
 import copy
-import importlib
 # basic modules
 import re
 import time
@@ -13,23 +12,15 @@ import numpy as np
 import torch as th
 
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
-
-
-# Check modules func
-def check_module(module_name, pkg_name: None | str = None):
-    try:
-        pkg = importlib.import_module(module_name, pkg_name)
-        return pkg
-    except ImportError:
-        warnings.warn(f'Package {module_name} was not found, therefore some related methods would be unavailable.')
-        return None
-
+from BM4Ckit.utils._CheckModules import check_module
 
 ase = check_module('ase')
 _pyg = check_module('torch_geometric.data')
+dgl = check_module('dgl')
 if _pyg is not None:
     pygData = _pyg.Data
-else: pygData = None
+else:
+    pygData = None
 
 """ Constance """
 ALL_ELEMENT = {'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
@@ -285,6 +276,8 @@ class CreateASE:
         Convert to ase.Atoms from the given Sequence of symbols, positions, cell vectors and pbc information.
 
         Parameters:
+            n_core:
+            set_tags:
             symb: Sequence[Sequence], the sequence of element lists.
             pos: Sequence[Sequence], the sequence of atom coordinates lists.
             cell: Sequence[Sequence], the sequence of cell vectors lists.
@@ -331,7 +324,7 @@ class CreateASE:
             samp = ase.Atoms(symbols=symb, positions=feat.Coords[i], cell=feat.Cells[i], pbc=True)
             if set_tags:
                 samp.set_tags(np.ones(len(samp)))
-            ase_dict[feat._Sample_ids[i]] = samp
+            ase_dict[feat.Sample_ids[i]] = samp
 
         _para = jb.Parallel(n_jobs=n_core, verbose=self.verbose, require='sharedmem')
         _para(jb.delayed(_sig_conv)(i, s) for i, s in enumerate(feat.Atom_list))  # type: ignore
@@ -445,6 +438,129 @@ class CreatePygData:
                                                           feat.Coords[i],
                                                           feat.Atomic_number_list[i],
                                                           feat.Fixed[i]) for i, _id in enumerate(feat.Sample_ids))  # type: ignore
+
+        if self.verbose: print('Done.')
+        return data_list
+
+
+class CreateDglData:
+    r"""
+    create torch-geometric.data.Data or Batch from various types.
+    """
+
+    def __init__(self, verbose: int = 0) -> None:
+        # check module
+        if dgl is None:
+            raise ImportError('`CreateDglData` requires package `dgl` which could not be imported.')
+        self.verbose = verbose
+        pass
+
+    @staticmethod
+    def single_ase2graph(atoms: ase.Atoms):
+        """
+        Convert a single atomic structure to a graph.
+
+        Args:
+            atoms (ase.atoms.Atoms): An ASE atoms object.
+
+        Returns:
+            data (torch_geometric.data.Data): A geometric data object with positions, atomic_numbers, tags,
+            and optionally, energy, forces, distances, edges, and periodic boundary conditions.
+            Optional properties can include by setting r_property=True when constructing the class.
+        """
+
+        # set the atomic numbers, positions, and cell
+        atomic_numbers = th.Tensor(atoms.get_atomic_numbers())
+        positions = th.Tensor(atoms.get_positions())
+        cell = th.from_numpy(np.array(atoms.get_cell())).view(1, 3, 3)
+        n_atoms = positions.shape[0]
+        # initialized to th.zeros(natoms) if tags missing.
+        # https://wiki.fysik.dtu.dk/ase/_modules/ase/atoms.html#Atoms.get_tags
+        # TODO: these other properties might be used in future
+        tags = th.Tensor(atoms.get_tags())
+        fixed = th.zeros_like(atomic_numbers)
+        pbc = th.from_numpy(atoms.pbc)
+        # TODO: END
+        # put the minimum data in th geometric data object
+        data = dgl.heterograph(
+            {
+                ('atom', 'bond', 'atom'): ([], []),
+                ('cell', 'disp', 'cell'): ([], [])
+            },
+            num_nodes_dict={
+                'atom': n_atoms,
+                'cell': 1
+            }
+        )
+        data.nodes['atom'].data['pos'] = positions
+        data.nodes['atom'].data['Z'] = atomic_numbers
+        data.nodes['cell'].data['cell'] = cell
+        return data
+
+    def ase2graph_list(self, atom_list: List[ase.Atoms], n_core: int = 1) -> List[pygData]:
+        r"""
+        Convert a list of ase.Atoms into a list of dgl.DGLGraph
+        """
+        if n_core == 1:
+            if self.verbose: print('Converting ase.Atoms to dgl.DGLGraph sequentially...')
+            data_list = [self.single_ase2graph(_atom) for _atom in atom_list]
+        else:
+            if self.verbose: print(f'Converting ase Atoms to pyg Batch in parallel with {n_core} cores...')
+            _para = jb.Parallel(n_jobs=n_core, verbose=self.verbose)
+            data_list: List | None = _para(jb.delayed(self.single_ase2graph)(_atom) for _atom in atom_list)
+        if data_list is None: raise RuntimeError('Occurred None data.')
+
+        if self.verbose: print('Done.')
+        return data_list
+
+    def feat2graph_list(self, feat: BatchStructures, n_core: int = 1) -> List[pygData]:
+        r"""
+        Convert BatchStructures into a list of pyg.Data for fair-chem model
+        """
+        if feat.Atomic_number_list is None: feat.generate_atomic_number_list()
+
+        def _convert_single(_id, _cell, _coords, _atomic_numbers, _fix):
+            cell = th.from_numpy(_cell).view(1, 3, 3).to(th.float32)
+            positions = th.from_numpy(_coords).to(th.float32)
+            atomic_numbers = th.tensor(_atomic_numbers)  # type: ignore
+            n_atoms = len(atomic_numbers)
+            fixed = th.from_numpy(_fix).to(th.float32)  # .unsqueeze(0)  # fixme
+            # put the minimum data in th geometric data object
+            _data = dgl.heterograph(
+                {
+                    ('atom', 'bond', 'atom'): ([], []),
+                    ('cell', 'disp', 'cell'): ([], [])
+                },
+                num_nodes_dict={
+                    'atom': n_atoms,
+                    'cell': 1
+                }
+            )
+            _data.nodes['atom'].data['pos'] = positions
+            _data.nodes['atom'].data['Z'] = atomic_numbers
+            _data.nodes['cell'].data['cell'] = cell
+            _data.nodes['cell'].data['idx'] = th.tensor([_id], dtype=th.int64)
+            return _data
+
+        if n_core == 1:
+            if self.verbose: print('Converting BatchStructures to dgl.Graph sequentially...')
+            data_list: List = [_convert_single(i,
+                                               feat.Cells[i],
+                                               feat.Coords[i],
+                                               feat.Atomic_number_list[i],
+                                               feat.Fixed[i]) for i, _id in enumerate(feat.Sample_ids)]  # type: ignore
+        else:
+            if self.verbose: print(f'Converting BatchStructures to dgl.Graph in parallel with {n_core} cores...')
+            with jb.Parallel(n_jobs=n_core, verbose=self.verbose, backend='threading') as _para:
+                data_list = _para(
+                    jb.delayed(_convert_single)(
+                        i,
+                        feat.Cells[i],
+                        feat.Coords[i],
+                        feat.Atomic_number_list[i],
+                        feat.Fixed[i]
+                    ) for i, _id in enumerate(feat.Sample_ids)
+                )
 
         if self.verbose: print('Done.')
         return data_list

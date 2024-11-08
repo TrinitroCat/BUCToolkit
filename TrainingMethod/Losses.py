@@ -32,6 +32,8 @@ class Energy_Force_Loss(nn.Module):
             self.loss_E = nn.SmoothL1Loss()
         elif loss_E == 'MSE':
             self.loss_E = nn.MSELoss()
+        elif loss_E == 'SmoothMAE':
+            self.loss_E = nn.SmoothL1Loss()
         else:
             self.loss_E = loss_E
 

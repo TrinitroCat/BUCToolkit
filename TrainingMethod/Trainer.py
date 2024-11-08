@@ -191,15 +191,27 @@ class Trainer(_CONFIGS):
                 for batch_data, batch_label in trn_set:
                     _model.train()
                     # to avoid get an empty batch
-                    if len(batch_data) <= 0:
+                    if not isinstance(batch_data, (th.Tensor, )):
+                        len_data = batch_data.batch_size
+                    else:
+                        len_data = len(batch_data)
+                    if len_data <= 0:
                         if self.verbose: self.logger.info(f'An empty batch occurred in step {num_step}. Skipped.')
                         continue
                     # batch device
                     batch_data.to(self.DEVICE)
                     #batch_label.to(self.DEVICE)
 
-                    # pred & loss
+                    # pred & loss, pred must be a Dict.
                     pred_y = _model(batch_data)
+                    # check nan
+                    for key in pred_y.keys():
+                        is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
+                        if th.any(is_nan):
+                            pred_y[key] = th.where(th.isnan(pred_y[key]), 0., pred_y[key])
+                            self.logger.warning('NaN occurred in model output, and has been set to 0.')
+                            if self.DEBUG_MODE: self.logger.warning(f'batch_data:\n {batch_data}\n\nlabels:\n {batch_label}')
+                    # backward
                     loss = LOSS(pred_y, batch_label) / self.ACCUMULATE_STEP
                     loss.backward()
 
@@ -224,7 +236,7 @@ class Trainer(_CONFIGS):
                     # Debug Mode END-----------------------------------------------------------------------------------------------------------
 
                     # update & metrics & output
-                    real_n_samp += len(batch_data)  # sample number count
+                    real_n_samp += len_data  # sample number count
                     if (num_step % self.ACCUMULATE_STEP == 0) or (num_step == n_batch):
                         # update
                         OPTIMIZER.step()
@@ -251,7 +263,7 @@ class Trainer(_CONFIGS):
                             self.logger.info(f', time: {time.perf_counter() - time_gp:>10.4f}, [UPDATE GRAD]')
 
                     # validation
-                    if (n_val_samp >= 1) and (num_step % self.VAL_PER_STEP) == 0:
+                    if ((n_val_samp >= 1) and (num_step % self.VAL_PER_STEP) == 0) or (num_step < self.VAL_PER_STEP and num_step == n_batch):
                         time_val = time.perf_counter()
                         with _LoggingEnd(self.log_handler):
                             if self.verbose: self.logger.info('VALIDATION...')
@@ -337,7 +349,11 @@ class Trainer(_CONFIGS):
         _metr_list = {_name: 0. for _name in self.METRICS.keys()}
         for val_data, val_label in val_set:
             # to avoid get an empty batch
-            if len(val_data) <= 0:
+            if not isinstance(val_data, (th.Tensor,)):
+                len_data = val_data.batch_size
+            else:
+                len_data = len(val_data)
+            if len_data <= 0:
                 if self.verbose: self.logger.info(f'An empty batch occurred in validation. Skipped.')
                 continue
             # pred & loss
