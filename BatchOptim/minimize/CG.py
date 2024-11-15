@@ -290,7 +290,7 @@ class CG:
                                      f"MAX_F: {th.max(F_eps):>5.7e}\n "
                                      f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"Converged: {converge_str}\n "
-                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
+                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s")
                 if self.verbose > 1:
                     self.logger.info(f" Coordinates:\n")
                     X_str = [
@@ -352,7 +352,7 @@ class CG:
             with th.no_grad():
                 if self.verbose > 0:
                     self.logger.info(
-                        f"step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}"
+                        f"step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}\n"
                     )
                 # update X
                 X = X + alpha * p.view(n_batch, n_atom, n_dim) # (n_batch, n_atom, 3) + (n_batch, 1, 1) * (n_batch, n_atom, 3) * (n_batch, n_atom, 3)

@@ -214,6 +214,8 @@ class BatchStructures(object):
         It Consumes Memory.
         """
         self.Batch_indices_ = np.array([0] + list(accumulate([len(_) for _ in self.Coords])), dtype=np.int64)
+        #self.Batch_indices__ = np.apply_along_axis(lambda x: len(x), 0, self.Coords)
+        #self.Batch_indices__ = np.cumsum(self.Batch_indices__) - self.Batch_indices__
         self.Elements_batch_indices_ = np.array([0] + list(accumulate([len(_) for _ in self.Numbers])), dtype=np.int64)
         if release_mem:
             # Batch_indices control the coords, atom_list, atomic_number_list, fixed, forces
@@ -529,6 +531,8 @@ class BatchStructures(object):
             raise ValueError(f'Invalid value of `file_format`: {file_format}.')
         if indices is None:
             sub_self = self
+        elif isinstance(indices, Tuple):
+            sub_self = self[indices[0]: indices[1]]
         else:
             sub_self = self[indices]
         if file_name_list is None:
@@ -703,6 +707,55 @@ class BatchStructures(object):
             warnings.warn('Atomic_number_list already existed, so it would not be updated.')
         else:
             raise RuntimeError(f'An Unknown Atomic_number_list occurred. Atomic_number_list == {self.Atomic_number_list}')
+
+    def cartesian2direct(self, ):
+        """ Convert Cartesian coordinates to Direct coordinates. Only work in 'L' Mode. """
+        for i, cootype in enumerate(self.Coords_type):
+            if cootype == 'C':
+                cell = self.Cells[i]
+                self.Coords[i] @= np.linalg.inv(cell)
+                self.Coords_type[i] = 'D'
+
+    def direct2cartesian(self, ):
+        """ Convert Direct coordinates to Cartesian coordinates. Only work in 'L' Mode. """
+        for i, cootype in enumerate(self.Coords_type):
+            if cootype == 'D':
+                cell = self.Cells[i]
+                self.Coords[i] @= cell
+                self.Coords_type[i] = 'C'
+
+    def fcc(self, ):
+        """ Return a view of BatchStructures that only contains fcc structures. """
+        STANDARD_DIST_MAT = np.array(
+            [[0.        , 0.70710678, 0.70710676, 0.70710676],
+             [0.70710678, 0.        , 0.70710676, 0.70710676],
+             [0.70710676, 0.70710676, 0.        , 0.70710678],
+             [0.70710676, 0.70710676, 0.70710678, 0.        ]]
+        )
+        sub_self = BatchStructures()
+        for i, coo in enumerate(self.Coords):
+            cell = self.Cells[i]
+            # judge orthogonal lattice
+            if not np.allclose(cell, np.diag(np.diag(cell)), atol=1e-5, ):
+                continue
+            if len(coo) != 4:
+                continue
+            if self.Coords_type[i] == 'C':  # all convert to Direct coordinate
+                coo = coo @ np.linalg.inv(cell)
+            direct_mat = np.linalg.norm(coo[:, None, :] - coo[None, :, :], axis=-1)  # (n_atom, 1, 3) - (1, n_atom, 3) -norm-> (n_atom, n_atom)
+            if np.allclose(STANDARD_DIST_MAT, direct_mat, rtol=1e-5):
+                sub_self._Sample_ids.append(self.Sample_ids[i])
+                sub_self.Cells.append(self.Cells[i])
+                sub_self.Elements.append(self.Elements[i])
+                sub_self.Numbers.append(self.Numbers[i])
+                sub_self.Coords.append(self.Coords[i])
+                sub_self.Coords_type.append(self.Coords_type[i])
+                sub_self.Fixed.append(self.Fixed[i])
+                if sub_self.Energies is not None: sub_self.Energies.append(self.Energies[i])  # type: ignore
+                if sub_self.Forces is not None: sub_self.Forces.append(self.Forces[i])  # type: ignore
+                if sub_self.Labels is not None: sub_self.Labels.append(self.Labels[i])  # type: ignore
+
+        return sub_self
 
     def rearrange(self, labels: Optional[Dict | List] = None, split_ratio: float = 0.2, n_core: int = 1, verbose: int = 0) -> (
             Tuple[List[List[np.ndarray]], List[List[np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]):

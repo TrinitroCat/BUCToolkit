@@ -79,3 +79,57 @@ class Energy_Loss(nn.Module):
     def forward(self, pred: Dict[Literal['energy'], th.Tensor], label: Dict[Literal['energy'], th.Tensor]):
         loss = self.loss_E(pred['energy'], label['energy'])
         return loss
+
+
+class WrapperBoostLoss(nn.Module):
+    def __init__(self, loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE', ) -> None:
+        super().__init__()
+        if loss_E == 'MAE':
+            self.loss_E = nn.L1Loss()
+        elif loss_E == 'SmoothMAE':
+            self.loss_E = nn.SmoothL1Loss()
+        elif loss_E == 'MSE':
+            self.loss_E = nn.MSELoss()
+        elif loss_E == 'Huber':
+            self.loss_E = nn.HuberLoss()
+        else:
+            self.loss_E = loss_E
+
+    def forward(self, pred_list: List[Dict[Literal['energy'], th.Tensor]], label: Dict[Literal['energy'], th.Tensor]):
+        loss = 0.
+        res = label['energy']
+        if isinstance(pred_list, Sequence):
+            for pred in pred_list:
+                loss = loss + self.loss_E(res, pred['energy'])
+                res = res - pred['energy']
+        elif isinstance(pred_list, Dict):
+            loss = self.loss_E(res, pred_list['energy'])
+        else:
+            raise TypeError(f'`pred_list` should be Dict or Sequence, but occurred {type(pred_list)}.')
+        return loss
+
+
+class WrapperMeanLoss(nn.Module):
+    def __init__(self, loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE', ) -> None:
+        super().__init__()
+        if loss_E == 'MAE':
+            self.loss_E = nn.L1Loss()
+        elif loss_E == 'SmoothMAE':
+            self.loss_E = nn.SmoothL1Loss()
+        elif loss_E == 'MSE':
+            self.loss_E = nn.MSELoss()
+        elif loss_E == 'Huber':
+            self.loss_E = nn.HuberLoss()
+        else:
+            self.loss_E = loss_E
+
+    def forward(self, pred_list: List[Dict[Literal['energy'], th.Tensor]], label: Dict[Literal['energy'], th.Tensor]):
+        loss = 0.
+        if isinstance(pred_list, Sequence):
+            for pred in pred_list:
+                loss = loss + self.loss_E(label['energy'], pred['energy'])
+        elif isinstance(pred_list, Dict):
+            loss = self.loss_E(label['energy'], pred_list['energy'])
+        else:
+            raise TypeError(f'`pred_list` should be Dict or Sequence, but occurred {type(pred_list)}.')
+        return loss

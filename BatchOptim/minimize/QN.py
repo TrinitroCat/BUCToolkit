@@ -217,28 +217,28 @@ class QN:
         self.logger.info('-' * 100)
         # MAIN LOOP
         X.requires_grad_()
-        energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
-        # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
-        if energies.shape[0] != self.n_batch:
-            assert batch_indices is not None, f"batch indices is None while shape of model output ({energies.shape}) does not match batch size."
-            assert energies.shape[0] == n_inner_batch, f"shape of output ({energies.shape}) does not match given batch indices"
-            self.is_concat_X = True
-        else:
-            self.is_concat_X = False
-        # calc. grad
-        if is_grad_func_contain_y:
-            X_grad = th.where(converge_mask, 0., grad_func_(X, energies, *grad_func_args, **grad_func_kwargs))
-        else:
-            X_grad = th.where(converge_mask, 0., grad_func_(X, *grad_func_args, **grad_func_kwargs))
-        if X_grad.shape != X.shape:
-            raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
-        energies = energies.detach()
-        X_grad = X_grad.detach() * atom_masks
-        X = X.detach()
-        g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
-        g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
-        for numit in range(maxiter):
-            with th.no_grad():
+        with th.no_grad():
+            energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+            # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
+            if energies.shape[0] != self.n_batch:
+                assert batch_indices is not None, f"batch indices is None while shape of model output ({energies.shape}) does not match batch size."
+                assert energies.shape[0] == n_inner_batch, f"shape of output ({energies.shape}) does not match given batch indices"
+                self.is_concat_X = True
+            else:
+                self.is_concat_X = False
+            # calc. grad
+            if is_grad_func_contain_y:
+                X_grad = th.where(converge_mask, 0., grad_func_(X, energies, *grad_func_args, **grad_func_kwargs))
+            else:
+                X_grad = th.where(converge_mask, 0., grad_func_(X, *grad_func_args, **grad_func_kwargs))
+            if X_grad.shape != X.shape:
+                raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
+            energies = energies.detach()
+            X_grad = X_grad.detach() * atom_masks
+            X = X.detach()
+            g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
+            g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
+            for numit in range(maxiter):
                 # Calc. Criteria
                 E_eps = th.abs(energies - energies_old)  # (n_batch, )
                 energies_old = energies.detach().clone()
@@ -274,7 +274,7 @@ class QN:
                                      f"MAX_F: {th.max(F_eps):>5.7e}\n "
                                      f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"Converged: {converge_str}\n "
-                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
+                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s")
                 if self.verbose > 1:
                     self.logger.info(f" Coordinates:\n")
                     X_str = [
@@ -289,34 +289,32 @@ class QN:
                     break
                 t_st = time.perf_counter()
 
-            # QN scheme
-            if self.iterform == 'BFGS':
-                p = -H_inv @ g  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
-                # Line Search -> steplength: (n_batch, 1, 1)
-                alpha = th.where(
-                    converge_mask[:, :1, :1],
-                    0.,
-                    self._line_search(func, X, energies, g, p, func_args=func_args, func_kwargs=func_kwargs)
-                )
-                with th.no_grad():
+                # QN scheme
+                if self.iterform == 'BFGS':
+                    p = -H_inv @ g  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
+                    # Line Search -> steplength: (n_batch, 1, 1)
+                    alpha = th.where(
+                        converge_mask[:, :1, :1],
+                        0.,
+                        self._line_search(func, X, energies, g, p, func_args=func_args, func_kwargs=func_kwargs)
+                    )
                     # update X
                     displace = alpha * p  # (n_batch, 1, 1) * (n_batch, n_atom*3, 1)
                     X = X + displace.view(n_batch, n_atom, n_dim)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
-                # update old grad
-                g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
-                X.requires_grad_()
-                energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
-                if is_grad_func_contain_y:
-                    X_grad = th.where(converge_mask, F_eps,
-                                      grad_func_(X, energies, *grad_func_args, **grad_func_kwargs))
-                else:
-                    X_grad = th.where(converge_mask, F_eps, grad_func_(X, *grad_func_args, **grad_func_kwargs))
-                energies = energies.detach()
-                X_grad = X_grad.detach() * atom_masks
-                X = X.detach()
-                g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
-                g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
-                with th.no_grad():
+                    # update old grad
+                    g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
+                    X.requires_grad_()
+                    energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+                    if is_grad_func_contain_y:
+                        X_grad = th.where(converge_mask, F_eps,
+                                          grad_func_(X, energies, *grad_func_args, **grad_func_kwargs))
+                    else:
+                        X_grad = th.where(converge_mask, F_eps, grad_func_(X, *grad_func_args, **grad_func_kwargs))
+                    energies = energies.detach()
+                    X_grad = X_grad.detach() * atom_masks
+                    X = X.detach()
+                    g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
+                    g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
                     # update H_inv
                     g_go = g - g_old
                     gamma = 1 / (displace.mT @ g_go + 1e-20)  # (n_batch, 1, n_atom*3) @ (n_batch, n_atom*3, 1) -> (n_batch, 1, 1), 1e-20 to avoid 1/0
@@ -328,67 +326,66 @@ class QN:
                         (Ident - gamma * displace @ g_go.mT) @ H_inv @ (Ident - gamma * g_go @ displace.mT) + gamma * displace @ displace.mT
                     )
 
-            elif self.iterform == 'XWW':  # Xiao-Wei-Wang # TODO
-                p = -H_inv @ g  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
-                # Line Search -> steplength: (n_batch, 1, 1)
-                alpha = th.where(converge_mask[:, :1, :1],
-                                 0.,
-                                 self._line_search(func, X, energies, g, p, func_args=func_args,
-                                                   func_kwargs=func_kwargs))
-                pass
+                elif self.iterform == 'XWW':  # Xiao-Wei-Wang # TODO
+                    p = -H_inv @ g  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
+                    # Line Search -> steplength: (n_batch, 1, 1)
+                    alpha = th.where(converge_mask[:, :1, :1],
+                                     0.,
+                                     self._line_search(func, X, energies, g, p, func_args=func_args,
+                                                       func_kwargs=func_kwargs))
+                    pass
 
-            elif self.iterform == 'Newton':
-                # Hessian
-                H = th.zeros((n_batch, n_atom * n_dim, n_atom * n_dim), device=self.device)
-                hess_mask = th.zeros(n_batch, n_atom * n_dim, 1, device=self.device)
-                for i in range(n_atom * n_dim):
-                    hess_mask[:, i] = 1.
-                    H_line = th.where(
+                elif self.iterform == 'Newton':
+                    # Hessian
+                    H = th.zeros((n_batch, n_atom * n_dim, n_atom * n_dim), device=self.device)
+                    hess_mask = th.zeros(n_batch, n_atom * n_dim, 1, device=self.device)
+                    for i in range(n_atom * n_dim):
+                        hess_mask[:, i] = 1.
+                        H_line = th.where(
+                            converge_mask[:, :1, :1],
+                            hess_mask,
+                            th.autograd.grad(g, X, hess_mask, retain_graph=True)[0]
+                        )  # (n_batch, n_atom*n_dim, 1)
+                        H[:, :, i] = H_line.squeeze(-1)
+                        hess_mask[:, i] = 0.
+                    del H_line
+                    H = H.detach()
+                    g = g.detach()
+                    p = - th.where(converge_mask[:, :1, :1], 0., th.linalg.solve(H, g))
+
+                    # Line Search -> steplength: (n_batch, 1, 1)
+                    alpha = th.where(
                         converge_mask[:, :1, :1],
-                        hess_mask,
-                        th.autograd.grad(g, X, hess_mask, retain_graph=True)[0]
-                    )  # (n_batch, n_atom*n_dim, 1)
-                    H[:, :, i] = H_line.squeeze(-1)
-                    hess_mask[:, i] = 0.
-                del H_line
-                H = H.detach()
-                g = g.detach()
-                p = - th.where(converge_mask[:, :1, :1], 0., th.linalg.solve(H, g))
-
-                # Line Search -> steplength: (n_batch, 1, 1)
-                alpha = th.where(
-                    converge_mask[:, :1, :1],
-                    0.,
-                    self._line_search(func, X, energies, g, p, func_args=func_args, func_kwargs=func_kwargs)
-                )
-                # update X
-                with th.no_grad():
+                        0.,
+                        self._line_search(func, X, energies, g, p, func_args=func_args, func_kwargs=func_kwargs)
+                    )
+                    # update X
                     displace = alpha * p * atom_masks  # (n_batch, 1, 1) * (n_batch, n_atom*3, 1) * (n_batch, n_atom*3, 1)
                     X = X + displace.view(n_batch, n_atom, n_dim)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
-                # update old grad
-                g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
-                X.detach_()
-                X.requires_grad_()
-                energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
-                if is_grad_func_contain_y:
-                    X_grad = th.where(converge_mask, 0., grad_func_(X, energies, *grad_func_args, **grad_func_kwargs))
+                    # update old grad
+                    g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
+                    X.detach_()
+                    X.requires_grad_()
+                    energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+                    if is_grad_func_contain_y:
+                        X_grad = th.where(converge_mask, 0., grad_func_(X, energies, *grad_func_args, **grad_func_kwargs))
+                    else:
+                        X_grad = th.where(converge_mask, 0., grad_func_(X, *grad_func_args, **grad_func_kwargs))
+                    energies = energies.detach()
+                    X_grad = X_grad.detach()
+                    X = X.detach()
+                    g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
+                    g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
+
                 else:
-                    X_grad = th.where(converge_mask, 0., grad_func_(X, *grad_func_args, **grad_func_kwargs))
-                energies = energies.detach()
-                X_grad = X_grad.detach()
-                X = X.detach()
-                g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
-                g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
+                    raise NotImplementedError
+                # print steplength
+                if self.verbose > 1:
+                    self.logger.info(f"step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}\n")
+                # Check NaN
+                if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
 
-            else:
-                raise NotImplementedError
-            # print steplength
-            if self.verbose > 1:
-                self.logger.info(f"step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}\n")
-            # Check NaN
-            if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
-
-            #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
         if self.verbose > 0:
             if is_main_loop_converge:

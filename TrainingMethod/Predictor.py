@@ -173,9 +173,9 @@ class Predictor(_CONFIGS):
                     if len(_results_names) != len(_results):
                         warnings.warn('The number of sample names does Not match the number of predicted results. PLEASE DOUBLE CHECK.',
                                       RuntimeWarning)
-                    np.savez_compressed(self.PREDICTIONS_SAVE_FILE, predictions=_results, names=_results_names)
+                    np.savez_compressed(self.PREDICTIONS_SAVE_FILE + '.npz', predictions=_results, names=_results_names)
                 else:
-                    np.savez_compressed(self.PREDICTIONS_SAVE_FILE, predictions=_results)
+                    np.savez_compressed(self.PREDICTIONS_SAVE_FILE + '.npz', predictions=_results)
                 if self.verbose: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
             elif test_model:
                 return _results, t_per_batch, max_alloc_mem

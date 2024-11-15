@@ -58,9 +58,10 @@ class _LineSearch:
             func_kwargs = dict()
         Xn = X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim) # (n_batch, n_atom, n_dim)
         Xn.requires_grad_()
-        y1 = (func(Xn, *func_args, **func_kwargs)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
-        if self.is_concat_X: y1 = th.sum(y1, keepdim=True)
-        dy1 = th.autograd.grad(y1, Xn, th.ones_like(y1))[0] # (n_batch, n_atom, n_dim)
+        with th.enable_grad():
+            y1 = (func(Xn, *func_args, **func_kwargs)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
+            if self.is_concat_X: y1 = th.sum(y1, keepdim=True)
+            dy1 = th.autograd.grad(y1, Xn, th.ones_like(y1))[0] # (n_batch, n_atom, n_dim)
         # detach grad graph
         dy1 = dy1.detach()
         y1 = y1.detach()

@@ -1,0 +1,75 @@
+# input template
+
+# global configs
+START: 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH
+EPOCH: 0
+BATCH_SIZE: 64
+
+# I/O configs
+REDIRECT: false    # whether output training logs to OUTPUT_PATH or directly print on screen.
+SAVE_PREDICTIONS: true  # only for predictions. Whether output predictions to a npz file.
+LOAD_CHK_FILE_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/Bulk_formation_energy_and_dBandCenter/best_checkpoint_Ef.pt
+OUTPUT_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/Bulk_formation_energy_and_dBandCenter
+OUTPUT_POSTFIX: Ef
+PREDICTIONS_SAVE_FILE: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/Bulk_formation_energy_and_dBandCenter/predictions/Predictions_Ef_test.npz  # path of saving predictions
+
+# model configs
+MODEL_NAME: GemNet_OC
+MODEL_CONFIG:
+  num_atoms: 0
+  bond_feat_dim: 0
+  num_targets: 1
+  activation: silu
+  atom_edge_interaction: true
+  atom_interaction: true
+  cbf:
+    name: spherical_harmonics
+  cutoff: 12.0
+  cutoff_aeaint: 12.0
+  cutoff_aint: 12.0
+  cutoff_qint: 12.0
+  direct_forces: true
+  edge_atom_interaction: true
+  emb_size_aint_in: 64
+  emb_size_aint_out: 64
+  emb_size_atom: 256
+  emb_size_cbf: 16
+  emb_size_edge: 512
+  emb_size_quad_in: 32
+  emb_size_quad_out: 32
+  emb_size_rbf: 16
+  emb_size_sbf: 32
+  emb_size_trip_in: 64
+  emb_size_trip_out: 64
+  envelope:
+    exponent: 5
+    name: polynomial
+  extensive: true
+  forces_coupled: false
+  max_neighbors: 30
+  max_neighbors_aeaint: 20
+  max_neighbors_aint: 1000
+  max_neighbors_qint: 8
+  num_after_skip: 2
+  num_atom: 3
+  num_atom_emb_layers: 2
+  num_before_skip: 2
+  num_blocks: 4
+  num_concat: 1
+  num_global_out_layers: 2
+  num_output_afteratom: 3
+  num_radial: 128
+  num_spherical: 7
+  otf_graph: true
+  output_init: HeOrthogonal
+  qint_tags:
+  - 1
+  - 2
+  quad_interaction: true
+  rbf:
+    name: gaussian
+  regress_forces: false
+  sbf:
+    name: legendre_outer
+  symmetric_edge_symmetrization: false
+

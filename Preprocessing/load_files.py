@@ -157,12 +157,14 @@ class POSCARs2Feat(BatchStructures):
         if self.verbose > 0: print('*' * 60 + '\nReading files...\n')
         if file_list is None:
             self.files_list = [__f.name for __f in os.scandir(self.path) if __f.is_file()]
-        else:
+        elif isinstance(file_list, (List, Tuple)):
             for __f in file_list:
                 if os.path.isfile(os.path.join(self.path, __f)):
                     self.files_list.append(__f)
                 else:
                     warnings.warn(f'No such file: {os.path.join(self.path, __f)}, skipped.', RuntimeWarning)
+        else:
+            raise TypeError(f'Invalid type of `file_list`: {type(file_list)}')
         self.n_samp = len(self.files_list)
         if self.n_samp == 0: raise RuntimeError('Occurred empty file_list. No file could be read.')
 

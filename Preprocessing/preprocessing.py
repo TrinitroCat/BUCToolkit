@@ -445,7 +445,7 @@ class CreatePygData:
 
 class CreateDglData:
     r"""
-    create torch-geometric.data.Data or Batch from various types.
+    create dgl.graph from various types.
     """
 
     def __init__(self, verbose: int = 0) -> None:

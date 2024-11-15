@@ -96,7 +96,6 @@ class _CONFIGS(object):
         Set the new configs (hyperparameters) of model.
         """
         if model_config is None: model_config = dict()
-        if not isinstance(model_config, Dict): raise TypeError('model_config must be a dictionary.')
         self.MODEL_CONFIG = model_config
 
     def set_lr_scheduler(self, lr_scheduler, lr_scheduler_config: Optional[Dict[str, Any]] = None) -> None:
@@ -232,8 +231,11 @@ class _CONFIGS(object):
         self.REDIRECT = self.config.get('REDIRECT', True)
         self.SAVE_CHK = self.config.get('SAVE_CHK', False)
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
-        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './Predictions_Ef_Origin.npz')
-        if not isinstance(self.SAVE_PREDICTIONS, bool): raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
+        if not isinstance(self.SAVE_PREDICTIONS, bool):
+            raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
+        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './Predictions_Ef_Origin')
+        while os.path.exists(self.PREDICTIONS_SAVE_FILE + '.npz'):  # avoid overwrite existent data. Automatically rename.
+            self.PREDICTIONS_SAVE_FILE += '_1'
         if (self.SAVE_PREDICTIONS) and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
