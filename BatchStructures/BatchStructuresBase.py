@@ -1129,7 +1129,7 @@ class BatchStructures(object):
         if self.Energies is None: raise RuntimeError('No Energy Information yet.')
 
         for i, nums in enumerate(self.Numbers):
-            num = sum(nums)
+            num = len(nums)
             # judge
             if (num < element_number_range[1]) and (num >= element_number_range[0]):
                 sub_self._Sample_ids.append(self.Sample_ids[i])

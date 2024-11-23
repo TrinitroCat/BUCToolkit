@@ -177,6 +177,7 @@ class Trainer(_CONFIGS):
                                  '*' * 60 + '\n' + 'ENTERING MAIN LOOP...')
 
             # MAIN LOOP
+            if self.DEBUG_MODE: th.autograd.set_detect_anomaly(True)
             time_tol = time.perf_counter()
             for i in range(epoch_now, self.EPOCH):
                 time_ep = time.perf_counter()
@@ -206,7 +207,12 @@ class Trainer(_CONFIGS):
                     pred_y = _model(batch_data)
                     # check nan
                     for key in pred_y.keys():
-                        is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
+                        if isinstance(pred_y[key], th.Tensor):
+                            is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
+                        elif isinstance(pred_y[key], List):  # for ensemble wrapper model
+                            is_nan = sum([th.isnan(_p) + th.isinf(_p) for _p in pred_y[key]])
+                        else:
+                            break
                         if th.any(is_nan):
                             pred_y[key] = th.where(th.isnan(pred_y[key]), 0., pred_y[key])
                             self.logger.warning('NaN occurred in model output, and has been set to 0.')
@@ -238,6 +244,8 @@ class Trainer(_CONFIGS):
                     # update & metrics & output
                     real_n_samp += len_data  # sample number count
                     if (num_step % self.ACCUMULATE_STEP == 0) or (num_step == n_batch):
+                        # grad clip
+                        nn.utils.clip_grad_norm_(parameters=_model.parameters(), max_norm=10, norm_type=2, error_if_nonfinite=True)
                         # update
                         OPTIMIZER.step()
                         OPTIMIZER.zero_grad()
