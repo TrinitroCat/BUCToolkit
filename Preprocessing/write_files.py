@@ -1,12 +1,11 @@
 import os
 import warnings
 from typing import Sequence, List, Literal, Tuple
-
 import joblib as jb
 import numpy as np
 
 # from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
-from BM4Ckit._print_formatter import STRING_ARRAY_FORMAT, AS_PRINT_COORDS
+from BM4Ckit._print_formatter import STRING_ARRAY_FORMAT, AS_PRINT_COORDS, FLOAT_ARRAY_FORMAT
 
 
 class WritePOSCARs:
@@ -295,3 +294,93 @@ class Write2JDFTX:
                     POSCAR.write(f'{xx: > 14.8f}')
                 POSCAR.write(f'    {fixed[ind][0]}')  # Selective Dynamics
                 POSCAR.write('\n')
+
+def write_xyz(
+        elements,
+        coords,
+        cells,
+        energies,
+        numbers,
+        forces,
+        output_path: str,
+        filename_list: List[str]|None=None,
+        output_xyz_type: Literal['only_position_xyz','write_position_and_force']='only_position_xyz',
+        n_core:int=-1
+) -> None:
+    """
+        'only_position_xyz':output .xyz file with only position,without force
+        'write_position_and_force':output .xyz file with position and force
+    """
+
+    if output_xyz_type not in {'only_position_xyz','write_position_and_force'}:
+        raise ValueError(f"`output_xyz_type` must be 'only_position_xyz' or 'write_position_and_force',"
+                         f" but occurred {output_xyz_type}.")
+    # loading data
+    n_batch = len(cells)
+    if filename_list is None:
+        filename_list = [f'{_}.xyz' for _ in range(n_batch)]
+    elif not isinstance(filename_list, (List, Tuple)):
+        raise TypeError(f'Invalid type of `filename_list`: {type(filename_list)}')
+    elif len(filename_list) != n_batch:
+        raise ValueError(f'Number of file names ({len(filename_list)}) and structures ({n_batch}) does not match')
+    # check n_core
+    if n_core == -1:
+        n_core = jb.cpu_count(True)
+    if n_core > n_batch:
+        n_core = n_batch
+
+    def _write_single(
+            file_name: str,
+            elements,
+            coords,
+            cells,
+            energies,
+            numbers,
+            forces,
+    ):
+        with open(os.path.join(output_path, file_name), "w") as xyz:  # 遍历生成不同所有文件，并进行编写
+            xyz.write(f"{len(coords)}\n")#total number of atoms
+
+            cells_str = np.array2string(cells, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]"," ").replace("\n","").replace("   "," ")
+            xyz.write(f"Lattice ='{cells_str}' Properties=species:S:1:pos:R:3:forces:R:3 energy={energies:<.7e} pbc=T T T\n")
+            # generate elem_list which contain the element type of every structure. (data type:list(array()),)
+            elem_ = [[f"{elements[i]: <2s}"] * int(numbers[i]) for i in range(len(elements))]
+            elem = sum(elem_, [])
+            elem_list = np.array(elem).reshape((len(coords), 1))
+
+            if output_xyz_type == "write_position_and_force":
+                coo_force_str = AS_PRINT_COORDS(np.concatenate((coords, forces), axis=1))
+                elem_pos_force_array = np.concatenate((elem_list, coo_force_str), axis=1)
+                elem_pos_force = np.array2string(elem_pos_force_array, **STRING_ARRAY_FORMAT).replace("[", " ").replace("]"," ")#.replace("'", "")
+                xyz.write(f"{elem_pos_force}\n")
+            else:
+                elem_pos_array = np.concatenate((elem_list, AS_PRINT_COORDS(coords)), axis=1)
+                elem_pos_array = np.array2string(elem_pos_array, **STRING_ARRAY_FORMAT).replace("[", " ").replace(
+                    "]", " ")  # .replace("'", "")
+                xyz.write(f"{elem_pos_array}\n")
+
+    if n_core == 1:
+        for ii, fn in enumerate(filename_list):
+            _write_single(
+                fn,
+                elements[ii],
+                coords[ii],
+                cells[ii],
+                energies[ii],
+                numbers[ii],
+                forces[ii]
+            )
+    else:
+        _para = jb.Parallel(n_core, )
+        _para(
+            jb.delayed(_write_single)(
+                fn,
+                elements[ii],
+                coords[ii],
+                cells[ii],
+                energies[ii],
+                numbers[ii],
+                forces[ii]
+            )
+            for ii, fn in enumerate(filename_list)
+        )

@@ -18,7 +18,7 @@ import joblib as jb
 import numpy as np
 
 from ._para_flatt_list import flatten
-from BM4Ckit.Preprocessing.write_files import WritePOSCARs
+from BM4Ckit.Preprocessing.write_files import WritePOSCARs, write_xyz
 
 
 class BatchStructures(object):
@@ -558,6 +558,21 @@ class BatchStructures(object):
                     sub_self.Coords_type,
                     ncore
                 )
+            elif file_format == 'xyz':
+                file_name_list = [f'{_}.xyz' for _ in file_name_list]
+                write_xyz(
+                    sub_self.Elements,
+                    sub_self.Coords,
+                    sub_self.Cells,
+                    sub_self.Energies,
+                    sub_self.Numbers,
+                    sub_self.Forces,
+                    output_path,
+                    file_name_list,
+                    output_xyz_type = 'only_position_xyz',
+                    n_core = ncore
+                )
+
             else:  # TODO: write to `xyz`, `cif` format.
                 raise NotImplementedError
         except Exception as e:
@@ -1129,7 +1144,7 @@ class BatchStructures(object):
         if self.Energies is None: raise RuntimeError('No Energy Information yet.')
 
         for i, nums in enumerate(self.Numbers):
-            num = sum(nums)
+            num = len(nums)
             # judge
             if (num < element_number_range[1]) and (num >= element_number_range[0]):
                 sub_self._Sample_ids.append(self.Sample_ids[i])
