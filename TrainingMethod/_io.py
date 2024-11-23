@@ -51,7 +51,7 @@ class _CONFIGS(object):
         self._LR_SCHEDULER_DICT = {'StepLR': StepLR, 'ExponentialLR': ExponentialLR, 'ChainedScheduler': ChainedScheduler,
                                    'ConstantLR': ConstantLR, 'LambdaLR': LambdaLR, 'LinearLR': LinearLR, 'custom': None}
         self._LOSS_DICT = {'MSE': nn.MSELoss, 'MAE': nn.L1Loss, 'Hubber': nn.HuberLoss, 'CrossEntropy': nn.CrossEntropyLoss,
-                           'Energy_Force_Loss': Energy_Force_Loss, 'Energy_Loss': Energy_Loss,'custom': None}
+                           'Energy_Force_Loss': Energy_Force_Loss, 'Energy_Loss': Energy_Loss, 'custom': None}
         self._METRICS_DICT = {'MSE': F.mse_loss, 'MAE': F.l1_loss, 'R2': r2_score, 'RMSE': _rmse,
                               'E_MAE': E_MAE, 'E_R2': E_R2, 'F_MAE': F_MAE, 'F_MaxE': F_MaxE, 'custom': None}
         self.param = None
