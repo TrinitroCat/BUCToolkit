@@ -1,5 +1,6 @@
 import os
 import time
+import traceback
 import warnings
 from typing import Any
 
@@ -177,50 +178,56 @@ class StructureOptimization(_CONFIGS):
             F_dict = dict()
             E_dict = dict()
             for val_data, val_label in val_set:
-                t_bt = time.perf_counter()
-                # to avoid get an empty batch
-                if len(val_data) <= 0:
-                    if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
-                    continue
-                # batch indices
-                batch_indx = th.sum(th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1)
-                # relax
-                if self.verbose > 0:
-                    self.logger.info('*' * 100)
-                    self.logger.info(f'Relaxation Batch {n_c}.')
-                    cell_str = np.array2string(
-                        val_data.cell.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " "
-                                                                                                         )  # TODO, Support other various type.
-                    self.logger.info(f'Structure names: {val_data.idx}\n')
-                    self.logger.info(f'Cell Vectors:\n{cell_str}\n')
-                    self.logger.info('*' * 100)
+                try:
+                    t_bt = time.perf_counter()
+                    # to avoid get an empty batch
+                    if len(val_data) <= 0:
+                        if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
+                        continue
+                    # batch indices
+                    batch_indx = th.sum(th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1)
+                    # relax
+                    if self.verbose > 0:
+                        self.logger.info('*' * 100)
+                        self.logger.info(f'Relaxation Batch {n_c}.')
+                        cell_str = np.array2string(
+                            val_data.cell.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " "
+                                                                                                             )  # TODO, Support other various type.
+                        self.logger.info(f'Structure names: {val_data.idx}\n')
+                        self.logger.info(f'Cell Vectors:\n{cell_str}\n')
+                        self.logger.info('*' * 100)
 
-                min_ener, min_x, min_force = optimizer.run(model_wrap.Energy,
-                                                           val_data.pos.unsqueeze(0),  # TODO, Support other various type instead of only PygData.
-                                                           model_wrap.Grad,
-                                                           func_args=(val_data,),
-                                                           grad_func_args=(val_data,),
-                                                           is_grad_func_contain_y=False,
-                                                           output_grad=True,
-                                                           batch_indices=batch_indx,
-                                                           fixed_atom_tensor=val_data.fixed.unsqueeze(0), )
-                with th.no_grad():
-                    min_ener.detach_()
-                    min_x.detach_()
-                    min_force.detach_()
+                    min_ener, min_x, min_force = optimizer.run(model_wrap.Energy,
+                                                               val_data.pos.unsqueeze(0),  # TODO, Support other various type instead of only PygData.
+                                                               model_wrap.Grad,
+                                                               func_args=(val_data,),
+                                                               grad_func_args=(val_data,),
+                                                               is_grad_func_contain_y=False,
+                                                               output_grad=True,
+                                                               batch_indices=batch_indx,
+                                                               fixed_atom_tensor=val_data.fixed.unsqueeze(0), )
+                    with th.no_grad():
+                        min_ener.detach_()
+                        min_x.detach_()
+                        min_force.detach_()
 
-                    min_x = min_x.cpu().squeeze(0)
-                    min_force = min_force.cpu().squeeze(0)
-                    min_ener = min_ener.cpu()
-                    x_list = th.split(min_x, batch_indx.tolist())
-                    f_list = th.split(min_force, batch_indx.tolist())
-                    X_dict.update({_id: x_list[i] for i, _id in enumerate(val_data.idx)})
-                    F_dict.update({_id: f_list[i] for i, _id in enumerate(val_data.idx)})
-                    E_dict.update({_id: min_ener[i] for i, _id in enumerate(val_data.idx)})
-                # Print info
-                if self.verbose > 0:
-                    self.logger.info('-' * 100)
-                n_c += 1
+                        min_x = min_x.cpu().squeeze(0)
+                        min_force = min_force.cpu().squeeze(0)
+                        min_ener = min_ener.cpu()
+                        x_list = th.split(min_x, batch_indx.tolist())
+                        f_list = th.split(min_force, batch_indx.tolist())
+                        X_dict.update({_id: x_list[i] for i, _id in enumerate(val_data.idx)})
+                        F_dict.update({_id: f_list[i] for i, _id in enumerate(val_data.idx)})
+                        E_dict.update({_id: min_ener[i] for i, _id in enumerate(val_data.idx)})
+                    # Print info
+                    if self.verbose > 0:
+                        self.logger.info('-' * 100)
+                    n_c += 1
+                except Exception as e:
+                    excp = traceback.format_exc()
+                    self.logger.warning(f'An error occurred in {n_c}th batch. Error: {e}.')
+                    if self.verbose > 1: self.logger.warning(f"traceback:\n{excp}")
+                    n_c += 1
 
             if self.verbose: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
             if self.SAVE_PREDICTIONS:

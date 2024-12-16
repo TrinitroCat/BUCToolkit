@@ -289,7 +289,7 @@ class _Model_Wrapper_pyg:
 
         Methods:
             Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
-            Forces: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
+            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
 
         """
         self._model = model
@@ -297,7 +297,8 @@ class _Model_Wrapper_pyg:
         pass
 
     def Energy(self, X, graph, return_format: Literal['sum', 'origin'] = 'origin'):
-        graph.pos = X.squeeze(0)
+        self.X = X
+        graph.pos = self.X.squeeze(0)
         y = self._model(graph)
         energy = y['energy']
         self.forces = y['forces']
@@ -307,12 +308,51 @@ class _Model_Wrapper_pyg:
 
     def Grad(self, X, graph):
         if self.forces is None:
-            graph.pos = X.squeeze(0)
+            self.X = X
+            graph.pos = self.X.squeeze(0)
             return - ((self._model(graph))['forces']).unsqueeze(0)
         else:
             force = self.forces
             del self.forces
             return - force.unsqueeze(0)
+
+class _Model_Wrapper_pyg_only_X:
+    def __init__(self, model , graph) -> None:
+        """
+        A format transformer for converting Tensor X into PygData.pos
+        Wrap the model(graph, ...) into f(X)
+
+        Args:
+            model: An instantiate nn.Module
+
+        Methods:
+            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
+            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
+        """
+        self._model = model
+        self.forces = None
+        self.graph = graph
+        pass
+
+    def Energy(self, X,):
+        self.X = X
+        self.graph.pos = self.X.squeeze(0).reshape(-1,3)
+        y = self._model(self.graph )
+        energy = y['energy']
+        energy = th.sum(energy).unsqueeze(0)
+        return energy
+
+    def Grad(self, X):
+        if self.forces is None:
+            self.X = X
+            self.graph.pos = self.X.squeeze(0)
+            return - ((self._model(self.graph ))['forces']).unsqueeze(0)
+        else:
+            force = self.forces
+            del self.forces
+            return - force.unsqueeze(0)
+
+
 
 
 class _Model_Wrapper_dgl:
