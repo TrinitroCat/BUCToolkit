@@ -2,6 +2,12 @@
 Line Search for optimizations.
 """
 
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: _line_search.py
+#  Environment: Python 3.12
+
 import warnings
 # ruff: noqa: E701, E702, E703, F401
 from typing import Any, Literal, Sequence, Tuple
@@ -276,9 +282,14 @@ class _LineSearch:
             a_mask = a > 0.
             if self.is_concat_X:
                 y1 = th.sum(y1, keepdim=True)
-
             _steplength = (- dy1 * _steplength ** 2) / (2 * a)
-            return th.where(_steplength > steplength, 0.05 * steplength, _steplength)  # (n_batch, 1, 1)
+            _steplength = th.where(
+                (_steplength < 1e-6) * (_steplength > 2 * steplength),
+                0.05 * steplength,
+                _steplength
+            )
+
+            return _steplength  # (n_batch, 1, 1)
 
         elif self.method == '3PT':
             # cubic interpolation search. points: 0, dy0, mid_step, step
@@ -311,8 +322,14 @@ class _LineSearch:
                 ),
                 _steplength
             )
+            # if steplength < 0 or > 2 * steplength, use a fixed steplength.
+            _steplength = th.where(
+                (_steplength < 1e-6) * (_steplength > 2 * steplength),
+                0.1 * steplength,
+                _steplength
+            )
 
-            return th.where(_steplength > steplength, 0.05 * steplength, _steplength)  # (n_batch, 1, 1)
+            return _steplength  # (n_batch, 1, 1)
 
         elif self.method == 'Golden': # golden section method
             with th.no_grad():

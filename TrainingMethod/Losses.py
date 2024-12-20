@@ -1,6 +1,12 @@
 '''
 
 '''
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: Losses.py
+#  Environment: Python 3.12
+
 from typing import Literal, List, Dict, Sequence, Tuple
 import numpy as np
 import torch as th

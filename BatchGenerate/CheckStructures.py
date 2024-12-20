@@ -1,6 +1,12 @@
 """
 Check Structures by atomic distance, surface smoothness, and coordination.
 """
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: CheckStructures.py
+#  Environment: Python 3.12
+
 import time
 import warnings
 from typing import Literal

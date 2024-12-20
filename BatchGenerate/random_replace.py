@@ -1,5 +1,11 @@
 """ Generate new structure by stochastically replace atoms in given structures """
 
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: random_replace.py
+#  Environment: Python 3.12
+
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 import time
 

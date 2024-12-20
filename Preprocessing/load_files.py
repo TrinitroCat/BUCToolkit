@@ -1,6 +1,12 @@
 r"""
 Methods of reading and transform various files
 """
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: load_files.py
+#  Environment: Python 3.12
+
 import re
 import sys
 from typing import Any, Dict, List, Sequence, Set, Tuple, Optional
@@ -25,12 +31,13 @@ _ALL_ELEMENT = ['H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg'
 ''' Load labels from local file '''
 
 
-def load_from_csv(file_name: str,
-                  label_type: type = float,
-                  ignore_None_label_samp: bool = True,
-                  read_column: Tuple[int, int] = (0, 1),
-                  has_title_line: bool = False
-                  ) -> Dict[str, Any]:
+def load_from_csv(
+        file_name: str,
+        label_type: type = float,
+        ignore_None_label_samp: bool = True,
+        read_column: Tuple[int, int] = (0, 1),
+        has_title_line: bool = False
+) -> Dict[str, Any]:
     r"""
     load information of a csv file into a dict of {samp_1:label_1, ...}.
 

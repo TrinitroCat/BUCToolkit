@@ -1,5 +1,11 @@
 """ Input / Output Module """
 
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: _io.py
+#  Environment: Python 3.12
+
 import logging
 import os
 import sys
@@ -196,6 +202,12 @@ class _CONFIGS(object):
             self.OPTIMIZER = None
         self.OPTIM_CONFIG = self.config.get('OPTIM_CONFIG', dict())
         if not isinstance(self.OPTIM_CONFIG, Dict): raise ValueError('OPTIM_CONFIG must be a dictionary.')
+
+        self.GRAD_CLIP: bool = self.config.get('GRAD_CLIP', False)
+        self.GRAD_CLIP_MAX_NORM: float = self.config.get('GRAD_CLIP_MAX_NORM', 100)
+        self.GRAD_CLIP_CONFIG = self.config.get('GRAD_CLIP_CONFIG', dict())
+        if not isinstance(self.GRAD_CLIP, bool): raise TypeError('GRAD_CLIP must be a boolean.')
+        if not isinstance(self.GRAD_CLIP_CONFIG, Dict): raise ValueError('GRAD_CLIP_CONFIG must be a dictionary.')
 
         self.ACCUMULATE_STEP = self.config.get('ACCUMULATE_STEP', 1)
         if not (isinstance(self.ACCUMULATE_STEP, int) and self.ACCUMULATE_STEP > 0): raise TypeError('ACCUMULATE_STEP must be a positive integer.')

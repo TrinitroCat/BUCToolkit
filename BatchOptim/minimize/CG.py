@@ -1,11 +1,15 @@
 """
 Conjugate Gradient Algorithm for optimization.
 """
-
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: CG.py
+#  Environment: Python 3.12
 
 from typing import Literal
 
-from .._BaseOpt import _BaseOpt
+from BM4Ckit.BatchOptim._utils._BaseOpt import _BaseOpt
 import torch as th
 
 
