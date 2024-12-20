@@ -426,7 +426,9 @@ class CreatePygData:
                 tags=tags,
                 fixed=fixed,
                 pbc=pbc,
-                idx=_id)
+                idx=_id,
+                sid=_id
+            )
             return _data
 
         if n_core == 1:
