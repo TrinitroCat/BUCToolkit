@@ -517,7 +517,8 @@ class BatchStructures(object):
     def write2text(self,
                    output_path: str = './',
                    indices: int | str | Tuple[int, int] | None = None,
-                   file_format: Literal['POSCAR', 'cif', 'xyz'] = 'POSCAR',
+                   file_format: Literal['POSCAR', 'cif', 'xyz', 'xyz_forces'] = 'POSCAR',
+                   output_path: str = './',
                    file_name_list: str | Sequence[str] | None = None,
                    ncore: int = -1) -> None:
         """
@@ -525,6 +526,10 @@ class BatchStructures(object):
         Args:
             indices: the range of selected structures.
             file_format: the format of written files.
+                'POSCAR': vasp POSCAR format
+                'cif': crystallographic information file
+                'xyz': ext-xyz file that only contains atomic positions
+                'xyz_forces': ext-xyz file that contains atomic positions and forces
             output_path: the directory of output file.
             file_name_list: the list of file names. If None, it would be set to `Sample_ids`.
             ncore: number of CPU cores to write in parallel. `-1` for all available CPU cores.
@@ -533,7 +538,7 @@ class BatchStructures(object):
 
         """
         # check vars
-        if file_format not in {'POSCAR', 'cif', 'xyz'}:
+        if file_format not in {'POSCAR', 'cif', 'xyz','xyz_forces'}:
             raise ValueError(f'Invalid value of `file_format`: {file_format}.')
         if indices is None:
             sub_self = self
@@ -578,6 +583,20 @@ class BatchStructures(object):
                     output_path,
                     file_name_list,
                     output_xyz_type = 'only_position_xyz',
+                    n_core = ncore
+                )
+            elif file_format == 'xyz_forces':
+                file_name_list = [f'{_}.xyz' for _ in file_name_list]
+                write_xyz(
+                    sub_self.Elements,
+                    sub_self.Coords,
+                    sub_self.Cells,
+                    sub_self.Energies,
+                    sub_self.Numbers,
+                    sub_self.Forces,
+                    output_path,
+                    file_name_list,
+                    output_xyz_type = 'write_position_and_force',
                     n_core = ncore
                 )
 
@@ -673,6 +692,7 @@ class BatchStructures(object):
         self.Dist_mat = list()
         for i, atomic_coordinates in enumerate(self.Coords):
             cell_vectors: np.ndarray = self.Cells[i]
+Conflicting files
             # calculate cross-cell dist.; cell_diff = supercell_indices @ cell_vec; <<<
             # shape: (n_prim_cells, 1, 3)@(1, 3, 3) -> (n_prim_cells, 1, 3)
             cell_diff = (supercell_indices[:, None, :]) @ (cell_vectors[None, :, :])
