@@ -3,7 +3,7 @@ Methods of reading and transform various files
 """
 import re
 import sys
-from typing import Any, Dict, List, Sequence, Set, Tuple, Optional
+from typing import Any, Dict, List, Sequence, Set, Tuple, Optional, Literal
 import time
 import os
 import copy
@@ -602,6 +602,99 @@ class OUTCAR2Feat(BatchStructures):
                 self.Fixed.extend(temp[7])
                 self.Coords_type.extend(temp[8])
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
+
+class Xyz2Feat(BatchStructures):
+    """
+    read xyz files to BatchStructures.
+    """
+    def __init__(self, path: str, verbose: int = 1, has_cell: bool = False, has_forces: bool = False):
+        super().__init__()
+        self.verbose = verbose
+        self.path = path
+        self.has_cell = has_cell
+        self.has_forces = has_forces
+        self.Energies = list()
+        if has_forces: self.Forces = list()
+
+    def _read_single(self, file_name: str, ) -> Tuple[List[str], List, List, List,
+    List[List], List[List], List[np.ndarray], List]:
+        with open(os.path.join(self.path, file_name), 'r') as _f:
+            data = _f.readlines()
+        # match atoms number, energy of every structure and generate atom_number_all_list, Energy_list
+        line_of_energy = [d for d in data if len(re.findall('i\s=', d)) != 0]
+        if self.has_cell: raise NotImplementedError #
+        atom_list = [
+            int(re.findall('\s+[0-9]+\n', d)[0]) for d in data if len(re.findall('\s+[0-9]+\n', d)) != 0
+        ]
+        energy_list = [data[1 + (atom_list[i] + 2) * i].split()[-1] for i in range(len(line_of_energy))]
+        element_position_list = [
+            data[2 + (atom_list[i] + 2) * i: (atom_list[i] + 2) * (i + 1)] for i in range(len(line_of_energy))
+        ]
+
+        # Match coordinate, Element_type ,Element_number and generate Coordinate_list, Element_type_Without_repetition_list, Element_Number_Without_repetition_list
+        coordinate_list = list()
+        forces_list = list()
+        element_type_without_repetition_list = list()
+        element_number_without_repetition_list = list()
+        idx = list()
+        for i, P in enumerate(element_position_list):
+            position_list_ = [l.split()[1:] for l in P]
+            element_list_ = [l.split()[0] for l in P]
+            E = element_list_[:1]
+            N = list()
+            count_ = 0
+            for j, el in enumerate(element_list_):
+                if el != E[-1]:
+                    E.append(el)
+                    N.append(count_)
+                    count_ = 1
+                else:
+                    count_ += 1
+            N.append(count_)
+            element_type_without_repetition_list.append(E)
+            element_number_without_repetition_list.append(N)
+            pos_forc_array = np.array(position_list_, dtype=np.float32)
+            coordinate_list.append(pos_forc_array[:, :3])
+            if self.has_forces:
+                forces_list.append(pos_forc_array[:, 3:])
+            # idx
+            idx.append(file_name + '_' + str(i))
+        cells = [None] * len(element_position_list)
+        coo_type = ['C'] * len(element_position_list)
+
+        return (idx, cells, energy_list, forces_list, element_type_without_repetition_list,
+                element_number_without_repetition_list, coordinate_list, coo_type)
+
+    def read(self, file_list):
+        t_st = time.perf_counter()
+        if file_list is None:
+            file_list = os.listdir(self.path)
+            file_list = [f_ for f_ in file_list if os.path.isfile(os.path.join(self.path, f_))]
+        elif not isinstance(file_list, Sequence):
+            raise TypeError(f'Invalid type of files_list: {type(file_list)}')
+
+        err = 0
+        for i, fil in enumerate(file_list):
+            try:
+                temp = self._read_single(fil)
+                self._Sample_ids.extend(temp[0])
+                self.Cells.extend(temp[1])
+                self.Energies.extend(temp[2])
+                if self.has_forces:
+                    self.Forces.extend(temp[3])
+                self.Elements.extend(temp[4])
+                self.Numbers.extend(temp[5])
+                self.Coords.extend(temp[6])
+                self.Coords_type.extend(temp[7])
+
+            except Exception as e:
+                err += 1
+                warnings.warn(
+                    f"An error occurred in {i}th file: {fil}, skipped. Total errors: {err}", RuntimeWarning
+                )
+                if self.verbose > 0:
+                    warnings.warn(f"Error: {e}")
+
 
 
 class ASEDB2Feat(BatchStructures):
