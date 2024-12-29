@@ -322,6 +322,7 @@ class ConcatPOSCAR2Feat(BatchStructures):
     """
 
     def __init__(self, path: str = './', select_ids: List[str] | Set[str] | None = None, output_coord_type: str = 'cartesian', verbose: int = 0) -> None:
+        warnings.warn('Deprecated.', DeprecationWarning)
         raise Exception('Deprecated.')
         super().__init__()
         time_st = time.perf_counter()

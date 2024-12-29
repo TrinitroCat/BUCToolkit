@@ -518,7 +518,6 @@ class BatchStructures(object):
                    output_path: str = './',
                    indices: int | str | Tuple[int, int] | None = None,
                    file_format: Literal['POSCAR', 'cif', 'xyz', 'xyz_forces'] = 'POSCAR',
-                   output_path: str = './',
                    file_name_list: str | Sequence[str] | None = None,
                    ncore: int = -1) -> None:
         """
@@ -692,7 +691,6 @@ class BatchStructures(object):
         self.Dist_mat = list()
         for i, atomic_coordinates in enumerate(self.Coords):
             cell_vectors: np.ndarray = self.Cells[i]
-Conflicting files
             # calculate cross-cell dist.; cell_diff = supercell_indices @ cell_vec; <<<
             # shape: (n_prim_cells, 1, 3)@(1, 3, 3) -> (n_prim_cells, 1, 3)
             cell_diff = (supercell_indices[:, None, :]) @ (cell_vectors[None, :, :])

@@ -15,6 +15,8 @@
 * `VAL_BATCH_SIZE`: _int_, batch size of validation samples. **Default**: the same as `BATCH_SIZE`.
 * `VAL_PER_STEP`: _int_, the validation frequency. Model will validate per `VAL_PER_STEP` training step. **Default**: 10.
 * `ACCUMULATE_STEP`: _int_, the step number of gradient accumulation. **Default**: 1.
+* `DEBUG_MODE`: _bool_, whether to turn on the debug mode, which will output the range of parameters,
+parameter gradients and gradient differences in each layer, and turn on the _NaN_ check. **Default**: false.
 
 ## I/O configs
 * `REDIRECT`: _bool_, whether to output training logs to `OUTPUT_PATH` or directly print it to the screen. **Default**: True.
@@ -23,7 +25,7 @@
 * `CHK_SAVE_PATH`: _str_, only work when `SAVE_CHECK` == True. The directory of checkpoint file to save. **Default**: "./".
 * `CHK_SAVE_POSTFIX`: _str_, the postfix of checkpoint file. **Default**: "". 
 The checkpoint file name will be "best_checkpoint_`CHK_SAVE_POSTFIX`.pt".
-* `OUTPUT_PATH`: str, only work when `REDIRECT` == True. The output directory of training log. **Default**: "./"
+* `OUTPUT_PATH`: _str_, only work when `REDIRECT` == True. The output directory of training log. **Default**: "./"
 * `OUTPUT_POSTFIX`: _str_, the postfix of training log file. **Default**: "Untitled". 
 The log file name will be f"`time.strftime("%Y%m%d_%H_%M_%S")`_`OUTPUT_POSTFIX`.out".
 
@@ -42,12 +44,12 @@ The log file name will be f"`time.strftime("%Y%m%d_%H_%M_%S")`_`OUTPUT_POSTFIX`.
   )
 * `LOSS_CONFIG`: Dict, the kwargs of `LOSS`.
   1. for `LOSS` == "Energy_Force_Loss": 
-     * loss_E: Literal["MAE", "MSE"], the loss function of energies.
-     * loss_F: Literal["MAE", "MSE"], the loss function of forces.
-     * coeff_E: float, coefficient of energies loss.
-     * coeff_F: float, coefficient of forces loss.
+     * loss_E: _Literal["MAE", "MSE"]_, the loss function of energies.
+     * loss_F: _Literal["MAE", "MSE"]_, the loss function of forces.
+     * coeff_E: _float_, coefficient of energies loss.
+     * coeff_F: _float_, coefficient of forces loss.
   2. for `LOSS` == "Energy_Loss":
-     * loss_E: Literal["MAE", "MSE", "SmoothMAE", "Hubber"], the loss function of energies.
+     * loss_E: _Literal["MAE", "MSE", "SmoothMAE", "Hubber"]_, the loss function of energies.
        
 * `METRICS`: Tuple of [E_MAE, F_MAE, F_MaxE, E_R2, MSE, MAE, R2, RMSE], the metrics function of training and validation results.
 
@@ -70,4 +72,6 @@ The log file name will be f"`time.strftime("%Y%m%d_%H_%M_%S")`_`OUTPUT_POSTFIX`.
 
 )
 * `OPTIM_CONFIG`: Dict, the kwargs of model optimizer.
+* `GRAD_CLIP`: _bool_, whether to use gradient clip. **Default**: false.
+* `GRAD_CLIP_MAX_NORM`: _float_, only for `GRAD_CLIP` == True. The max norm of gradient to clip. **Default**: 100.
 
