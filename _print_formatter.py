@@ -3,6 +3,12 @@ Configs of Printing Numpy Arrays Format.
 
 e.g., numpy.array2string(Array, **FLOAT_ARRAY_FORMAT)
 """
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: _print_formatter.py
+#  Environment: Python 3.12
+
 import numpy as np
 
 FLOAT_ARRAY_FORMAT = {

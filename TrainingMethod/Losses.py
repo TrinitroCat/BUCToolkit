@@ -1,6 +1,12 @@
 '''
 
 '''
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: Losses.py
+#  Environment: Python 3.12
+
 from typing import Literal, List, Dict, Sequence, Tuple
 import numpy as np
 import torch as th
@@ -82,7 +88,7 @@ class Energy_Loss(nn.Module):
 
 
 class WrapperBoostLoss(nn.Module):
-    def __init__(self, loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE', ) -> None:
+    def __init__(self, loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE', loss_F = None) -> None:
         super().__init__()
         if loss_E == 'MAE':
             self.loss_E = nn.L1Loss()
@@ -95,22 +101,37 @@ class WrapperBoostLoss(nn.Module):
         else:
             self.loss_E = loss_E
 
-    def forward(self, pred_list: List[Dict[Literal['energy'], th.Tensor]], label: Dict[Literal['energy'], th.Tensor]):
+        if loss_F is None:
+            self.has_loss_f = False
+        else:
+            if loss_F == 'MAE':
+                self.loss_F = nn.SmoothL1Loss(reduction='sum')
+            elif loss_F == 'MSE':
+                self.loss_F = nn.MSELoss(reduction='sum')
+            else:
+                self.loss_F = loss_F
+
+    def forward(self, pred: Dict[Literal['energy', 'forces'], List[th.Tensor]], label: Dict[Literal['energy', 'forces'], th.Tensor]):
         loss = 0.
         res = label['energy']
-        if isinstance(pred_list, Sequence):
-            for pred in pred_list:
-                loss = loss + self.loss_E(res, pred['energy'])
-                res = res - pred['energy']
-        elif isinstance(pred_list, Dict):
-            loss = self.loss_E(res, pred_list['energy'])
-        else:
-            raise TypeError(f'`pred_list` should be Dict or Sequence, but occurred {type(pred_list)}.')
+        for pred_ in pred['energy']:
+            loss = loss + self.loss_E(res, pred_)
+            res = res - pred_
+        if self.has_loss_f:
+            res_f = label['forces']
+            for pred_ in pred['forces']:
+                loss = loss + self.loss_F(res_f, pred_)
+                res_f = res - pred_
+
         return loss
 
 
 class WrapperMeanLoss(nn.Module):
-    def __init__(self, loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE', ) -> None:
+    def __init__(
+            self,
+            loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE',
+            loss_F: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module | None = None
+    ) -> None:
         super().__init__()
         if loss_E == 'MAE':
             self.loss_E = nn.L1Loss()
@@ -123,13 +144,23 @@ class WrapperMeanLoss(nn.Module):
         else:
             self.loss_E = loss_E
 
-    def forward(self, pred_list: List[Dict[Literal['energy'], th.Tensor]], label: Dict[Literal['energy'], th.Tensor]):
-        loss = 0.
-        if isinstance(pred_list, Sequence):
-            for pred in pred_list:
-                loss = loss + self.loss_E(label['energy'], pred['energy'])
-        elif isinstance(pred_list, Dict):
-            loss = self.loss_E(label['energy'], pred_list['energy'])
+        if loss_F is None:
+            self.has_loss_f = False
         else:
-            raise TypeError(f'`pred_list` should be Dict or Sequence, but occurred {type(pred_list)}.')
+            self.has_loss_f = True
+            if loss_F == 'MAE':
+                self.loss_F = nn.SmoothL1Loss(reduction='sum')
+            elif loss_F == 'MSE':
+                self.loss_F = nn.MSELoss(reduction='sum')
+            else:
+                self.loss_F = loss_F
+
+    def forward(self, pred: Dict[Literal['energy', 'forces'], List[th.Tensor]], label: Dict[Literal['energy', 'forces'], th.Tensor]):
+        loss = 0.
+        for pred_ in pred['energy']:
+            loss = loss + self.loss_E(label['energy'], pred_)
+        if self.has_loss_f:
+            for pred_ in pred['forces']:
+                loss = loss + self.loss_F(label['forces'], pred_)
+
         return loss

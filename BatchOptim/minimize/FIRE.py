@@ -1,6 +1,12 @@
 """
 FIRE Optimization Algorithm. Phys. Rev. Lett., 2006, 97:170201.
 """
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: FIRE.py
+#  Environment: Python 3.12
+
 import logging
 import sys
 import time

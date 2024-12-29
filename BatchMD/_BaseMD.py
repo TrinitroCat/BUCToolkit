@@ -1,5 +1,11 @@
 """ Molecular Dynamics via Verlet algo. """
 
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: _BaseMD.py
+#  Environment: Python 3.12
+
 # ruff: noqa: E701, E702, E703
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 import time

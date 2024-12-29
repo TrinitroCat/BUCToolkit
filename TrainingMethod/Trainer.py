@@ -1,5 +1,11 @@
 """ Training Methods """
 
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: Trainer.py
+#  Environment: Python 3.12
+
 import copy
 import sys
 import time
@@ -166,17 +172,26 @@ class Trainer(_CONFIGS):
                     for __partt in __opt_repr[2:-2]:
                         self.logger.info(f'\t\t{__partt}')
                 if self.LR_SCHEDULER is not None:
-                    self.logger.info(f'\tLR_SCHEDULER: {self.LR_SCHEDULER}')
+                    self.logger.info(f'\tLR_SCHEDULER: {str(self.LR_SCHEDULER)}')
                     self.logger.info(f'\tLR_SCHEDULER CONFIG:')
                     for hp, hpv in self.LR_SCHEDULER_CONFIG.items(): self.logger.info(f'\t\t{hp}: {hpv}')
                 else:
                     self.logger.info('\tLR_SCHEDULER: None')
+                if self.GRAD_CLIP:
+                    self.logger.info(f'\tGRAD_CLIP: True')
+                    self.logger.info(f'\tGRAD_CLIP_MAX_NORM: {self.GRAD_CLIP_MAX_NORM:<.2f}')
+                    if len(self.GRAD_CLIP_CONFIG) > 0: self.logger.info(f'\tGRAD_CLIP_CONFIG: {self.GRAD_CLIP_CONFIG}')
+                else:
+                    self.logger.info(f'\tGRAD_CLIP: False')
                 self.logger.info(f' ITERATION INFORMATION:')
                 self.logger.info(f'\tEPOCH: {self.EPOCH}\n\tBATCH SIZE: {self.BATCH_SIZE}\n\tVALID BATCH SIZE: {self.VAL_BATCH_SIZE}' +
                                  f'\n\tGRADIENT ACCUMULATION STEPS: {self.ACCUMULATE_STEP}\n\tEVAL PER {self.VAL_PER_STEP} STEPS\n' +
                                  '*' * 60 + '\n' + 'ENTERING MAIN LOOP...')
 
             # MAIN LOOP
+            if self.DEBUG_MODE:
+                th.autograd.set_detect_anomaly(True)
+                para_arr_old_list = [0. for _ in _model.named_parameters()]
             time_tol = time.perf_counter()
             for i in range(epoch_now, self.EPOCH):
                 time_ep = time.perf_counter()
@@ -206,7 +221,12 @@ class Trainer(_CONFIGS):
                     pred_y = _model(batch_data)
                     # check nan
                     for key in pred_y.keys():
-                        is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
+                        if isinstance(pred_y[key], th.Tensor):
+                            is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
+                        elif isinstance(pred_y[key], List):  # for ensemble wrapper model
+                            is_nan = sum([th.isnan(_p) + th.isinf(_p) for _p in pred_y[key]])
+                        else:
+                            break
                         if th.any(is_nan):
                             pred_y[key] = th.where(th.isnan(pred_y[key]), 0., pred_y[key])
                             self.logger.warning('NaN occurred in model output, and has been set to 0.')
@@ -216,28 +236,36 @@ class Trainer(_CONFIGS):
                     loss.backward()
 
                     # Debug Mode -----------------------------------------------------------------------------------------------------------
-                    if self.DEBUG_MODE:
-                        val_name = list()
-                        val_para = list()
-                        val_grad = list()
-                        if num_step == 1:
-                            old_val_para = [0. for _ in _model.named_parameters()]
+                    if self.DEBUG_MODE and ((num_step % self.ACCUMULATE_STEP == 0) or (num_step == n_batch + 1)):
+                        i__ = 0
+                        para_arr_old_temp = list()
+                        self.logger.info(f'\n{"Debug"*24}\nDEBUG IN STEP NUMBER: {num_step}\n{"Debug"*24}')
                         for para_name, para in _model.named_parameters():
-                            val_name.append(para_name)
-                            val_para.append(para.cpu().detach().numpy() if para is not None else [0])
-                            val_grad.append(para.grad.cpu().detach().numpy() if para.grad is not None else [0])
-                        for i__ in range(len(val_name)):
-                            self.logger.info('PARAMETER  %s : %.3e ~ %.3e' % (val_name[i__], np.min(val_para[i__]), np.max(val_para[i__])))
-                            self.logger.info('PARA_GRAD  %s : %.3e ~ %.3e' % (val_name[i__], np.min(val_grad[i__]), np.max(val_grad[i__])))
-                            self.logger.info(f'PARAMETER MSD: {np.mean((val_para[i__] - old_val_para[i__]) ** 2):<4.3e}')  # type: ignore
-                        old_val_para = val_para
+                            para_arr = para.numpy(force=True)
+                            para_arr_old_temp.append(para_arr)
+                            self.logger.info('PARAMETER  %s : %.3e ~ %.3e' % (para_name, np.min(para_arr), np.max(para_arr)))
+                            if para.grad is not None:
+                                para_grad_arr = para.grad.numpy(force=True)
+                                self.logger.info('PARA_GRAD  %s : %.3e ~ %.3e' % (para_name, np.min(para_grad_arr), np.max(para_grad_arr)))
+                            else:
+                                self.logger.warning(f'PARAMETER `{para_name}` does not have grad. <<<')
+                            self.logger.info(f'PARAMETER RMSD: {np.sqrt(np.mean((para_arr - para_arr_old_list[i__]) ** 2)):<4.3e}')
+                            i__ += 1
+                        para_arr_old_list = para_arr_old_temp
                         if loss != loss:
                             raise Exception('ERROR: NaN occurred in loss.\n\nModel outputs: \n%s\n\nTraining labels: \n%s' % (pred_y, batch_label))
                     # Debug Mode END-----------------------------------------------------------------------------------------------------------
 
                     # update & metrics & output
                     real_n_samp += len_data  # sample number count
-                    if (num_step % self.ACCUMULATE_STEP == 0) or (num_step == n_batch):
+                    if (num_step % self.ACCUMULATE_STEP == 0) or (num_step == n_batch + 1):
+                        # grad clip
+                        if self.GRAD_CLIP:
+                            nn.utils.clip_grad_norm_(
+                                parameters=_model.parameters(),
+                                max_norm=self.GRAD_CLIP_MAX_NORM,
+                                **self.GRAD_CLIP_CONFIG
+                            )
                         # update
                         OPTIMIZER.step()
                         OPTIMIZER.zero_grad()
@@ -263,7 +291,7 @@ class Trainer(_CONFIGS):
                             self.logger.info(f', time: {time.perf_counter() - time_gp:>10.4f}, [UPDATE GRAD]')
 
                     # validation
-                    if ((n_val_samp >= 1) and (num_step % self.VAL_PER_STEP) == 0) or (num_step < self.VAL_PER_STEP and num_step == n_batch):
+                    if ((n_val_samp >= 1) and (num_step % self.VAL_PER_STEP) == 0) or (num_step < self.VAL_PER_STEP and num_step + 1 == n_batch):
                         time_val = time.perf_counter()
                         with _LoggingEnd(self.log_handler):
                             if self.verbose: self.logger.info('VALIDATION...')

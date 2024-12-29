@@ -1,3 +1,9 @@
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: _BaseOpt.py
+#  Environment: Python 3.12
+
 import logging
 import sys
 from itertools import accumulate
@@ -12,14 +18,15 @@ from BM4Ckit.BatchOptim._utils._line_search import _LineSearch
 from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
 from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 
-class BaseStrcOpt:
+
+class _BaseOpt:
     def __init__(
             self,
             iter_scheme: str,
             E_threshold: float = 1e-3,
             F_threshold: float = 0.05,
             maxiter: int = 100,
-            linesearch: Literal['Backtrack', 'Wolfe', 'Golden', 'Newton', 'None'] = 'Backtrack',
+            linesearch: Literal['Backtrack', 'Wolfe', 'NWolfe', '2PT', '3PT', 'Golden', 'Newton', 'None'] = 'Backtrack',
             linesearch_maxiter: int = 10,
             linesearch_thres: float = 0.02,
             linesearch_factor: float = 0.6,
@@ -28,10 +35,9 @@ class BaseStrcOpt:
             verbose: int = 2
     ) -> None:
         r"""
-        A Base Class of Structure Optimizations.
-
+        A Base Framework of Algorithm for optimization.
+        
         Args:
-            iter_scheme: Iterative scheme of optim. algorithm.
             E_threshold: float, threshold of difference of func between 2 iteration.
             F_threshold: float, threshold of gradient of func.
             maxiter: int, max iterations.
@@ -41,25 +47,24 @@ class BaseStrcOpt:
                 "Golden" for golden section algo.
                 "Newton" for 1D Newton algo., which was modified to avoid divergence.
                 "Wolfe" for quadratic interpolation search until weak Wolfe condition was satisfied.
+                "NWolfe" is the same as "Wolfe" but directional derivative was calculated by finite difference (might use less memory).
+                "2PT" is simple 1 step 2-point quadratic interpolation.
+                "3PT" is simple 1 step 3-point cubic interpolation.
             linesearch_maxiter: Max iterations for linesearch.
             linesearch_thres: Threshold for linesearch. Only for "Golden" and "Newton".
             linesearch_factor: A factor in linesearch. Shrinkage factor for "Backtrack", scaling factor in interval search for "Golden" and line steplength for "Newton".
             steplength: The initial step length.
             device: The device that program runs on.
             verbose: amount of print information.
-
+        
         Method:
             run: running the main optimization program.
-
-        References:
-            [1]
-            [5] Comput. Math. Appl., 2008, 56: 1001.
 
         """
         warnings.filterwarnings('always', category=FaildToConvergeWarning)
         warnings.filterwarnings('always', )
 
-        self.iterform: str = iter_scheme
+        self.iterform = iter_scheme
         self.linesearch: str = linesearch
         self.steplength: float = steplength
         self.linesearch_maxiter = linesearch_maxiter
@@ -74,7 +79,6 @@ class BaseStrcOpt:
         self.maxiter = maxiter
 
         self.n_batch, self.n_atom, self.n_dim = None, None, None
-        self.is_concat_X = False
 
         # logger
         self.logger = logging.getLogger('Main.OPT')
@@ -101,7 +105,7 @@ class BaseStrcOpt:
             batch_indices: None | List[int] | Tuple[int, ...] | th.Tensor = None,
     ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
-        Run the Optimization Algorithm.
+        Run the Quasi-Newton Algorithm.
 
         Parameters:
             func: the main function of instantiated torch.nn.Module class.
@@ -148,11 +152,13 @@ class BaseStrcOpt:
             batch_indx_dict = {
                 i: slice(_, batch_slice_indx[i + 1]) for i, _ in enumerate(batch_slice_indx[:-1])
             }  # dict of {batch indx: split point slice}
+            batch_indices_tensor = th.tensor(batch_indices, device=self.device)
         else:
             n_inner_batch = 1
             batch_slice_indx = []
             batch_indx_dict = dict()
-
+            batch_indices_tensor = None
+        # initialize vars
         E_threshold = self.E_threshold
         F_threshold = self.F_threshold
         maxiter = self.maxiter
@@ -160,28 +166,21 @@ class BaseStrcOpt:
         self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
         if grad_func is None:
             is_grad_func_contain_y = True
-            if self.iterform != 'Newton':
-                def grad_func_(x, y, grad_shape=None):
-                    if grad_shape is None:
-                        grad_shape = th.ones_like(y)
-                    _g = th.autograd.grad(y, x, grad_shape)
-                    return _g[0]
-            else:  # for 'Newton', required 2nd derivative
-                def grad_func_(x, y, grad_shape=None):
-                    if grad_shape is None:
-                        grad_shape = th.ones_like(y)
-                    _g = th.autograd.grad(y, x, grad_shape, create_graph=True)
-                    return _g[0]
+            def grad_func_(y, x, grad_shape=None):
+                if grad_shape is None:
+                    grad_shape = th.ones_like(y)
+                _g = th.autograd.grad(y, x, grad_shape)
+                return _g[0]
         else:
             grad_func_ = grad_func
-        # Selective dynamics
+        # Selective dyamics
         if fixed_atom_tensor is None:
             atom_masks = th.ones_like(X, device=self.device)
         elif fixed_atom_tensor.shape == X.shape:
             atom_masks = fixed_atom_tensor.to(self.device)
         else:
-            raise RuntimeError(f'fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not have the same shape of X (shape: {X.shape}).')
-        # atom_masks = atom_masks.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
+            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
+        #atom_masks = atom_masks.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
         # other check
         if (not isinstance(maxiter, int)) or (maxiter <= 0):
             raise ValueError(f'Invalid value of maxiter: {maxiter}. It would be an integer greater than 0.')
@@ -202,76 +201,81 @@ class BaseStrcOpt:
 
         # initialize
         energies_old = th.inf
-        g_old = th.full((n_batch, n_atom * n_dim, 1), 1e-10, dtype=th.float32, device=self.device)  # initial old grad
         is_main_loop_converge = False
         t_st = time.perf_counter()
-        opt_algo_args = self._initialize_opt_algo()  # <<< initialize vars in specific algo.
-        alpha = th.full_like(X, self.steplength)  # steplength
-        converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
-        # ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
+        self.initialize_algo_param()
+        alpha = th.full_like(X, self.steplength)  # initial step length
+        p = 0.
+        self.converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
+        g_old = th.full((n_batch, n_atom * n_dim, 1), 1e-6, dtype=th.float32, device=self.device)  # initial old grad
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
             self.logger.info('-' * 100)
             self.logger.info(f'Iteration Scheme: {self.iterform}')
         self.logger.info('-' * 100)
         # MAIN LOOP
-        X.requires_grad_()
-        energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
-        # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
-        if energies.shape[0] != self.n_batch:
-            assert batch_indices is not None, f"batch indices is None while shape of model output ({energies.shape}) does not match batch size."
-            assert energies.shape[0] == n_inner_batch, f"shape of output ({energies.shape}) does not match given batch indices"
-            self.is_concat_X = True
-        else:
-            self.is_concat_X = False
-        # calc. grad
-        if is_grad_func_contain_y:
-            X_grad = th.where(converge_mask, 0., grad_func_(X, energies, *grad_func_args, **grad_func_kwargs))
-        else:
-            X_grad = th.where(converge_mask, 0., grad_func_(X, *grad_func_args, **grad_func_kwargs))
-        if X_grad.shape != X.shape:
-            raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
-        energies = energies.detach()
-        X_grad = X_grad.detach() * atom_masks
-        X = X.detach()
-        g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
-        g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
-        for numit in range(maxiter):
-            with th.no_grad():
+        with th.no_grad():
+            with th.enable_grad():
+                X.requires_grad_()
+                energies: th.Tensor = th.where(self.converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+                # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
+                if energies.shape[0] != self.n_batch:
+                    assert batch_indices is not None, f"batch indices is None while shape of model output ({energies.shape}) does not match batch size."
+                    assert energies.shape[0] == n_inner_batch, f"shape of output ({energies.shape}) does not match given batch indices"
+                    self.is_concat_X = True
+                else:
+                    self.is_concat_X = False
+                # calc. grad
+                if is_grad_func_contain_y:
+                    X_grad = th.where(self.converge_mask, 0., grad_func_(energies, X, *grad_func_args, **grad_func_kwargs))
+                else:
+                    X_grad = th.where(self.converge_mask, 0., grad_func_(X, *grad_func_args, **grad_func_kwargs))
+                if X_grad.shape != X.shape:
+                    raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
+            energies.detach_()
+            X_grad = X_grad.detach() * atom_masks
+            X.detach_()
+            g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
+            g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
+            for numit in range(maxiter):
                 # Calc. Criteria
                 E_eps = th.abs(energies - energies_old)  # (n_batch, )
                 energies_old = energies.detach().clone()
                 # manage the irregular tensors
                 if self.is_concat_X:
                     F_eps = th.abs(X_grad)  # (1, n_batch*n_atom, 3)
-                    f_converge = th.cat([th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < F_threshold)) for i in
-                                         range(n_inner_batch)])  # Tensor[bool], length == n_inner_batch
-                    converge_mask = (E_eps < E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
-                    converge_str = converge_mask.numpy(force=True)
-                    converge_mask = th.repeat_interleave(
-                        converge_mask.unsqueeze(0).unsqueeze(-1),
-                        th.tensor(batch_indices, device=self.device),
+                    f_converge = th.cat([
+                        th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < F_threshold)) for i in range(n_inner_batch)
+                    ])  # Tensor[bool], length == n_inner_batch
+                    self.converge_mask = (E_eps < E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
+                    converge_str = self.converge_mask.numpy(force=True)
+                    self.converge_mask = th.repeat_interleave(
+                        self.converge_mask.unsqueeze(0).unsqueeze(-1),
+                        batch_indices_tensor,
                         dim=1
                     )  # (1, n_inner_batch*n_atom, 1)
                 else:
                     F_eps = th.abs(X_grad)  # (n_batch, n_atom, 3)
-                    converge_mask = (E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) * th.all(F_eps < F_threshold, dim=(1, 2),
-                                                                                               keepdim=True)  # To stop the update of converged samples.
-                    converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
+                    self.converge_mask = ((E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) *
+                                     th.all(F_eps < F_threshold, dim=(1, 2),keepdim=True))  # To stop the update of converged samples.
+                    converge_str = (self.converge_mask[:, 0, 0]).numpy(force=True)
+                # split batches if specified batch
+                if batch_indices is not None:
+                    X_tup = th.split(X, batch_indices, dim=1)
+                    if self.verbose > 2: F_tup = th.split(- X_grad, batch_indices)
+                else:
+                    X_tup = (X,)
+                    if self.verbose > 2: F_tup = (- X_grad, )
 
-                # Verbose, Print information.
+                # Verbose
                 if self.verbose > 0:
                     self.logger.info(f"ITERATION {numit:>5d}\n "
                                      f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"MAX_F: {th.max(F_eps):>5.7e}\n "
                                      f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"Converged: {converge_str}\n "
-                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s\n")
+                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s")
                 if self.verbose > 1:
-                    # split batches if specified batch
-                    if batch_indices is not None:
-                        X_tup = th.split(X, batch_indices, dim=1)
-                    else:
-                        X_tup = (X,)
                     self.logger.info(f" Coordinates:\n")
                     X_str = [
                         np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
@@ -279,110 +283,120 @@ class BaseStrcOpt:
                     ]
                     [self.logger.info(f'{x_str}\n') for x_str in X_str]
                 if self.verbose > 2:
-                    if batch_indices is not None:
-                        F_tup = th.split(- X_grad, batch_indices)
-                    else:
-                        F_tup = (- X_grad,)
-                    self.logger.info(f" Forces:\n")
-                    F_str = [
-                        np.array2string(fi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                        for fi in F_tup
+                    self.logger.info(f"Gradients (forces):\n")
+                    X_str = [
+                        np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        for xi in F_tup
                     ]
-                    [self.logger.info(f'{f_str}\n') for f_str in F_str]
+                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
 
-                # Judge threshold
-                if th.all(converge_mask):
+                # judge thres
+                if th.all(self.converge_mask):
                     is_main_loop_converge = True
                     break
                 t_st = time.perf_counter()
 
-            # Update X direction: (n_batch, n_atom*3, 1)
-            p = self._update_direct(g, g_old, **opt_algo_args)
-            # Line Search -> Update X step length: (n_batch, 1, 1) along the direction
-            alpha = th.where(
-                converge_mask[:, :1, :1],
-                0.,
-                self._line_search(func, X, energies, g, p, func_args=func_args, func_kwargs=func_kwargs)
-            )
-            # update X
-            with th.no_grad():
+                # search directions
+                p = self._update_direction(g, g_old, p, X)  # (n_batch, n_atom*3, 1)
+                # search step length -> steplength: (n_batch, 1, 1)
+                alpha = th.where(
+                    self.converge_mask[:, :1, :1],
+                    0.,
+                    self._line_search(func, grad_func_, X, energies, g, p, is_grad_func_contain_y,
+                                      func_args=func_args, func_kwargs=func_kwargs, grad_func_args=grad_func_args, grad_func_kwargs=grad_func_kwargs)
+                )
+                # update X
                 displace = alpha * p  # (n_batch, 1, 1) * (n_batch, n_atom*3, 1)
                 X = X + displace.view(n_batch, n_atom, n_dim)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
-            # update y, old grad & grad
-            g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
-            X.requires_grad_()
-            energies: th.Tensor = th.where(converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
-            if is_grad_func_contain_y:
-                X_grad = th.where(
-                    converge_mask,
-                    F_eps,
-                    grad_func_(X, energies, *grad_func_args, **grad_func_kwargs)
-                )
-            else:
-                X_grad = th.where(
-                    converge_mask,
-                    F_eps,
-                    grad_func_(X, *grad_func_args, **grad_func_kwargs)
-                )
-            energies = energies.detach()
-            X_grad = X_grad.detach() * atom_masks  # (n_batch, n_atom, n_dim)
-            X = X.detach()
-            g: th.Tensor = (th.flatten(X_grad, 1, 2)).unsqueeze_(-1)  # (n_batch, n_atom*n_dim, 1)
-            # update opt algo args
-            opt_algo_args = self._update_opt_algo(**opt_algo_args)
+                # update old grad
+                g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
+                # calc. new energy & grad.
+                with th.enable_grad():
+                    X.requires_grad_()
+                    energies: th.Tensor = th.where(self.converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+                    if is_grad_func_contain_y:
+                        X_grad = th.where(
+                            self.converge_mask,
+                            F_eps,
+                            grad_func_(energies, X, *grad_func_args, **grad_func_kwargs)
+                        )
+                    else:
+                        X_grad = th.where(
+                            self.converge_mask,
+                            F_eps,
+                            grad_func_(X, *grad_func_args, **grad_func_kwargs)
+                        )
+                energies.detach_()
+                X_grad = X_grad.detach() * atom_masks
+                X.detach_()
+                g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
+                g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
+                self._update_algo_param(g, g_old, p, displace)
 
-            # print step length
-            if self.verbose > 1:
-                self.logger.info(f"step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}\n")
-            # Check NaN
-            if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
+                # print steplength
+                if self.verbose > 1:
+                    self.logger.info(f" step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}\n")
+                # Check NaN
+                if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
 
-            # ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
-                self.logger.info('-' * 100 + f'\nAll Structures were Converged.'
-                                             f'\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s')
+                self.logger.info(
+                    '-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s')
             else:
                 self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
         else:
             if not is_main_loop_converge: warnings.warn('Some Structures were NOT Converged yet!',
                                                         FaildToConvergeWarning)
+        # release
+
         # output
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X  # , ptlist  # test <<<
+            return energies, X  #, ptlist  # test <<<
 
-    def _initialize_opt_algo(self, ) -> Dict[str, Any]:
+    def initialize_algo_param(self):
         """
-        Override this method to initialize Args of optimization algorithms.
+        Override this method to initialize attribute variables for self._update_direction.
+        Examples:
+            (BFGS algo.)
+            # descent direction
+            self.p = 0.
+            # Initial quasi-inverse Hessian Matrix  (n_batch, n_atom*n_dim, n_atom*n_dim)
+            self.H_inv = (th.eye(n_atom * n_dim, device=self.device).unsqueeze(0)).expand(n_batch, -1, -1)
+            # prepared identity matrix
+            self.Ident = (th.eye(n_atom * n_dim, device=self.device).unsqueeze(0)).expand(n_batch, -1, -1)
 
-        Returns:
-            opt_algo_args_dict: Dict[str, Any], the initialized
-        """
-        raise NotImplementedError
-
-    def _update_opt_algo(self, **opt_algo_args_dict) -> Dict[str, Any]:
-        """
-        Override this method to update Args of optimization algorithms.
-        Args:
-            **opt_algo_args_dict: the input args of optimization algorithm
-
-        Returns:
-            opt_algo_args_dict: Dict[str, Any], the updated args of optimization algorithm.
+        Returns: None
         """
         raise NotImplementedError
 
-    def _update_direct(self, g: th.Tensor, g_old: None | th.Tensor=None, **opt_algo_args_dict) -> th.Tensor:
+    def _update_direction(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, X: th.Tensor) -> th.Tensor:
         """
-        Override this method to calculate the update direction of X.
+        Override this method to implement X update algorithm.
         Args:
-            g: the gradient of X
-            g_old: the previous gradient of X.
-            **opt_algo_args_dict: the input args of optimization algorithm
+            g: (n_batch, n_atom*3, 1), the gradient of X at this step
+            g_old: (n_batch, n_atom*3, 1), the gradient of X at last step
+            p: (n_batch, n_atom*3, 1), the update direction of X at last step
+            X: (n_batch, n_atom, 3), the independent vars X.
 
         Returns:
-            th.Tensors: displacement direction of X
+            p: th.Tensor, the new update direction of X.
+        """
+        raise NotImplementedError
+
+    def _update_algo_param(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
+        """
+        Override this method to update the parameters of X update algorithm i.e., self.iterform.
+        Args:
+            g: (n_batch, n_atom*3, 1), the gradient of X at this step
+            g_old: (n_batch, n_atom*3, 1), the gradient of X at last step
+            p: (n_batch, n_atom*3, 1), the update direction of X at last step
+            displace: (n_batch, n_atom*3, 1), the displacement of X at this step. displace = step-length * p
+
+        Returns: None
         """
         raise NotImplementedError

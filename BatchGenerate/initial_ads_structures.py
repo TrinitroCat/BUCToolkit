@@ -1,3 +1,9 @@
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: initial_ads_structures.py
+#  Environment: Python 3.12
+
 import copy
 from typing import List, Literal, Dict
 import warnings

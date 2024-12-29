@@ -1,5 +1,11 @@
 """ Flatten Python list into 1D in parallel """
 
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: _para_flatt_list.py
+#  Environment: Python 3.12
+
 import multiprocessing as mp
 import warnings
 from typing import List, Iterable, Tuple

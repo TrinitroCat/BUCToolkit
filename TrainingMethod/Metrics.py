@@ -1,5 +1,11 @@
 """ Metrics """
-from typing import Literal, Dict
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: Metrics.py
+#  Environment: Python 3.12
+
+from typing import Literal, Dict, List, Tuple
 import warnings
 import torch as th
 import torch.nn.functional as F
@@ -10,7 +16,11 @@ def E_MAE(pred: Dict[Literal['energy', 'forces'], th.Tensor],
           label: Dict[Literal['energy', 'forces'], th.Tensor],
           reduction: Literal['mean', 'sum', 'none'] = 'mean'):
     with th.no_grad():
-        mae = F.l1_loss(pred['energy'], label['energy'], reduction=reduction)
+        if isinstance(pred['energy'], th.Tensor):
+            mae = F.l1_loss(pred['energy'], label['energy'], reduction=reduction)
+        elif isinstance(pred['energy'], List|Tuple):
+            mae = sum(F.l1_loss(pred_, label['energy'], reduction=reduction) for pred_ in pred['energy'])
+
     return mae
 
 

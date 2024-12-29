@@ -1,5 +1,11 @@
 """Atomic masses & number information"""
 
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: _Masses.py
+#  Environment: Python 3.12
+
 MASS = {
     "H": 1.008,
     "He": 4.0026,

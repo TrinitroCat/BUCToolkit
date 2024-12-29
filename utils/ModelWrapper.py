@@ -1,6 +1,12 @@
 """
 Model wrapper of ensemble method
 """
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: ModelWrapper.py
+#  Environment: Python 3.12
+
 from typing import Tuple, Dict, List, Any, Mapping, Sequence
 
 import torch as th

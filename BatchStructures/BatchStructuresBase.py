@@ -1,6 +1,12 @@
 """
 BatchStructure base class.
 """
+#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 0.7b
+#  File: BatchStructuresBase.py
+#  Environment: Python 3.12
+
 import gc
 import logging
 import pickle
@@ -509,6 +515,7 @@ class BatchStructures(object):
         self._check_id()
 
     def write2text(self,
+                   output_path: str = './',
                    indices: int | str | Tuple[int, int] | None = None,
                    file_format: Literal['POSCAR', 'cif', 'xyz', 'xyz_forces'] = 'POSCAR',
                    output_path: str = './',
@@ -546,6 +553,8 @@ class BatchStructures(object):
             is_convert = True
         else:
             is_convert = False
+        if not os.path.isdir(output_path):
+            os.makedirs(output_path)
 
         try:
             if file_format == 'POSCAR':
@@ -683,6 +692,7 @@ class BatchStructures(object):
         self.Dist_mat = list()
         for i, atomic_coordinates in enumerate(self.Coords):
             cell_vectors: np.ndarray = self.Cells[i]
+Conflicting files
             # calculate cross-cell dist.; cell_diff = supercell_indices @ cell_vec; <<<
             # shape: (n_prim_cells, 1, 3)@(1, 3, 3) -> (n_prim_cells, 1, 3)
             cell_diff = (supercell_indices[:, None, :]) @ (cell_vectors[None, :, :])
@@ -743,6 +753,7 @@ class BatchStructures(object):
 
     def cartesian2direct(self, ):
         """ Convert Cartesian coordinates to Direct coordinates. Only work in 'L' Mode. """
+        assert self.Mode == 'L'
         for i, cootype in enumerate(self.Coords_type):
             if cootype == 'C':
                 cell = self.Cells[i]
@@ -751,6 +762,7 @@ class BatchStructures(object):
 
     def direct2cartesian(self, ):
         """ Convert Direct coordinates to Cartesian coordinates. Only work in 'L' Mode. """
+        assert self.Mode == 'L'
         for i, cootype in enumerate(self.Coords_type):
             if cootype == 'D':
                 cell = self.Cells[i]
