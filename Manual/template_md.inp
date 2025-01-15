@@ -1,0 +1,35 @@
+# input template
+
+# global configs
+START: 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH
+REDIRECT: true    # whether output training logs to OUTPUT_PATH or directly print on screen.
+SAVE_CHK: false
+SAVE_PREDICTIONS: false  # only for predictions. Whether output predictions to a npz file.
+EPOCH: 10
+BATCH_SIZE: 1
+VAL_BATCH_SIZE: 5 # default is the same as BATCH_SIZE
+VAL_PER_STEP: 1500
+
+# I/O configs
+LOAD_CHK_FILE_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/best_checkpoint.pt
+CHK_SAVE_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/forces
+OUTPUT_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MD_test
+OUTPUT_POSTFIX: MD
+PREDICTIONS_SAVE_FILE: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/Predictions.npz  # path of saving predictions
+
+# model configs
+MODEL_NAME: GemNet_OC
+MODEL_CONFIG: {}
+  #...
+
+# molecular dynamics
+MD:
+  ENSEMBLE: NVT
+  THERMOSTAT: CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
+  THERMOSTAT_CONFIG:
+    DAMPING_COEFF: 0.01
+    TIME_CONST: 30
+  TIME_STEP: 1  # Unit: fs
+  MAX_STEP: 4000  # total time (fs) = TIME_STEP * MAX_STEP
+  T_INIT: 298.15  # Initial Temperature, Unit: K. For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist.
+  OUTPUT_COORDS_PER_STEP: 50  # To control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted.

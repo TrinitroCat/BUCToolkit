@@ -22,6 +22,8 @@ from torcheval.metrics.functional import r2_score
 from .Losses import Energy_Force_Loss, Energy_Loss
 from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE
 
+from BM4Ckit.utils._CheckModules import check_module
+
 
 class _LoggingEnd:
     """
@@ -306,6 +308,8 @@ class _Model_Wrapper_pyg:
         """
         self._model = model
         self.forces = None
+        if check_module('torch_geometric') is None:
+            ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
 
     def Energy(self, X, graph, return_format: Literal['sum', 'origin'] = 'origin'):
@@ -344,6 +348,8 @@ class _Model_Wrapper_pyg_only_X:
         self._model = model
         self.forces = None
         self.graph = graph
+        if check_module('torch_geometric') is None:
+            ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
 
     def Energy(self, X,):
@@ -368,7 +374,57 @@ class _Model_Wrapper_pyg_only_X:
 
 
 class _Model_Wrapper_dgl:
-    pass
+    def __init__(self, model) -> None:
+        """
+        A format transformer for converting Tensor X into DGLGraph.ndata['pos'] i.e., wrapping the model(graph, ...) into f(X)
+        The output DGLGraph has format as follows:
+        dgl.heterograph(
+            {
+                ('atom', 'bond', 'atom'): ([], []),
+                ('cell', 'disp', 'cell'): ([], [])
+            },
+            num_nodes_dict={
+                'atom': n_atom,
+                'cell': 1
+            }
+        )
+        data.nodes['atom'].data['pos']: (n_atom, 3), Atom positions in Cartesian coordinates.
+        data.nodes['atom'].data['Z']: (n_atom, ), Atomic numbers.
+        data.nodes['cell'].data['cell']: (1, 3, 3), Cell vectors.
+
+        Args:
+            model: An instantiate nn.Module subclass
+
+        Methods:
+            Energy: input Tensor `X` and DGLGraph `graph`, it will update data.nodes['atom'].data['pos'] into X and return model(graph)['energy'].
+            Grad: input Tensor `X` and DGLGraph `graph`, it will update data.nodes['atom'].data['pos'] into X and return model(graph)['forces'].
+
+        """
+        self._model = model
+        self.forces = None
+        if check_module('dgl') is None:
+            ImportError('The method is unavailable because the `dgl` cannot be imported.')
+        pass
+
+    def Energy(self, X, graph, return_format: Literal['sum', 'origin'] = 'origin'):
+        self.X = X
+        graph.nodes['atom'].data['pos'] = self.X.squeeze(0)
+        y = self._model(graph)
+        energy = y['energy']
+        self.forces = y['forces']
+        if return_format == 'sum':
+            energy = th.sum(energy).unsqueeze(0)
+        return energy
+
+    def Grad(self, X, graph):
+        if self.forces is None:
+            self.X = X
+            graph.nodes['atom'].data['pos'] = self.X.squeeze(0)
+            return - ((self._model(graph))['forces']).unsqueeze(0)
+        else:
+            force = self.forces
+            del self.forces
+            return - force.unsqueeze(0)
 
 
 def _rmse(x, y, reduction='mean') -> th.Tensor:

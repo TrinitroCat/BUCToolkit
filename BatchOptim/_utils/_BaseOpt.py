@@ -194,6 +194,7 @@ class _BaseOpt:
             grad_func_ = grad_func_.to(self.device)
 
         X = X.to(self.device)
+        # TODO, Delete
         for _args in (func_args, func_kwargs.values(), grad_func_args, grad_func_kwargs.values()):
             for _arg in _args:
                 if isinstance(_arg, th.Tensor):
@@ -234,7 +235,7 @@ class _BaseOpt:
                     raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
             energies.detach_()
             X_grad = X_grad.detach() * atom_masks
-            X.detach_()
+            X = X.detach()
             g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
             g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
             for numit in range(maxiter):
@@ -344,7 +345,8 @@ class _BaseOpt:
         if self.verbose > 0:
             if is_main_loop_converge:
                 self.logger.info(
-                    '-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s')
+                    '-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s'
+                )
             else:
                 self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
         else:

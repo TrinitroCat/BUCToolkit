@@ -15,7 +15,7 @@ def check_module(module_name: str, pkg_name: None | str = None):
     Check whether imported module exists.
     Args:
         module_name: imported module name.
-        pkg_name: package name. it is required when performing a relative import.
+        pkg_name: package name. It is required when performing a relative import.
                   It specifies the package to use as the anchor point from which to resolve the relative import to an absolute import.
 
     Returns:

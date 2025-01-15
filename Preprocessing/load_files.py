@@ -62,9 +62,11 @@ def load_from_csv(
         energy_dict = {cont[col1]: label_type(cont[col2])
                        for cont in f if cont[col2] not in {'None', '', 'nan'}}  # a dict of {sample_id: energy}
     else:
-        energy_dict = {cont[col1]: label_type(cont[col2]) if not (cont[col2] in {'None', 'nan', ''})
-        else None
-                       for cont in f}  # a dict of {sample_id: energy}
+        energy_dict = {
+            cont[col1]: label_type(cont[col2]) if not (cont[col2] in {'None', 'nan', ''})
+            else None
+            for cont in f
+        }  # a dict of {sample_id: energy}
 
     return energy_dict
 
@@ -584,6 +586,10 @@ class OUTCAR2Feat(BatchStructures):
         if n_core > len(file_list):
             warnings.warn(f'`ncore` is greater than file numbers, so `ncore` was reset to {len(file_list)}', RuntimeWarning)
             n_core = len(file_list)
+        elif n_core == -1:
+            n_core = jb.cpu_count()
+        elif not(isinstance(n_core, int)) or n_core < -1:
+            raise ValueError(f'Invalid `n_core` number: {n_core}.')
 
         if n_core == 1:
             if self.verbose: print('Sequential Reading...');print('Progress: 0%', end='\r')
@@ -617,6 +623,7 @@ class Xyz2Feat(BatchStructures):
     """
     def __init__(self, path: str, verbose: int = 1, has_cell: bool = False, has_forces: bool = False):
         super().__init__()
+        #warnings.warn()
         self.verbose = verbose
         self.path = path
         self.has_cell = has_cell
@@ -629,10 +636,10 @@ class Xyz2Feat(BatchStructures):
         with open(os.path.join(self.path, file_name), 'r') as _f:
             data = _f.readlines()
         # match atoms number, energy of every structure and generate atom_number_all_list, Energy_list
-        line_of_energy = [d for d in data if len(re.findall('i\s=', d)) != 0]
+        line_of_energy = [d for d in data if len(re.findall(r'i\s=', d)) != 0]
         if self.has_cell: raise NotImplementedError #
         atom_list = [
-            int(re.findall('\s+[0-9]+\n', d)[0]) for d in data if len(re.findall('\s+[0-9]+\n', d)) != 0
+            int(re.findall(r'\s+[0-9]+\n', d)[0]) for d in data if len(re.findall(r'\s+[0-9]+\n', d)) != 0
         ]
         energy_list = [data[1 + (atom_list[i] + 2) * i].split()[-1] for i in range(len(line_of_energy))]
         element_position_list = [
@@ -704,6 +711,230 @@ class Xyz2Feat(BatchStructures):
                     warnings.warn(f"Error: {e}")
 
 
+class ExtXyz2Feat(BatchStructures):
+    """
+    Read extxyz file with multiple structures.
+    """
+    def __init__(self, path: str, verbose: int = 1):
+        super().__init__()
+        self.verbose = verbose
+        self.path = path
+        self.Energies = list()
+        self.Forces = list()
+        self.fix_mask_trans_func = np.vectorize(self._fixed_info_transformer)
+        self.FIXED_DICT = {'T': 1, 'F': 0}
+
+    @staticmethod
+    def _fixed_info_transformer(a: np.ndarray, fixed_dict: dict):
+        y = fixed_dict[a]
+        return y
+
+    def _read_single(
+            self,
+            file_name: str,
+            lattice_tag: str = 'lattice',
+            energy_tag: str = 'energy',
+            column_info_tag: str = 'properties',
+            element_tag: str = 'species',
+            coordinates_tag: str = 'pos',
+            forces_tag: str|None = 'forces',
+            fixed_atom_tag: str|None = 'move_mask'
+    ) -> Tuple[List[str], List, List, List, List[List], List[List], List[np.ndarray], List, List]:
+        """
+        read single extxyz file.
+        Args:
+            file_name:
+            lattice_tag:
+            energy_tag:
+            column_info_tag:
+            element_tag:
+            coordinates_tag:
+            forces_tag:
+            fixed_atom_tag:
+
+        Returns:
+
+        """
+        # save infos
+        idx = list()
+        Cell_list = list()
+        Energy_list = list()
+        Elem_list = list()
+        Number_list = list()
+        Coords_list = list()
+        Forces_list = list()
+        Fixed_list = list()
+        if not os.path.isfile(os.path.join(self.path, file_name)):
+            warnings.warn(f'No OUTCAR file in given directory {os.path.join(self.path, file_name)}')
+            return [], [], [], [], [], [], [], [], []
+
+        try:
+            with open(os.path.join(self.path, file_name), 'r') as _f:
+                data = _f.readlines()
+
+            line_now = 0  # flag of line now, start from 0
+            i_structure = 0  # a counter
+            while line_now + 1 < len(data):
+                n_atom = int(data[line_now])
+                info = data[line_now + 1]
+                # PREFERENCES
+                # cell
+                cell = re.search(self.CELL_PARTTEN, info)
+                assert cell is not None, 'Lattice was not found.'
+                cell = cell.groups()[0].split()
+                cell = np.asarray(cell, dtype=np.float32).reshape(3, 3)
+                # properties & column split
+                col_content = dict()  # dict recorded column content that {name: (type, column_number_start, end)}
+                col_split = re.search(self.PROP_PARTTEN, info)
+                if col_split is not None:
+                    col_split = col_split.groups()[0].split(':')
+                    n_col = len(col_split)
+                    assert len(col_split)%3 == 0, 'Invalid properties information format.'
+                    _i_now = 0
+                    for i_col in range(0, n_col, 3):
+                        col_content[col_split[i_col]] = (col_split[i_col + 1], _i_now, _i_now + int(col_split[i_col + 2]))
+                        _i_now += int(col_split[i_col + 2])
+                else:
+                    col_content = {
+                        f'{element_tag}': ('S', 0, 1),
+                        f'{coordinates_tag}': ('R', 1, 3)
+                    }
+                # energy
+                ener = re.search(self.ENER_PARTTEN, info)
+                if ener is None:
+                    has_energy = False  # a flag shown whether file contain energy.
+                else:
+                    has_energy = True
+                    ener = float(ener.groups()[0])
+
+                # MAIN INFO
+                main_info = np.asarray([_.split() for _ in data[line_now + 2 : line_now + 2 + n_atom]])
+                # element & its number
+                element_list_ = main_info[:, col_content[f'{element_tag}'][1]:col_content[f'{element_tag}'][2]].flatten()
+                elements = [element_list_[0], ]
+                numbers = list()
+                count_ = 0
+                for j, el in enumerate(element_list_):
+                    if el != elements[-1]:
+                        elements.append(el)
+                        numbers.append(count_)
+                        count_ = 1
+                    else:
+                        count_ += 1
+                numbers.append(count_)
+                # coords
+                coords = main_info[:, col_content[f'{coordinates_tag}'][1]:col_content[f'{coordinates_tag}'][2]].astype(np.float32)
+                # forces
+                forces_info = col_content.get(f'{forces_tag}', None) if forces_tag is not None else None
+                if forces_info is not None:
+                    forces = main_info[:, forces_info[1]:forces_info[2]].astype(np.float32)
+                else:
+                    forces = None
+                    warnings.warn('`forces_tag` was set, while it cannot be found in the column information.')
+                # fixed masks
+                if fixed_atom_tag is not None:
+                    fixed = main_info[:, col_content[f'{fixed_atom_tag}'][1]:col_content[f'{fixed_atom_tag}'][2]].flatten()
+                    fixed = self.fix_mask_trans_func(fixed, self.FIXED_DICT)
+                else:
+                    fixed = None
+
+                # write data
+                idx.append(f'{os.path.splitext(file_name)[0]}_{i_structure}')
+                Energy_list.append(ener)
+                Cell_list.append(cell)
+                Coords_list.append(coords)
+                Elem_list.append(elements)
+                Number_list.append(numbers)
+                Fixed_list.append(fixed)
+                Forces_list.append(forces)
+
+                line_now += 2 + n_atom
+                i_structure += 1
+
+            return idx, Cell_list, Energy_list, Forces_list, Elem_list, Number_list, Coords_list, Fixed_list, ['C'] * i_structure
+
+        except Exception as err:
+            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
+            return [], [], [], [], [], [], [], [], []
+
+    def read(
+            self,
+            file_list,
+            n_core: int = -1,
+            backend: Literal['loky', 'threading', 'multiprocessing']|str = 'loky',
+            lattice_tag: str = 'lattice',
+            energy_tag: str = 'energy',
+            column_info_tag: str = 'properties',
+            element_tag: str = 'species',
+            coordinates_tag: str = 'pos',
+            forces_tag: str | None = 'forces',
+            fixed_atom_tag: str | None = 'move_mask'
+    ):
+        """
+        Read *.extxyz file to BatchStructures.
+        Args:
+            file_list: List[str], the list of files to read. Default for all files under given path.
+            n_core: int, the number of CPU cores used in reading files. -1 for all cores.
+            backend: backend of parallel reading in `joblib`.
+            lattice_tag: key-words of lattice information in *.extxyz file, at each structure's 2nd line.
+            energy_tag: key-words of structure's energy in *.extxyz file.
+            column_info_tag: key-words of column content information in *.extxyz file. The column content has such format:
+                             `content 1`:`data type 1`:`column occupied number 1`:`content 2`:`data type 2`:`column occupied number 2`: ...
+                             detailed see https://wiki.fysik.dtu.dk/ase/dev/_modules/ase/io/extxyz.html.
+            element_tag: As a content in `column_info_tag`, name of element column.
+            coordinates_tag: As a content in `column_info_tag`, name of atom coordinates column.
+            forces_tag: As a content in `column_info_tag`, name of forces column. If file do not contain forces, set it to None.
+            fixed_atom_tag: As a content in `column_info_tag`, name of the mask column specified which atom was fixed.
+
+        Returns: None
+        All data would update as class attributes.
+        """
+        t_st = time.perf_counter()
+        # file check
+        if file_list is None:
+            file_list = os.listdir(self.path)
+            file_list = [f_ for f_ in file_list if os.path.isfile(os.path.join(self.path, f_))]
+        elif not isinstance(file_list, Sequence):
+            raise TypeError(f'Invalid type of files_list: {type(file_list)}')
+        # para. set
+        if n_core > len(file_list):
+            warnings.warn(f'`n_core` is greater than file numbers, so `n_core` was reset to {len(file_list)}', RuntimeWarning)
+            n_core = len(file_list)
+        elif n_core == -1:
+            n_core = jb.cpu_count(only_physical_cores=True)
+        elif (not isinstance(n_core, int)) or n_core < -1:
+            raise ValueError(f'Invalid `n_core` number: {n_core}.')
+        # search pattern
+        self.CELL_PARTTEN = re.compile(rf'{lattice_tag}\s?=\s?\"([-+E0-9.\s]+)\"', re.IGNORECASE)
+        self.PROP_PARTTEN = re.compile(rf'{column_info_tag}\s?=\s?([a-zA-Z:0-9_]+)', re.IGNORECASE)
+        self.ENER_PARTTEN = re.compile(rf'{energy_tag}\s?=\s?([-+.0-9e]+)')
+
+        _para = jb.Parallel(n_jobs=n_core, backend=backend, verbose=self.verbose)
+        _dat = _para(jb.delayed(self._read_single)(
+            fi_name,
+            lattice_tag,
+            energy_tag,
+            column_info_tag,
+            element_tag,
+            coordinates_tag,
+            forces_tag,
+            fixed_atom_tag
+        ) for fi_name in file_list)
+        if (_dat is None) or (_dat[0] == []): raise RuntimeError('Occurred empty data.')
+        # idx, Cell_list, Energy_list, Forces_list, Elem_list, Number_list, Coords_list, Coord_type
+        for temp in _dat:
+            self._Sample_ids.extend(temp[0])
+            self.Cells.extend(temp[1])
+            self.Energies.extend(temp[2])
+            self.Forces.extend(temp[3])
+            self.Elements.extend(temp[4])
+            self.Numbers.extend(temp[5])
+            self.Coords.extend(temp[6])
+            self.Fixed.extend(temp[7])
+            self.Coords_type.extend(temp[8])
+        if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
+
+
 
 class ASEDB2Feat(BatchStructures):
     """
@@ -723,12 +954,10 @@ class ASEDB2Feat(BatchStructures):
 
 if __name__ == '__main__':
     tst = time.perf_counter()
-    f = OUTCAR2Feat('/DataBases/PropDehydro/OUTCARs', verbose=1)
-    f.read(n_core=6, )
-    print(f'TIME: {-tst + time.perf_counter()}')
-    del f
-    tst = time.perf_counter()
-    f = OUTCAR2Feat('/DataBases/PropDehydro/OUTCARs', verbose=1)
-    f.read(n_core=1, )
-    print(f'TIME: {-tst + time.perf_counter()}')
+    g = BatchStructures()
+    g.load_from_file('/media/ppx/My PSSD/DataSet/OC20All/')
+
+    f = ExtXyz2Feat('/media/ppx/EXTERNAL_USB/s2ef_train_all/s2ef_train_all/s2ef_train_all/')
+    f.read([f'{_}.extxyz' for _ in range(10)], backend='loky', n_core=6)
+    print(f'Total time: {time.perf_counter() - tst}')
     pass

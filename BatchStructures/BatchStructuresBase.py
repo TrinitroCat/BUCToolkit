@@ -278,6 +278,20 @@ class BatchStructures(object):
         if len(id_set) != len(self):
             raise RuntimeError(f'There are duplicate names in the Sample_ids: {set([x for x in self._Sample_ids if self._Sample_ids.count(x) > 1])}')
 
+    def _check_len(self, ):
+        """ check whether the length of all prop. consistent. """
+        qe = True
+        qf = True
+        q = (len(self.Coords) == len(self.Coords_type) == len(self.Numbers)
+             == len(self.Elements) == len(self._Sample_ids) == len(self.Coords_type) == len(self.Cells) == len(self.Fixed))
+        if self.Energies is not None: qe = (len(self.Energies) == len(self))
+        if self.Labels is not None: self.Labels = self.Labels_.tolist()
+        if self.Forces is not None: qf = (len(self.Forces) == len(self))
+
+        if not (q & qe & qf): raise RuntimeError('Length of some properties does not match. PLEASE DOUBLE CHECK!\n'
+                                                 'If you do not manually modified any attributes in this class, '
+                                                 'please report this bug to us.')
+
     def save2file(self, path: str, mode: Literal['w', 'a'] = 'w'):
         """
         Saving this BatchStructures to a memory-mapping file.
@@ -314,7 +328,7 @@ class BatchStructures(object):
             has_conv = True
         else:
             has_conv = False
-        _temp_attr_list = (
+        _temp_attr_list = [
             self._Sample_ids_,
             self.Batch_indices_,
             self.Elements_batch_indices_,
@@ -327,8 +341,9 @@ class BatchStructures(object):
             self.Energies_,
             self.Forces_,
             self.Labels_
-        )
+        ]
         if mode == 'w':
+            # head file: containing the tag which attr. is None, the batch number, the shape of each attr., and the type of attr.
             head_info = {'which_None': set(), 'n_batch': len(self)}
             for i, filename in enumerate(self._ATTR_NAMES):
                 if _temp_attr_list[i] is not None:
@@ -349,10 +364,31 @@ class BatchStructures(object):
                 head_info = pickle.dumps(head_info)
                 head.write(head_info)
             del _temp_attr_list
-        else:
+        else:  # mode == 'a', append
             # Read head file
             with open(os.path.join(path, 'head'), 'rb') as head:
                 head_info = pickle.load(head)
+            # rearrange batch indices & element batch indices (change it which start at 0 into starting at the last indices in old indices)
+            # batch indx.
+            bat_indx = np.memmap(
+                os.path.join(path, 'Batch_indices'),
+                dtype=head_info['Batch_indices'][0],
+                mode='r',
+                shape=head_info['Batch_indices'][1]
+            )
+            last_indx = bat_indx[-1].copy()
+            del bat_indx
+            _temp_attr_list[1] = _temp_attr_list[1][1:] + last_indx
+            # elem. indx.
+            elem_indx = np.memmap(
+                os.path.join(path, 'Elements_batch_indices'),
+                dtype=head_info['Elements_batch_indices'][0],
+                mode='r',
+                shape=head_info['Elements_batch_indices'][1]
+            )
+            last_indx = elem_indx[-1].copy()
+            _temp_attr_list[2] = _temp_attr_list[2][1:] + last_indx
+            del elem_indx, last_indx
             # Append to file
             new_head_info = {'which_None': set()}
             for i, filename in enumerate(self._ATTR_NAMES):
@@ -1249,8 +1285,10 @@ class BatchStructures(object):
 
     def __repr__(self) -> str:
         info = (
-            f'BatchStructures[\n\ttotal {len(self)} structures\n\thas Atom_list: {self.Atom_list is not None}\n\thas Atomic_number_list: {self.Atomic_number_list is not None}'
-            f'\n\thas Energies: {self.Energies is not None}\n\thas Forces: {self.Forces is not None}\n\thas Labels: {self.Labels is not None}\n{" " * 15}]')
+            f'BatchStructures[\n\ttotal {len(self)} structures\n\thas Atom_list: {self.Atom_list is not None}\n\t'
+            f'has Atomic_number_list: {self.Atomic_number_list is not None}'
+            f'\n\thas Energies: {self.Energies is not None}\n\thas Forces: {self.Forces is not None}\n\t'
+            f'has Labels: {self.Labels is not None}\n{" " * 15}]')
         return info
 
     def __contains__(self, val) -> bool:
@@ -1258,6 +1296,29 @@ class BatchStructures(object):
             return True
         else:
             return False
+
+    def __eq__(self, other):
+        other._check_len()
+        self._check_len()
+        if len(self) != len(other): return False
+        Qid = (self.Sample_ids == other.Sample_ids)
+        Qcoo = all([np.allclose(self.Coords[_], other.Coords[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
+        Qct = (self.Coords_type == other.Coords_type)
+        Qcel = all([np.allclose(self.Cells[_], other.Cells[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
+        Qelm = all([np.all(self.Elements[_] == other.Elements[_]) for _ in range(len(self))])
+        Qnum = all([np.all(self.Numbers[_] == other.Numbers[_]) for _ in range(len(self))])
+        Qfix = all([np.allclose(self.Fixed[_], other.Fixed[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
+        Qe = True
+        Qf = True
+        Ql = True
+        if self.Energies is not None:
+            Qe = (self.Energies == other.Energies)
+        if self.Forces is not None:
+            Qf = all([np.allclose(self.Forces[_], other.Forces[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
+        if self.Labels is not None:
+            Ql = (self.Labels == other.Label)
+        qq = (Qid & Qcoo & Qct & Qcel & Qelm & Qnum & Qfix & Qe & Qf & Ql)
+        return qq
 
     def __getitem__(self, key: int | str | slice):  # tips: this method was not efficient and used to occasionally inquire information
         """
@@ -1269,7 +1330,7 @@ class BatchStructures(object):
         # check key
         if isinstance(key, int):
             if key >= len(self): raise ValueError(f'key {key} is out of range {len(self)}')
-            indx = slice(key, key + 1)
+            indx = slice(key, key + 1) if key != -1 else slice(key, None)
         elif isinstance(key, slice):
             indx = key
         else:

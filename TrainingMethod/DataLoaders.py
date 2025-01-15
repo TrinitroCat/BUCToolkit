@@ -27,7 +27,7 @@ dgl = check_module('dgl')
 
 class DglGraphLoader:
     """
-    A Data loader to form dgl graph
+    A Data loader to form dgl graph IN MEMORY
 
     Args:
         data:
@@ -122,7 +122,7 @@ class DglGraphLoader:
 
 class PyGDataLoader:
     """
-    A Data loader to form pygData
+    A Data loader to form pygData IN MEMORY
 
     Args:
         data:
@@ -216,7 +216,8 @@ class PyGDataLoader:
 
 class BatchStructuresDataLoader:
     """
-
+    A Data loader to form BatchStructure
     """
     def __init__(self):  # TODO
+
         pass

@@ -7,20 +7,24 @@
 import os
 import time
 import warnings
-from typing import Dict, Any
+from typing import Dict, Any, Literal
 
 import numpy as np
 import torch as th
 from torch import nn
 
 from BM4Ckit.BatchMD import NVE, NVT
-from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg
+from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class MolecularDynamics(_CONFIGS):
     """
     Molecular Dynamics Simulation
+
+    Args:
+        config_file: path to input file.
+        data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph
 
     Input file parameters:
         ENSEMBLE: Literal[NVE, NVT], the ensemble for MD.
@@ -40,10 +44,12 @@ class MolecularDynamics(_CONFIGS):
         [1] J. Chem. Phys., 2007, 126, 014101.
     """
 
-    def __init__(self, config_file: str, verbose: int = 0, device: str | th.device = 'cpu') -> None:
+    def __init__(self, config_file: str, data_type: Literal['pyg', 'dgl'] = 'pyg', verbose: int = 0, device: str | th.device = 'cpu') -> None:
         super().__init__(config_file, device)
 
         self.config_file = config_file
+        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
+        self.data_type = data_type
         self.verbose = verbose
         self.DEVICE = device
         self.reload_config(config_file)
@@ -88,7 +94,9 @@ class MolecularDynamics(_CONFIGS):
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
             epoch_now = chk_data['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
-            warnings.warn('The model was not read trained parameters from checkpoint file. \nI HOPE YOU KNOW WHAT YOU ARE DOING!', RuntimeWarning)
+            warnings.warn(
+                'The model was not read trained parameters from checkpoint file. \nI HOPE YOU KNOW WHAT YOU ARE DOING!', RuntimeWarning
+            )
             epoch_now = 0
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
@@ -146,37 +154,69 @@ class MolecularDynamics(_CONFIGS):
             time_tol = time.perf_counter()
             _model.eval()
             # MAIN LOOP
-            # TODO: print the Batch of `cell vectors` and `atomic numbers`
-            model_wrap = _Model_Wrapper_pyg(_model)
+            # define the model wrapper & batch size getter & cell vector getter for different data type
+            if self.data_type == 'pyg':
+                model_wrap = _Model_Wrapper_pyg(_model)
+                def get_batch_size(data):
+                    return len(data)
+
+                def get_cell_vec(data):
+                    return data.cell.numpy(force=True)
+
+                def get_atomic_number(data):
+                    return data.atomic_numbers.unsqueeze(0).tolist()
+
+            else:
+                model_wrap = _Model_Wrapper_dgl(_model)
+                def get_batch_size(data):
+                    return data.num_nodes('atom')
+
+                def get_cell_vec(data):
+                    return data.nodes['cell'].data['cell'].numpy(force=True)
+
+                def get_atomic_number(data):
+                    return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
+
             mole_dynam = self.MDType(**self.MD_config)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
-            n_c = 1
+            n_c = 1  # running batch now
             X_dict = dict()
             for val_data, val_label in val_set:
                 # to avoid get an empty batch
-                if len(val_data) <= 0:
+                if get_batch_size(val_data) <= 0:
                     if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
                     continue
                 # MD
                 if self.verbose > 0:
-                    self.logger.info('*'*100)
+                    self.logger.info('*' * 100)
                     self.logger.info(f'Running Batch {n_c}.')
-                    self.logger.info('*'*100)
-                    cell_str = np.array2string(val_data.cell.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")  # TODO, Support other various type.
+                    self.logger.info('*' * 100)
+                    cell_str = np.array2string(
+                        get_cell_vec(val_data), **FLOAT_ARRAY_FORMAT
+                    ).replace("[", " ").replace("]", " ")  # TODO, Now it support pygData and DGLGraph.
                     self.logger.info(f'Cell Vectors:\n{cell_str}')
 
-                batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
+                if self.data_type == 'pyg':
+                    batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
+                else:
+                    batch_indx = val_data.batch_num_nodes('atom')
+                # initial atom coordinates
+                if self.data_type == 'pyg':
+                    X_init = val_data.pos.unsqueeze(0)
+                else:
+                    X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
 
-                mole_dynam.run(model_wrap.Energy,
-                              val_data.pos.unsqueeze(0),  # TODO, Support other various type instead of only PygData.
-                              val_data.atomic_numbers.unsqueeze(0).tolist(),
-                              V_init=None,  # TODO, Support user-defined initial velocities.
-                              grad_func=model_wrap.Grad,
-                              func_args=(val_data,), grad_func_args=(val_data,),
-                              is_grad_func_contain_y=False,
-                              fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
-                              batch_indices=batch_indx,  # TODO, The batch indices.
-                              )
+                mole_dynam.run(
+                    model_wrap.Energy,
+                    X_init,  # TODO, Now it support pygData and DGLGraph.
+                    get_atomic_number(val_data),
+                    V_init=None,  # TODO, Support user-defined initial velocities.
+                    grad_func=model_wrap.Grad,
+                    func_args=(val_data,), grad_func_args=(val_data,),
+                    is_grad_func_contain_y=False,
+                    fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
+                    batch_indices=batch_indx,
+                )
 
                 # Print info
                 if self.verbose > 0:

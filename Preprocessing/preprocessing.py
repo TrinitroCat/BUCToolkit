@@ -7,11 +7,12 @@
 #  Environment: Python 3.12
 
 import copy
+import gc
 # basic modules
 import re
 import time
 import warnings
-from typing import Dict, Set, Tuple, List, Sequence, Any, Union
+from typing import Dict, Set, Tuple, List, Sequence, Any, Union, Literal
 
 import joblib as jb
 import numpy as np
@@ -19,6 +20,7 @@ import torch as th
 
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
 from BM4Ckit.utils._CheckModules import check_module
+from .load_files import OUTCAR2Feat, ExtXyz2Feat, POSCARs2Feat
 
 ase = check_module('ase')
 _pyg = check_module('torch_geometric.data')
@@ -45,8 +47,8 @@ class ScreenSampleByElement:
     Screening samples by given conditions.
 
     Methods:
-        screen_from_elements: select samples that only contains elements in input element_contains from input formula_dict, and return selected dict.
-        screen_from_formula: select samples that only contains elements in input element_contains from input formula_dict, and return selected dict.
+        screen_from_elements: select samples that only contain elements in input element_contains from input formula_dict, and return selected dict.
+        screen_from_formula: select samples that only contain elements in input element_contains from input formula_dict, and return selected dict.
     """
 
     def __init__(self, ) -> None:
@@ -54,9 +56,12 @@ class ScreenSampleByElement:
         Screening samples by given conditions.
 
         Methods:
-            screen_from_elements: select samples that only contains elements in input element_contains from input formula_dict, and return selected dict.
-            screen_from_formula: select samples that only contains elements in input element_contains from input formula_dict, and return selected dict.
+            screen_from_elements: select samples that only contain elements in input element_contains from input formula_dict, and return selected dict.
+            screen_from_formula: select samples that only contain elements in input element_contains from input formula_dict, and return selected dict.
         """
+        warnings.warn(
+            'This Method Has Been Deprecated. Use BatchStructure.contain_... or BatchStructures.not_contain_... instead', DeprecationWarning
+        )
         self.non_radio = {'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
                           'K', 'Ca', 'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn', 'Ga', 'Ge', 'As', 'Se', 'Br', 'Kr',
                           'Rb', 'Sr', 'Y', 'Zr', 'Nb', 'Mo', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In', 'Sn', 'Sb', 'Te', 'I', 'Xe',
@@ -68,7 +73,7 @@ class ScreenSampleByElement:
                              output_removed_formula: bool = False,
                              *args, **kwargs) -> Union[Tuple[Dict, List], Dict, Any]:
         r"""
-        select samples that only contains elements in input element_contains from input formula_dict, and return selected dict.
+        select samples that only contain elements in input element_contains from input formula_dict, and return selected dict.
 
         Parameter:
             elem_list_dict: Dict[str, List[str]], the dict of {id:List[elements]}
@@ -131,7 +136,7 @@ class ScreenSampleByElement:
                             output_removed_formula: 'bool, whether output a list of removed formula' = False,  # type: ignore
                             *args, **kwargs) -> Any:
         r"""
-        select samples that only contains elements in input element_contains from input formula_dict, and return selected dict.
+        select samples that only contain elements in input element_contains from input formula_dict, and return selected dict.
 
         Returns:
             'dict of selected samples | dict, list of removed formula'
@@ -198,25 +203,171 @@ def element_distribution(formulas_list: List):
     return elem_freq_dict, n_element_component
 
 
-def EIGENVAL2array(file='./EIGENVAL', *args, **kwargs) -> Tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.float32]]]:
+class BandKit:
     """
-    Read VASP output file EIGENVAL to np.array
+    A Toolkit to load VASP band file EIGENVAL and KPOINT.
+
+    Attributes:
+        self.eig_info: eigenvalues for each (n, k)
+        self.kpt_path: k-points information. Format: [[x1, y1, z1, weight1], ...]
+        self.is_spin: whether spin polarized. 1 for False, 2 for True.
+        self.k_labels: label of k-points.
     """
-    f = open(file, )
-    data = f.readlines()
-    nn, k_points, n_bands = data[5].split()
-    k_points, n_bands = int(k_points), int(n_bands)
 
-    k_coords = [data[7 + i * (n_bands + 2)].split() for i in range(k_points)]
-    k_coords = np.array(k_coords, dtype=np.float32)
+    def __init__(self):
+        self.zero_weight_indices = None
+        self.kpt_path = None
+        self.eig_info = None
+        self.is_spin = 1
+        self.k_labels = None
+        self.k_interval = None
+        self.band_interp_func = None
 
-    eigs = [data[8 + i * (n_bands + 2): 6 + (i + 1) * (n_bands + 2)] for i in range(k_points)]
-    eigs = [a.split() for eigs_ in eigs for a in eigs_]
-    eigs = np.array(eigs, dtype=np.float32).reshape((k_points, n_bands, 5))
+    def load_EIGENVAL(
+            self,
+            file: str = './EIGENVAL',
+            *args,
+            **kwargs
+    ) -> None:
+        """
+        Read VASP output file EIGENVAL to np.array
+        """
+        with open(file, 'r') as f:
+            data = f.readlines()
+        self.is_spin = int(data[0].split()[-1])
+        nn, k_points, n_bands = data[5].split()
+        k_points, n_bands = int(k_points), int(n_bands)
 
-    f.close()
+        k_coords = [data[7 + i * (n_bands + 2)].split() for i in range(k_points)]
+        k_coords = np.array(k_coords, dtype=np.float64)
 
-    return k_coords[:, :-1], eigs
+        eigs = [data[8 + i * (n_bands + 2): 6 + (i + 1) * (n_bands + 2)] for i in range(k_points)]
+        eigs = [a.split() for eigs_ in eigs for a in eigs_]
+        eigs = np.array(eigs, dtype=np.float64).reshape((k_points, n_bands, 5))
+
+        self.kpt_path = k_coords  # ([[x1, y1, z1, weight1], ...])
+        self.zero_weight_indices = np.where(np.abs(self.kpt_path[:, -1]) <= 1e-5)[0]
+        self.eig_info = eigs
+
+    def load_k_path(
+            self,
+            file: str = './KPATH.in'
+    ):
+        """
+        Read k-path file to determine k-path range.
+        """
+        with open(file, 'r') as f:
+            data = f.readlines()
+        if (data[2].split()[0][0] != 'L') and (data[2].split()[0][0] != 'l'):
+            raise ValueError('k-path file is not a linear mode VASP KPOINTS file.')
+
+        k_num_in_each_line = int(data[1].split()[0])
+        self.k_labels = list()
+        self.k_interval = list()
+        has_start = False
+        main_data = data[4:]
+        for i, kl in enumerate(main_data):
+            if kl == ' \n': continue
+            if not has_start:
+                st1 = kl.split()
+                st2 = main_data[i + 1].split()
+                labels = (st1[-1], st2[-1])
+                self.k_labels.append(labels)
+                interval = (np.asarray(st1[:-1], dtype=np.float64), np.asarray(st2[:-1], dtype=np.float64))
+                self.k_interval.append(interval)
+                has_start = True
+            else:
+                has_start = False
+                continue
+
+    def calc_effective_mass(self, n: int, k: int | Tuple | np.ndarray = (0, 0, 0)):
+        """
+        Calculate the effective mass at `k` k-point.
+        Args:
+            n: the index of band to calc. effective mass.
+            k: for `k` is int, the `k`th k-point with 0 weight would be selected. The order is same as given EIGENVAL.
+                for `k` is ndarray or List, it must have the shape of (3, ), and the k-point with this given coordinate would be selected.
+                If there are more than 1 k-points had same coordinate, the 1st one would be selected.
+
+        Returns: float, effective mass.
+
+        """
+        k_0w_points = self.kpt_path[self.zero_weight_indices, :-1]
+        eigval_0w = self.eig_info[self.zero_weight_indices]
+        if isinstance(k, int):
+            kpt = k_0w_points[k]
+            k_indx = k
+            eig = eigval_0w[k_indx, n, 1:1 + self.is_spin]
+        elif isinstance(k, (List, Tuple, np.ndarray)):
+            k = np.asarray(k)
+            k_indx = np.where(np.linalg.norm(k - k_0w_points, axis=-1) < 1e-6)[0]
+            if len(k_indx) != 0:
+                kpt = k
+                k_indx = k_indx[0]
+                eig = eigval_0w[k_indx, n, 1:1 + self.is_spin]
+            else:
+                raise RuntimeError('Given k-point `k` does not in EIGENVAL.')
+        else:
+            raise TypeError(f'Invalid `k` type: {type(k)}')
+
+        find_k_intval = False
+        for intval in self.k_interval:
+            if np.linalg.norm(kpt - intval[0], axis=-1) < 1e-6:  # given k-points at interval start
+                kpt_front = k_0w_points[k_indx + 1]
+                eig_front = eigval_0w[k_indx + 1, n, 1:1 + self.is_spin]
+                kpt_back = 2 * kpt - kpt_front  # center symmetry
+                eig_back = eig_front
+                # collinear judge
+                cos_t = (((kpt_front - intval[0]) @ (kpt_front - intval[1])) /
+                         (np.linalg.norm(kpt_front - intval[0]) * np.linalg.norm(kpt_front - intval[1])))
+                if abs(cos_t + 1.) > 1e-5:
+                    raise RuntimeError(f'No collinear k-point between interval {intval}, so directional derivative cannot be calculate.')
+                find_k_intval = True
+                break
+            elif np.linalg.norm(kpt - intval[1], axis=-1) < 1e-6:  # given k-points at interval end
+                kpt_back = k_0w_points[k_indx - 1]
+                eig_back = eigval_0w[k_indx - 1, n, 1:1 + self.is_spin]
+                kpt_front = 2 * kpt - kpt_back  # center symmetry
+                eig_front = eig_back
+                # collinear judge
+                cos_t = (((kpt_back - intval[0]) @ (kpt_back - intval[1])) /
+                         (np.linalg.norm(kpt_back - intval[0]) * np.linalg.norm(kpt_back - intval[1])))
+                if abs(cos_t + 1.) > 1e-5:
+                    raise RuntimeError(f'No collinear k-point between interval {intval}, so directional derivative cannot be calculate.')
+                find_k_intval = True
+                break
+            else:  # given k-points within interval
+                cos_t = (((kpt - intval[0]) @ (kpt - intval[1])) /
+                         (np.linalg.norm(kpt - intval[0]) * np.linalg.norm(kpt - intval[1])))
+                if abs(cos_t + 1.) < 1e-5:
+                    kpt_front = k_0w_points[k_indx + 1]
+                    eig_front = eigval_0w[k_indx + 1, n, 1:1 + self.is_spin]
+                    kpt_back = k_0w_points[k_indx - 1]
+                    eig_back = eigval_0w[k_indx - 1, n, 1:1 + self.is_spin]
+                    find_k_intval = True
+                    break
+                else:
+                    find_k_intval = False
+
+        if not find_k_intval:
+            raise RuntimeError('Given k-points do not belong any k-path.')
+        # interpolation
+        # x_ = np.concatenate((kpt_back[None, :], kpt[None, :], kpt_front[None, :]), axis=0)
+        # y_ = np.concatenate((eig_back[None, :], eig[None, :], eig_front[None, :]), axis=0)
+        # f_interp = interp.interp1d(x_, y_, kind='quadratic', axis=0)
+
+        # 2nd derivative
+        df = np.linalg.norm(kpt - kpt_back)
+        db = np.linalg.norm(kpt_front - kpt)
+        if (df > 0.02) or (db > 0.02):
+            warnings.warn(f'distance among 3 k-points for 2-order central difference quotient are too large ({df, db}), '
+                          f'thus leading to an inaccurate result.')
+        HBAR = 1.  # a.u., equal to 1.054571726e-34 J*s
+        dev2 = (1 / 27.211) * (eig_front + eig_back - 2 * eig) / (df * db * (1 / 1.889727 ** 2))
+        # m_eff = HBAR**2 / dev2 * 2.740322006e-28   # kg, hbar**2/dev2: (6.62606957e-34 J*s)**2/((1.6021766e-19 J)(1e-10 m)**2)
+        m_eff = HBAR ** 2 / dev2  # a.u., effective mass relative to static electron mass 9.1093826e-31 kg.
+
+        return m_eff
 
 
 class CreateASE:
@@ -244,12 +395,12 @@ class CreateASE:
         self.verbose = verbose
         pass
 
-    def feat2ase(self, feat, set_tags: bool = True, n_core=-1) -> List[ase.Atoms]:
+    def feat2ase(self, feat: BatchStructures, set_tags: bool = True, n_core=-1) -> List[ase.Atoms]:
         r"""
-        Convert to ase.Atoms from given instance feat that generated by POSCARs2Feat or ConcatPOSCAR2Feat.
+        Convert to ase.Atoms from given BatchStructures.
 
         Parameters:
-            feat: feat instance that generated by POSCARs2Feat or ConcatPOSCAR2Feat.
+            feat: BatchStructures.
             set_tags: bool, whether set Atoms. tags = np.ones(n_atom) automatically.
             n_core: number of CPU cores in parallel.
         
@@ -312,10 +463,10 @@ class CreateASE:
 
     def feat2ase_dict(self, feat: BatchStructures, set_tags: bool = True, n_core: int = -1) -> Dict[str, ase.Atoms]:
         r"""
-        Convert to ase.Atoms from given instance feat that generated by POSCARs2Feat or ConcatPOSCAR2Feat.
+        Convert to ase.Atoms from given BatchStructures.
 
         Parameters:
-            feat: feat instance that generated by POSCARs2Feat or ConcatPOSCAR2Feat.
+            feat: BatchStructures.
             set_tags: bool, whether set Atoms.tags = np.ones(n_atom) automatically.
         
         Returns:
@@ -454,6 +605,20 @@ class CreatePygData:
 class CreateDglData:
     r"""
     create dgl.graph from various types.
+    The output DGLGraph has format as follows:
+        dgl.heterograph(
+            {
+                ('atom', 'bond', 'atom'): ([], []),
+                ('cell', 'disp', 'cell'): ([], [])
+            },
+            num_nodes_dict={
+                'atom': n_atom,
+                'cell': 1
+            }
+        )
+        data.nodes['atom'].data['pos']: (n_atom, 3), Atom positions in Cartesian coordinates.
+        data.nodes['atom'].data['Z']: (n_atom, ), Atomic numbers.
+        data.nodes['cell'].data['cell']: (1, 3, 3), Cell vectors.
     """
 
     def __init__(self, verbose: int = 0) -> None:
@@ -552,11 +717,15 @@ class CreateDglData:
 
         if n_core == 1:
             if self.verbose: print('Converting BatchStructures to dgl.Graph sequentially...')
-            data_list: List = [_convert_single(i,
-                                               feat.Cells[i],
-                                               feat.Coords[i],
-                                               feat.Atomic_number_list[i],
-                                               feat.Fixed[i]) for i, _id in enumerate(feat.Sample_ids)]  # type: ignore
+            data_list: List = [
+                _convert_single(
+                    i,
+                    feat.Cells[i],
+                    feat.Coords[i],
+                    feat.Atomic_number_list[i],
+                    feat.Fixed[i]
+                ) for i, _id in enumerate(feat.Sample_ids)
+            ]  # type: ignore
         else:
             if self.verbose: print(f'Converting BatchStructures to dgl.Graph in parallel with {n_core} cores...')
             with jb.Parallel(n_jobs=n_core, verbose=self.verbose, backend='threading') as _para:
@@ -572,3 +741,83 @@ class CreateDglData:
 
         if self.verbose: print('Done.')
         return data_list
+
+
+class BlockedRW:
+    """
+    Blocked read and save files to a memory-mapping file. Used to manage big files that memory cannot be loaded at once.
+    """
+
+    def __init__(self, files_reader: Literal['OUTCAR', 'EXTXYZ', 'POSCAR']):
+        if files_reader == 'OUTCAR':
+            ff = OUTCAR2Feat
+        elif files_reader == 'EXTXYZ':
+            ff = ExtXyz2Feat
+        elif files_reader == 'POSCAR':
+            ff = POSCARs2Feat
+        else:
+            raise ValueError(f'`files_reader {files_reader} is invalid.')
+
+        self.reader = ff
+
+    def save(
+            self,
+            files_path: str,
+            file_name_list: List[str] | None = None,
+            read_configs: Dict | None = None,
+            save_path: str = './data',
+            chunk_size: int = 32,
+            verbose: int = 1
+    ):
+        """
+        Blocked reading files in `files_path`/`file_name_list` by files_reader, and save to `save_path`.
+        Args:
+            files_path: path of files.
+            file_name_list: list of file names to read. None for all files in given `files_path`.
+            read_configs: kwargs of file reader.
+            save_path: the path to save memory-mapping files.
+            chunk_size: Number of files (NOT Structures) read at a time.
+            verbose: verboseness of printing.
+
+        Returns: None
+        """
+        if read_configs is None: read_configs = dict()
+        # split chunks
+        n_file = len(file_name_list)
+        n_loop = n_file // chunk_size
+        # write the first chunk file
+        f = self.reader(files_path, verbose)
+        f.read(file_name_list[:chunk_size], **read_configs)
+        f.save2file(save_path, 'w')
+        del f
+        gc.collect()
+        for i in range(1, n_loop + 1):
+            if verbose > 0:
+                print(f'Chunk {i}/{n_loop + 1}, total {chunk_size * i} files have been saved.')
+            files = file_name_list[chunk_size * i: chunk_size * (i + 1)]
+            f = self.reader(files_path, verbose)
+            f.read(files, **read_configs)
+            f.save2file(save_path, 'a')
+            del f
+            gc.collect()
+        pass
+
+    def load(
+            self,
+            load_path: str,
+            load_range: Tuple | None = None,
+            chunck_size: int = 5000,
+            verbose: int = 1
+    ):
+        """
+        Blocked load data from given BatchStructure memory-mapping path.
+        Args:
+            load_path: the path to load memory-mapping
+            load_range:
+            chunck_size:
+            verbose:
+
+        Returns:
+
+        """
+        pass

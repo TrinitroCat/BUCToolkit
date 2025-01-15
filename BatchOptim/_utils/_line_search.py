@@ -19,7 +19,7 @@ from torch import nn
 class _LineSearch:
     def __init__(
             self,
-            method:Literal['Backtrack', 'Wolfe', 'NWolfe', 'Golden', 'Newton', 'None'],
+            method:Literal['Backtrack', 'Wolfe', 'NWolfe', '2PT', '3PT', 'Golden', 'Newton', 'None'],
             maxiter:int=10,
             thres:float=0.02,
             steplength=0.5,
@@ -38,7 +38,7 @@ class _LineSearch:
             func_kwargs = dict()
         with th.no_grad():
             y1 = func(X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
-            if self.is_concat_X: y1 = th.sum(y1, keepdim=True)
+            if self.is_concat_X: y1 = th.sum(y1, dim=(0, -1), keepdim=True)
         a:th.Tensor = (y1 <= (y0 + rho * steplength * (grad.mT@p)))  # Tensor[bool]: (n_batch, ) = (n_batch, ) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
         return a  # (n_batch, 1, 1)
     
@@ -176,7 +176,7 @@ class _LineSearch:
         # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
         if self.n_batch != y0.shape[0]:
             if self.n_batch == 1:
-                y0 = th.sum(y0, keepdim=True)
+                y0 = th.sum(y0, dim=(0, -1), keepdim=True)
                 self.is_concat_X = True
             else:
                 raise RuntimeError(f'Batch size of X ({self.n_batch}) and y ({y0.shape[0]}) do not match.')
