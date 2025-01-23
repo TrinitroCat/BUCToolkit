@@ -16,6 +16,19 @@ import torch as th
 class QN(_BaseOpt):
     """
     Quasi-Newton Algo.
+
+    Args:
+        iter_scheme: Literal['BFGS', 'Newton'],
+        E_threshold: float = 1e-3,
+        F_threshold: float = 0.05,
+        maxiter: int = 100,
+        linesearch: Literal['Backtrack', 'Wolfe', 'NWolfe', '2PT', '3PT', 'Golden', 'Newton', 'None'] = 'Backtrack',
+        linesearch_maxiter: int = 10,
+        linesearch_thres: float = 0.02,
+        linesearch_factor: float = 0.6,
+        steplength: float = 0.5,
+        device: str | th.device = 'cpu',
+        verbose: int = 2
     """
     def __init__(
             self,

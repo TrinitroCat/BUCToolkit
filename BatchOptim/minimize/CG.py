@@ -16,6 +16,18 @@ import torch as th
 class CG(_BaseOpt):
     """
     Conjugate Gradient Algo.
+    Args:
+        iter_scheme: Literal['PR+', 'PR', 'FR', 'SD', 'WYL'],
+        E_threshold: float = 1e-3,
+        F_threshold: float = 0.05,
+        maxiter: int = 100,
+        linesearch: Literal['Backtrack', 'Wolfe', 'NWolfe', '2PT', '3PT', 'Golden', 'Newton', 'None'] = 'Backtrack',
+        linesearch_maxiter: int = 10,
+        linesearch_thres: float = 0.02,
+        linesearch_factor: float = 0.6,
+        steplength: float = 0.5,
+        device: str | th.device = 'cpu',
+        verbose: int = 2
     """
     def __init__(
             self,
@@ -65,7 +77,7 @@ class CG(_BaseOpt):
             p: th.Tensor, the new update direction of X.
         """
         if self.iterform != "SD":
-            gogo = g_old.mT @ g_old
+            gogo = g_old.mT @ g_old + 1e-16  # to avoid divide 0
             ggo = g.mT @ g_old  # (n_batch, 1, 1)
             gg = g.mT @ g  # (n_batch, 1, 1)
             if self.iterform == "PR+":

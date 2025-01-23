@@ -137,7 +137,7 @@ class FIRE:
         if grad_func is None:
             is_grad_func_contain_y = True
 
-            def grad_func_(x, y, grad_shape=None):
+            def grad_func_(y, x, grad_shape=None):
                 if grad_shape is None:
                     grad_shape = th.ones_like(y)
                 g = th.autograd.grad(y, x, grad_shape)
@@ -205,24 +205,25 @@ class FIRE:
             raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
 
         y0 = th.inf
-        X.requires_grad_()
-        y = func(X, *func_args, **func_kwargs)
-        # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
-        if y.shape[0] != self.n_batch:
-            assert batch_indices is not None, f"batch indices is None while shape of model output ({y.shape}) does not match batch size."
-            assert y.shape[0] == n_inner_batch, f"shape of output ({y.shape}) does not match given batch indices"
-            self.is_concat_X = True
-        else:
-            self.is_concat_X = False
-        is_main_loop_converge = False
-        converge_mask = th.full((n_batch, 1, 1), False, device=self.device)
-        t = th.full((n_batch, 1, 1), self.steplength, device=self.device)
-        a = th.full((n_batch, 1, 1), self.alpha, device=self.device)
-        n_count = th.zeros((n_batch, 1, 1), dtype=th.int, device=self.device)
-        if is_grad_func_contain_y:
-            F = - grad_func_(X, y, *grad_func_args, **grad_func_kwargs) * atom_masks
-        else:
-            F = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+        with th.enable_grad():
+            X.requires_grad_()
+            y = func(X, *func_args, **func_kwargs)
+            # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
+            if y.shape[0] != self.n_batch:
+                assert batch_indices is not None, f"batch indices is None while shape of model output ({y.shape}) does not match batch size."
+                assert y.shape[0] == n_inner_batch, f"shape of output ({y.shape}) does not match given batch indices"
+                self.is_concat_X = True
+            else:
+                self.is_concat_X = False
+            is_main_loop_converge = False
+            converge_mask = th.full((n_batch, 1, 1), False, device=self.device)
+            t = th.full((n_batch, 1, 1), self.steplength, device=self.device)
+            a = th.full((n_batch, 1, 1), self.alpha, device=self.device)
+            n_count = th.zeros((n_batch, 1, 1), dtype=th.int, device=self.device)
+            if is_grad_func_contain_y:
+                F = - grad_func_(y, X, *grad_func_args, **grad_func_kwargs) * atom_masks
+            else:
+                F = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
         y = y.detach()
         F = F.detach()
@@ -234,8 +235,8 @@ class FIRE:
             self.logger.info('-' * 100)
         # MAIN LOOP
         #ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        for numit in range(self.maxiter):  # Simple Euler
-            with th.no_grad():
+        with th.no_grad():
+            for numit in range(self.maxiter):  # Simple Euler
                 t_st = time.perf_counter()
                 # split batches if specified batch
                 if batch_indices is not None:
@@ -286,21 +287,21 @@ class FIRE:
                 # Forward Euler Algo. to update X & v
                 v = v + F * t / masses  # (n_batch, n_atom, n_dim)
                 X = X + v * t  #* atom_masks
-            y0 = y.detach().clone()
-            X.requires_grad_()
-            y = func(X, *func_args, **func_kwargs)
-            if is_grad_func_contain_y:
-                F = - grad_func_(X, y, *grad_func_args, **grad_func_kwargs) * atom_masks
-            else:
-                F = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+                y0 = y.detach().clone()
+                with th.enable_grad():
+                    X.requires_grad_()
+                    y = func(X, *func_args, **func_kwargs)
+                    if is_grad_func_contain_y:
+                        F = - grad_func_(y, X, *grad_func_args, **grad_func_kwargs) * atom_masks
+                    else:
+                        F = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
-            y = y.detach()
-            F = F.detach()
-            X = X.detach()
-            with th.no_grad():
+                y = y.detach()
+                F = F.detach()
+                X = X.detach()
                 F_hat = F / th.linalg.norm(F, dim=(-2, -1), keepdim=True)
-                p = (F.flatten(-2, -1).unsqueeze(1)) @ (
-                    v.flatten(-2, -1).unsqueeze(-1))  # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
+                # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
+                p = (F.flatten(-2, -1).unsqueeze(1)) @ (v.flatten(-2, -1).unsqueeze(-1))
                 # update velocity
                 v = (1 - a) * v + a * th.linalg.norm(v, dim=(-2, -1), keepdim=True) * F_hat
                 # if P > 0.
@@ -313,7 +314,7 @@ class FIRE:
                 v = th.where(p <= 0., 0., v)
                 a = th.where(p <= 0., self.alpha, a)
 
-            #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         if self.verbose > 0:
             if is_main_loop_converge:

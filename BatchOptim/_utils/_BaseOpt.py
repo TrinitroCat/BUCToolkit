@@ -272,10 +272,10 @@ class _BaseOpt:
                 if self.verbose > 0:
                     self.logger.info(f"ITERATION {numit:>5d}\n "
                                      f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"MAX_F: {th.max(F_eps):>5.7e}\n "
-                                     f"Energies: {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"Converged: {converge_str}\n "
-                                     f"TIME: {time.perf_counter() - t_st:>6.4f} s")
+                                     f"MAX_F:        {th.max(F_eps):>5.7e}\n "
+                                     f"Energies:     {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                     f"Converged:    {converge_str}\n "
+                                     f"TIME:         {time.perf_counter() - t_st:>6.4f} s")
                 if self.verbose > 1:
                     self.logger.info(f" Coordinates:\n")
                     X_str = [

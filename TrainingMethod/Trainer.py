@@ -375,17 +375,17 @@ class Trainer(_CONFIGS):
         _num_step = 0
         val_set = self._data_loader(self.VALID_DATA, self.VAL_BATCH_SIZE, self.DEVICE, **self._data_loader_configs)  # type: ignore # TODO
         _metr_list = {_name: 0. for _name in self.METRICS.keys()}
-        for val_data, val_label in val_set:
-            # to avoid get an empty batch
-            if not isinstance(val_data, (th.Tensor,)):
-                len_data = val_data.batch_size
-            else:
-                len_data = len(val_data)
-            if len_data <= 0:
-                if self.verbose: self.logger.info(f'An empty batch occurred in validation. Skipped.')
-                continue
-            # pred & loss
-            with th.no_grad():
+        with th.no_grad():
+            for val_data, val_label in val_set:
+                # to avoid get an empty batch
+                if not isinstance(val_data, (th.Tensor,)):
+                    len_data = val_data.batch_size
+                else:
+                    len_data = len(val_data)
+                if len_data <= 0:
+                    if self.verbose: self.logger.info(f'An empty batch occurred in validation. Skipped.')
+                    continue
+                # pred & loss
                 pred_y = model(val_data)
                 val_loss = LOSS(pred_y, val_label)
                 _val_loss += val_loss.item()
@@ -394,8 +394,8 @@ class Trainer(_CONFIGS):
                     for _name, _metr_func in self.METRICS.items():
                         _metr = _metr_func(pred_y, val_label, **self.METRICS_CONFIG[_name])
                         _metr_list[_name] += _metr.item()
-            _num_step += 1
-        _val_loss = _val_loss / _num_step
+                _num_step += 1
+            _val_loss = _val_loss / _num_step
         if len(self.METRICS) > 0:
             _metr_list = {_name: _val / _num_step for _name, _val in _metr_list.items()}  # note: mean value per batch.
         else:
