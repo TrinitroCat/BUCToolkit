@@ -61,18 +61,19 @@ class NVE(_BaseMD):
         with th.no_grad():
             X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-        # Update V
-        X.requires_grad_()
-        _Energy = func(X, *func_args, **func_kwargs)
-        if batch_indices is not None:
-            Energy = th.sum(_Energy, ).unsqueeze(0)
-        else:
-            Energy = _Energy
-        if is_grad_func_contain_y:
-            Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-        else:
-            Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-        with th.no_grad():
+            # Update V
+            with th.enable_grad():
+                X.requires_grad_()
+                _Energy = func(X, *func_args, **func_kwargs)
+                if batch_indices is not None:
+                    Energy = th.sum(_Energy, ).unsqueeze(0)
+                else:
+                    Energy = _Energy
+                if is_grad_func_contain_y:
+                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
+                else:
+                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+
             V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
 
-        return X, V, Energy, Force
+        return X, V, _Energy, Force

@@ -65,7 +65,7 @@ class Trainer(_CONFIGS):
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START != 'from_scratch' and self.START != 0:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH)
+            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
                 _model.load_state_dict(chk_data['model_state_dict'])
             else:

@@ -38,18 +38,18 @@ class _BaseOpt:
         A Base Framework of Algorithm for optimization.
         
         Args:
-            E_threshold: float, threshold of difference of func between 2 iteration.
+            E_threshold: float, threshold of difference of func between 2 iterations.
             F_threshold: float, threshold of gradient of func.
             maxiter: int, max iterations.
             linesearch: Scheme of linesearch.
                 "None" for fixed steplength.
                 "Backtrack" for backtracking until Armijo's condition [5] was satisfied.
-                "Golden" for golden section algo.
+                "Golden" for the golden section algo.
                 "Newton" for 1D Newton algo., which was modified to avoid divergence.
                 "Wolfe" for quadratic interpolation search until weak Wolfe condition was satisfied.
                 "NWolfe" is the same as "Wolfe" but directional derivative was calculated by finite difference (might use less memory).
-                "2PT" is simple 1 step 2-point quadratic interpolation.
-                "3PT" is simple 1 step 3-point cubic interpolation.
+                "2PT" is a simple 1-step 2-point quadratic interpolation.
+                "3PT" is a simple 1-step 3-point cubic interpolation.
             linesearch_maxiter: Max iterations for linesearch.
             linesearch_thres: Threshold for linesearch. Only for "Golden" and "Newton".
             linesearch_factor: A factor in linesearch. Shrinkage factor for "Backtrack", scaling factor in interval search for "Golden" and line steplength for "Newton".
@@ -72,13 +72,20 @@ class _BaseOpt:
         self.linesearch_factor = linesearch_factor
         self.verbose = verbose
         self.device = device
-        self._line_search = _LineSearch(linesearch, maxiter=linesearch_maxiter, thres=linesearch_thres,
-                                        steplength=steplength, factor=linesearch_factor)
+        self._line_search = _LineSearch(
+            linesearch,
+            maxiter=linesearch_maxiter,
+            thres=linesearch_thres,
+            steplength=steplength,
+            factor=linesearch_factor
+        )
         self.E_threshold = E_threshold
         self.F_threshold = F_threshold
         self.maxiter = maxiter
 
         self.n_batch, self.n_atom, self.n_dim = None, None, None
+        self.converge_mask = None  # To record the batch which has converged and not update.
+        self.is_concat_X = False   # whether the output of `func` was concatenated.
 
         # logger
         self.logger = logging.getLogger('Main.OPT')
@@ -110,7 +117,7 @@ class _BaseOpt:
         Parameters:
             func: the main function of instantiated torch.nn.Module class.
             X: Tensor[n_batch, n_atom, 3], the atom coordinates that input to func.
-            grad_func: user-defined function that grad_func(X, ...) return the func's gradient at X. if None, grad_func(X, ...) = th.autograd.grad(func(X, ...), X).
+            grad_func: user-defined function that grad_func(X, ...) returns the func's gradient at X. if None, grad_func(X, ...) = th.autograd.grad(func(X, ...), X).
             func_args: optional, other input of func.
             func_kwargs: optional, other input of func.
             grad_func_args: optional, other input of grad_func.
@@ -155,7 +162,6 @@ class _BaseOpt:
             batch_indices_tensor = th.tensor(batch_indices, device=self.device)
         else:
             n_inner_batch = 1
-            batch_slice_indx = []
             batch_indx_dict = dict()
             batch_indices_tensor = None
         # initialize vars
@@ -192,13 +198,7 @@ class _BaseOpt:
             func.zero_grad()
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
-
         X = X.to(self.device)
-        # TODO, Delete
-        for _args in (func_args, func_kwargs.values(), grad_func_args, grad_func_kwargs.values()):
-            for _arg in _args:
-                if isinstance(_arg, th.Tensor):
-                    _arg.to(self.device)
 
         # initialize
         energies_old = th.inf
@@ -221,7 +221,8 @@ class _BaseOpt:
                 energies: th.Tensor = th.where(self.converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
                 # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
                 if energies.shape[0] != self.n_batch:
-                    assert batch_indices is not None, f"batch indices is None while shape of model output ({energies.shape}) does not match batch size."
+                    assert batch_indices is not None, (f"batch indices is None "
+                                                       f"while shape of model output ({energies.shape}) does not match batch size ({self.n_batch}).")
                     assert energies.shape[0] == n_inner_batch, f"shape of output ({energies.shape}) does not match given batch indices"
                     self.is_concat_X = True
                 else:
@@ -254,7 +255,7 @@ class _BaseOpt:
                         self.converge_mask.unsqueeze(0).unsqueeze(-1),
                         batch_indices_tensor,
                         dim=1
-                    )  # (1, n_inner_batch*n_atom, 1)
+                    )  # (1, n_inner_batch*n_atom, 1)  # TODO, optimize the repeat_interleave
                 else:
                     F_eps = th.abs(X_grad)  # (n_batch, n_atom, 3)
                     self.converge_mask = ((E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) *
@@ -268,7 +269,7 @@ class _BaseOpt:
                     X_tup = (X,)
                     if self.verbose > 2: F_tup = (- X_grad, )
 
-                # Verbose
+                # Print information / Verbose
                 if self.verbose > 0:
                     self.logger.info(f"ITERATION {numit:>5d}\n "
                                      f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
@@ -332,6 +333,7 @@ class _BaseOpt:
                 X.detach_()
                 g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
                 g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
+                # update algo. parameters.
                 self._update_algo_param(g, g_old, p, displace)
 
                 # print steplength

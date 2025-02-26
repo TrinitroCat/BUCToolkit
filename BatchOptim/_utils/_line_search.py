@@ -148,8 +148,8 @@ class _LineSearch:
         direct_grad0 = grad.mT @ p  # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) -> (n_batch, 1, 1)
         Xn_a = Xn + ds * p.view(self.n_batch, self.n_atom, self.n_dim)
         Xn_b = Xn - ds * p.view(self.n_batch, self.n_atom, self.n_dim)
-        direct_grad1 = ((func(Xn_a, *func_args, **func_kwargs) - func(Xn_b, *func_args, **func_kwargs)) / (2 * ds)).unsqueeze(-1).unsqueeze(
-            -1)  # (n_batch, 1, 1)
+        direct_grad1 = ((func(Xn_a, *func_args, **func_kwargs) - func(Xn_b, *func_args, **func_kwargs)) /
+                        (2 * ds)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
         if self.is_concat_X: direct_grad1 = th.sum(direct_grad1, keepdim=True)
         a: th.Tensor = (y1 <= (y0 + rho * steplength * (grad.mT @ p)))  # descent cond
         b = (direct_grad1 > rho * direct_grad0)  # curve cond

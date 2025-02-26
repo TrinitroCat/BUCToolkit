@@ -9,13 +9,16 @@
 import multiprocessing as mp
 import warnings
 from typing import List, Iterable, Tuple
+from itertools import chain
 import sys
+import time
 
 import numpy as np
+import torch as th
 
-def _flatten_1layer_with_check(x: List):
+def _flatten_until_1d(x: List):
     """
-    flatten 1 layer of x
+    Recursively flatten x until
 
     Args:
         x: input list
@@ -24,15 +27,29 @@ def _flatten_1layer_with_check(x: List):
 
     """
     y = list()
-    is_1d = True
+    for sub_x in x:
+        if isinstance(sub_x, (List, Tuple, np.ndarray)):
+            y.extend(_flatten_until_1d(sub_x))
+        else:
+            y.append(sub_x)
+    return y
+
+def _flatten_1time(x:List):
+    """
+    Flatten one layer of x
+
+    Args:
+        x:
+
+    Returns: List
+    """
+    y = list()
     for sub_x in x:
         if isinstance(sub_x, (List, Tuple, np.ndarray)):
             y.extend(sub_x)
-            is_1d = False
         else:
             y.append(sub_x)
-    return y, is_1d
-
+    return y
 
 def flatten(x, flat_num: int=-1, ncore: int=-1):
     """
@@ -56,40 +73,49 @@ def flatten(x, flat_num: int=-1, ncore: int=-1):
         warnings.warn('Windows OS does not support multi-process yet. `ncore` was automatically set to 1.', RuntimeWarning)
         ncore = 1
 
-    n_chunk = len(x)//(ncore - 1)
+    n_chunk = len(x)//(ncore - 1) if ncore > 1 else len(x)
     if n_chunk == 0: n_chunk = len(x)
     # Process Pools
     pools = mp.Pool(ncore)
     # run
     if flat_num == -1:  # flatten until 1D
-        while True:
-            result = [pools.apply_async(_flatten_1layer_with_check, args=(x[i * n_chunk: (i + 1) * n_chunk],)) for i in range(ncore)]
-            x_mid = list()
-            [x_mid.extend(_x.get()[0]) for _x in result]
-            is_1d = True
-            for _x in result:
-                if not _x.get()[1]:
-                    is_1d = False
-                    break
-            if is_1d:
-                break
-            x = x_mid
+        z = list()
+        result = [pools.apply_async(_flatten_until_1d, args=(x[i * n_chunk: (i + 1) * n_chunk],)) for i in range(ncore)]
+        [z.extend(_.get()) for _ in result]
+
     elif isinstance(flat_num, int) and (flat_num > 0):  # flatten specified times
+        z = x
         for i in range(flat_num):
-            result = [pools.apply_async(_flatten_1layer_with_check, args=(x[i * n_chunk: (i + 1) * n_chunk],)) for i in range(ncore)]
-            x_mid = list()
-            [x_mid.extend(_x.get()[0]) for _x in result]
-            x = x_mid
+            n_chunk = len(z) // (ncore - 1) if ncore > 1 else len(z)
+            if n_chunk == 0: n_chunk = len(z)
+            result = [pools.apply_async(_flatten_1time, args=(z[i * n_chunk: (i + 1) * n_chunk],)) for i in range(ncore)]
+            z = list()
+            [z.extend(_.get()) for _ in result]
     else:
         raise ValueError('`flat_num` must be an integer greater than 0, or == -1')
 
     pools.close()
     pools.join()
-    return x
+
+    return z
 
 
 if __name__ == '__main__':
-    a = [2, [3411, 422], [53, 44, [231, 44], 23], 351]
-    b = _flatten_1layer_with_check(a)
-    c = flatten(a)
+    a = [2, [3411, 422], [53, 44, [231, 44], 23], 351, 1231, [[22, 14, 221, 12, 3], 53]]
+    b = _flatten_until_1d(a)
+
+    tt = time.perf_counter()
+    c = flatten(a, ncore=4)
+    print(f'TIME: {time.perf_counter() - tt}, res: {c}')
+
+    tt = time.perf_counter()
+    c = flatten(a, ncore=4)
+    print(f'TIME: {time.perf_counter() - tt}, res: {c}')
+
+    #f = th.compile(flatten, )
+
+    #tt = time.perf_counter()
+    #d = f(a)
+    #print(f'TIME: {time.perf_counter() - tt}, res: {d}')
+
     pass

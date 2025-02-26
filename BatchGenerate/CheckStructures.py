@@ -13,8 +13,6 @@ from typing import Literal
 
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
 import numpy as np
-import scipy
-import matplotlib.pyplot as plt
 
 class CheckStructures:
     """
