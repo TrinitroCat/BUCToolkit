@@ -156,7 +156,7 @@ if __name__ == '__main__':
         f.Elements = res[2]
         f.Numbers = res[3]
         f.Fixed = [np.ones_like(f.Coords[0])]
-        f.write2text(ncore=1)
+        f.write2text(n_core=1)
 
     t = time.perf_counter()
     main()

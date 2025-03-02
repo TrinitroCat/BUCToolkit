@@ -196,17 +196,3 @@ class CheckStructures:
         return mask
 
 
-if __name__ == '__main__':
-    from BM4Ckit.Preprocessing.load_files import POSCARs2Feat
-    ff = POSCARs2Feat('/home/ppx/PythonProjects/MAIN/PropDehydro/Opt_Pt_FCC_Surf/CONTCARs')
-    ff.read()
-
-    testmod = CheckStructures(ff)
-    #mask = testmod.check_distance(2)
-    t = time.perf_counter()
-    mask = testmod.check_surf_smoothness()
-    print(time.perf_counter() - t)
-
-    pass
-
-

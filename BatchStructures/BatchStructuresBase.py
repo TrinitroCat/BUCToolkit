@@ -24,7 +24,7 @@ import joblib as jb
 import numpy as np
 
 from ._para_flatt_list import flatten
-from BM4Ckit.Preprocessing.write_files import WritePOSCARs, write_xyz
+from BM4Ckit.Preprocessing.write_files import WritePOSCARs, write_xyz, write_cif
 
 
 class BatchStructures(object):
@@ -77,12 +77,12 @@ class BatchStructures(object):
         # Structure part
         self.Atom_list = None
         self.Atomic_number_list = None
-        self.Cells: List[np.ndarray] = list()  # cell vectors
+        self.Cells: List[np.ndarray] = list()  # cell vectors, float32
         self.Coords_type: List[Literal['C', 'D']] = list()  # coordinate type
-        self.Coords: List[np.ndarray] = list()  # atomic coordinates
-        self.Fixed: List[np.ndarray] = list()  # fixed atoms masks, 0 for fixed and 1 for free.
+        self.Coords: List[np.ndarray] = list()  # atomic coordinates, float32
+        self.Fixed: List[np.ndarray] = list()  # fixed atoms masks, 0 for fixed and 1 for free. int8
         self.Elements: List[List[str]] = list()  # elements
-        self.Numbers: List[List[int]] = list()  # atom number of each element
+        self.Numbers: List[List[int]] = list()  # atom number of each element. int4
         # Properties part
         self.Energies = None  # energies of structures. None | List[float]
         self.Forces = None  # forces of structures. None | List[np.NdArray[N, 3]]
@@ -184,7 +184,7 @@ class BatchStructures(object):
         #self.Elements = np.split(self.Elements_, self.Elements_batch_indices_[1:-1], )
 
         self.Numbers = [
-            self.Numbers_[_indx: self.Elements_batch_indices_[i+1]].tolist()
+            self.Numbers_[_indx: self.Elements_batch_indices_[i + 1]].tolist()
             for i, _indx in enumerate(self.Elements_batch_indices_[:-1])
         ]
         self.Elements = [
@@ -280,24 +280,40 @@ class BatchStructures(object):
 
     def _check_len(self, ):
         """ check whether the length of all prop. consistent. """
+        if self.Mode == 'A':
+            self._np2list()
+            is_convert = True
+        else:
+            is_convert = False
+
         qe = True
         qf = True
+        ql = True
         q = (len(self.Coords) == len(self.Coords_type) == len(self.Numbers)
              == len(self.Elements) == len(self._Sample_ids) == len(self.Coords_type) == len(self.Cells) == len(self.Fixed))
         if self.Energies is not None: qe = (len(self.Energies) == len(self))
-        if self.Labels is not None: self.Labels = self.Labels_.tolist()
+        if self.Labels is not None: ql = (len(self.Labels) == len(self))
         if self.Forces is not None: qf = (len(self.Forces) == len(self))
 
-        if not (q & qe & qf): raise RuntimeError('Length of some properties does not match. PLEASE DOUBLE CHECK!\n'
-                                                 'If you do not manually modified any attributes in this class, '
-                                                 'please report this bug to us.')
+        if not (q & qe & qf & ql): raise RuntimeError(
+            'Sample size (numbers) of some properties does not match. PLEASE DOUBLE CHECK!\n'
+            'If you did not manually modify any attributes in this class, '
+            'please report this bug to us.\nSample size of all properties:'
+            f' Sample ids: {len(self._Sample_ids)}\n Coordinates: {len(self.Coords)}\n Coordinates type: {len(self.Coords_type)}\n'
+            f' Elements: {len(self.Elements)}\n Element Numbers: {len(self.Numbers)}\n Cells: {len(self.Cells)}\n Fixations: {len(self.Fixed)}'
+            f' Energies: {len(self.Energies) if self.Energies is not None else None}\n'
+            f' Forces: {len(self.Forces) if self.Forces is not None else None}\n'
+            f' Labels: {len(self.Labels) if self.Labels is not None else None}'
+        )
+        if is_convert:
+            self._list2np()
 
-    def save2file(self, path: str, mode: Literal['w', 'a'] = 'w'):
+    def save(self, path: str, mode: Literal['w', 'a'] = 'w'):
         """
         Saving this BatchStructures to a memory-mapping file.
         Args:
             path: the saving directory.
-            mode: if 'w', create or overwrite existing file for reading and writing. if 'a', data will append to existing file.
+            mode: if 'w', create or overwrite the existing file for reading and writing. if 'a', data will append to the existing file.
 
         Returns: None
 
@@ -322,6 +338,7 @@ class BatchStructures(object):
         # check self
         if len(self) == 0: raise RuntimeError('BatchStructures are empty now!')
         self._check_id()
+        self._check_len()
 
         if self.Mode != 'A':
             self._list2np()
@@ -425,7 +442,7 @@ class BatchStructures(object):
                 else:
                     new_head_info[filename] = head_info[filename]
 
-            # Update head file
+            # Update the head file
             new_head_info['n_batch'] = head_info['n_batch'] + len(self)
             with open(os.path.join(path, 'head'), 'wb') as head:
                 head_info = pickle.dumps(new_head_info)
@@ -435,14 +452,14 @@ class BatchStructures(object):
             self._np2list(True)
             gc.collect()
 
-    def load_from_file(self, path: str, data_slice: Tuple[int, int] | None = None, mode: Literal['w', 'a'] = 'w'):
+    def load(self, path: str, data_slice: Tuple[int, int] | None = None, mode: Literal['w', 'a'] = 'w'):
         """
-        Load data from saved file.
+        Load data from saved files.
         WARNING: It would overwrite the existing BatchStructure data. Use `append_from_file` to retain existing data.
         Args:
             path: the file path.
             data_slice: The piece of data in files to be read. if None, all data in files would be read into memory.
-            mode: the data load mode. 'w' for write or overwrite existing data from data in file; 'a' for append data in file to existing data.
+            mode: the data load mode. 'w' for write or overwrite existing data from data in file; 'a' for appending data in file to existing data.
 
         Returns: None
 
@@ -471,10 +488,10 @@ class BatchStructures(object):
             #if data_slice[1] > head_info['n_batch']: raise ValueError(f'`data_slice` out of range. Sample number: {head_info['n_batch']}')
             _dtype, _shape = head_info['Batch_indices']
             natom_slice = np.memmap(os.path.join(path, 'Batch_indices'), dtype=_dtype, mode='c', shape=_shape)
-            natom_slice = np.asarray(natom_slice[data_slice[0] : data_slice[1]+1])
+            natom_slice = np.asarray(natom_slice[data_slice[0]: data_slice[1] + 1])
             _dtype, _shape = head_info['Elements_batch_indices']
             elem_slice = np.memmap(os.path.join(path, 'Elements_batch_indices'), dtype=_dtype, mode='c', shape=_shape)
-            elem_slice = np.asarray(elem_slice[data_slice[0] : data_slice[1]+1])
+            elem_slice = np.asarray(elem_slice[data_slice[0]: data_slice[1] + 1])
             for filename in ('Coords', 'Fixed', 'Forces'):
                 if filename not in head_info['which_None']:
                     _dtype, _shape = head_info[filename]
@@ -549,15 +566,18 @@ class BatchStructures(object):
                 del subcls
                 gc.collect()
         self._check_id()
+        self._check_len()
 
-    def write2text(self,
-                   output_path: str = './',
-                   indices: int | str | Tuple[int, int] | None = None,
-                   file_format: Literal['POSCAR', 'cif', 'xyz', 'xyz_forces'] = 'POSCAR',
-                   file_name_list: str | Sequence[str] | None = None,
-                   ncore: int = -1) -> None:
+    def write2text(
+            self,
+            output_path: str = './',
+            indices: int | str | Tuple[int, int] | None = None,
+            file_format: Literal['POSCAR', 'cif', 'xyz', 'xyz_forces'] = 'POSCAR',
+            file_name_list: str | Sequence[str] | None = None,
+            n_core: int = -1
+    ) -> None:
         """
-        write selected structures to text files in given format.
+        Write selected structures to text files in given format.
         Args:
             indices: the range of selected structures.
             file_format: the format of written files.
@@ -567,13 +587,13 @@ class BatchStructures(object):
                 'xyz_forces': ext-xyz file that contains atomic positions and forces
             output_path: the directory of output file.
             file_name_list: the list of file names. If None, it would be set to `Sample_ids`.
-            ncore: number of CPU cores to write in parallel. `-1` for all available CPU cores.
+            n_core: number of CPU cores to write in parallel. `-1` for all available CPU cores.
 
         Returns: None
 
         """
         # check vars
-        if file_format not in {'POSCAR', 'cif', 'xyz','xyz_forces'}:
+        if file_format not in {'POSCAR', 'cif', 'xyz', 'xyz_forces'}:
             raise ValueError(f'Invalid value of `file_format`: {file_format}.')
         if indices is None:
             sub_self = self
@@ -583,6 +603,8 @@ class BatchStructures(object):
             sub_self = self[indices]
         if file_name_list is None:
             file_name_list = sub_self.Sample_ids
+        self._check_id()
+        self._check_len()
         if self.Mode == 'A':
             self._np2list()
             is_convert = True
@@ -604,7 +626,7 @@ class BatchStructures(object):
                     file_name_list,
                     sub_self.Sample_ids,
                     sub_self.Coords_type,
-                    ncore
+                    n_core
                 )
             elif file_format == 'xyz':
                 file_name_list = [f'{_}.xyz' for _ in file_name_list]
@@ -617,8 +639,8 @@ class BatchStructures(object):
                     sub_self.Forces,
                     output_path,
                     file_name_list,
-                    output_xyz_type = 'only_position_xyz',
-                    n_core = ncore
+                    output_xyz_type='only_position_xyz',
+                    n_core=n_core
                 )
             elif file_format == 'xyz_forces':
                 file_name_list = [f'{_}.xyz' for _ in file_name_list]
@@ -631,11 +653,24 @@ class BatchStructures(object):
                     sub_self.Forces,
                     output_path,
                     file_name_list,
-                    output_xyz_type = 'write_position_and_force',
-                    n_core = ncore
+                    output_xyz_type='write_position_and_force',
+                    n_core=n_core
+                )
+            elif file_format == 'cif':
+                file_name_list = [f'{_}.cif' for _ in file_name_list]
+                write_cif(
+                    sub_self.Cells,
+                    sub_self.Coords,
+                    sub_self.Elements,
+                    sub_self.Numbers,
+                    output_path,
+                    file_name_list,
+                    sub_self.Sample_ids,
+                    sub_self.Coords_type,
+                    n_core
                 )
 
-            else:  # TODO: write to `xyz`, `cif` format.
+            else:  # TODO: write to `xyz` format.
                 raise NotImplementedError
         except Exception as e:
             self.logger.error(f'An error occurred:\n\t{e}\ntraceback:\n\t{traceback.print_exc()}')
@@ -647,7 +682,8 @@ class BatchStructures(object):
         """
         Set or reset self.Labels from input `val`.
         Args:
-            val: the input values of self.Labels to set. if Dict, val: {sample_id: energy, ...}; if Sequence, it must have the same order of self.Sample_ids.
+            val: the input values of self.Labels to set.
+            If Dict, val: {sample_id: energy, ...}; if Sequence, it must have the same order of self.Sample_ids.
 
         Returns: None
 
@@ -803,43 +839,10 @@ class BatchStructures(object):
                 self.Coords[i] @= cell
                 self.Coords_type[i] = 'C'
 
-    def fcc(self, ):
-        """ Return a view of BatchStructures that only contains fcc structures. """
-        STANDARD_DIST_MAT = np.array(
-            [[0.        , 0.70710678, 0.70710676, 0.70710676],
-             [0.70710678, 0.        , 0.70710676, 0.70710676],
-             [0.70710676, 0.70710676, 0.        , 0.70710678],
-             [0.70710676, 0.70710676, 0.70710678, 0.        ]]
-        )
-        sub_self = BatchStructures()
-        for i, coo in enumerate(self.Coords):
-            cell = self.Cells[i]
-            # judge orthogonal lattice
-            if not np.allclose(cell, np.diag(np.diag(cell)), atol=1e-5, ):
-                continue
-            if len(coo) != 4:
-                continue
-            if self.Coords_type[i] == 'C':  # all convert to Direct coordinate
-                coo = coo @ np.linalg.inv(cell)
-            direct_mat = np.linalg.norm(coo[:, None, :] - coo[None, :, :], axis=-1)  # (n_atom, 1, 3) - (1, n_atom, 3) -norm-> (n_atom, n_atom)
-            if np.allclose(STANDARD_DIST_MAT, direct_mat, rtol=1e-5):
-                sub_self._Sample_ids.append(self.Sample_ids[i])
-                sub_self.Cells.append(self.Cells[i])
-                sub_self.Elements.append(self.Elements[i])
-                sub_self.Numbers.append(self.Numbers[i])
-                sub_self.Coords.append(self.Coords[i])
-                sub_self.Coords_type.append(self.Coords_type[i])
-                sub_self.Fixed.append(self.Fixed[i])
-                if sub_self.Energies is not None: sub_self.Energies.append(self.Energies[i])  # type: ignore
-                if sub_self.Forces is not None: sub_self.Forces.append(self.Forces[i])  # type: ignore
-                if sub_self.Labels is not None: sub_self.Labels.append(self.Labels[i])  # type: ignore
-
-        return sub_self
-
     def rearrange(self, labels: Optional[Dict | List] = None, split_ratio: float = 0.2, n_core: int = 1, verbose: int = 0) -> (
             Tuple[List[List[np.ndarray]], List[List[np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]):
         """
-        Rearrange samples with different atom number into List[np.array] that list of NDArrays with same atom number.
+        Rearrange samples with different atom number into List[np.array] that list of NDArrays with the same atom number.
         Only work in 'L' Mode.
 
         Parameters:

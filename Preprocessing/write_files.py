@@ -6,6 +6,7 @@
 
 import os
 import warnings
+from itertools import accumulate
 from typing import Sequence, List, Literal, Tuple
 import joblib as jb
 import numpy as np
@@ -19,19 +20,21 @@ class WritePOSCARs:
 
     """
 
-    def __init__(self,
-                 cells: Sequence[Sequence],
-                 coords: Sequence[np.ndarray],
-                 atom_labels: Sequence[Sequence[str]],
-                 atom_numbers: Sequence[Sequence[int]],
-                 fixed: Sequence[np.ndarray] | None = None,
-                 output_path: str = './',
-                 file_name_list: str | Sequence[str] = 'POSCAR',
-                 system_list: str | Sequence[str] = 'untitled',
-                 coord_type: List[Literal['C', 'D']] | Literal['C', 'D'] = 'C',
-                 ncore: int = -1) -> None:
+    def __init__(
+            self,
+            cells: Sequence[Sequence],
+            coords: Sequence[np.ndarray],
+            atom_labels: Sequence[Sequence[str]],
+            atom_numbers: Sequence[Sequence[int]],
+            fixed: Sequence[np.ndarray] | None = None,
+            output_path: str = './',
+            file_name_list: str | Sequence[str] = 'POSCAR',
+            system_list: str | Sequence[str] = 'untitled',
+            coord_type: List[Literal['C', 'D']] | Literal['C', 'D'] = 'C',
+            ncore: int = -1
+    ) -> None:
         """
-        Convert coordination matrices to POSCAR format, and write files to the "output_path".
+        Convert coordinates matrices to POSCAR format, and write files to the "output_path".
 
         Args:
             cells: List|ndarray, a batch of lattice vectors. shape: (n_batch, 3, 3)
@@ -43,7 +46,7 @@ class WritePOSCARs:
             output_path: str, the output path.
             file_name_list: list(str), the list of file names.
             system_list: str|list(str), the 1st line of output file i.e., the annotation or title of the file.
-            coord_type: List[Literal['C', 'D']]|Literal['C', 'D'], 'D' or 'C', which means whether the coordination is "Direct" or "Cartesian".
+            coord_type: List[Literal['C', 'D']]|Literal['C', 'D'], 'D' or 'C', which means whether the input coordinates are "Direct" or "Cartesian".
                 If only a string, `coord_type` would set to be '[`coord_type`] * n_batch'.
             ncore: int, the number of CPU cores to write files in parallel.
 
@@ -119,18 +122,18 @@ class WritePOSCARs:
                 system: str,
                 coord_type: str) -> None:
         """
-        Convert coordination matrix to POSCAR format, and write a file to the output_path.
+        Convert coordinates matrix to POSCAR format, and write a file to the output_path.
 
         Args:
             cell: list|ndarray, the lattice vector of cell.
             atom_label:1D list|ndarray of str, list of element symbols.
             atom_number:1D list|ndarray of int, list of atom number of each element, in the order of atom_label.
-            coord: list|ndarray, the coordination of atoms, in the order of atom_label.
+            coord: list|ndarray, the coordinates of atoms, in the order of atom_label.
             fixed: list|ndarray, the fixed direction of atoms.
             output_path: str, the output path.
             file_name: str, the file name.
-            system: str, the 1st line of output file i.e., the annotation or title of the file.
-            coord_type: str, 'D' or 'C', which means whether the coordination is "Direct" or "Cartesian".
+            system: str, the 1st line of an output file i.e., the annotation or title of the file.
+            coord_type: str, 'D' or 'C', which means whether the coordinates are "Direct" or "Cartesian".
 
         Return: None
         """
@@ -191,14 +194,14 @@ class Write2JDFTX:
               system_list: str | Sequence[str] = 'untitled',
               coord_type: str = 'C') -> None:
         """
-        Convert coordination matrices to POSCAR format, and write files to the "output_path".
+        Convert coordinates matrices to POSCAR format, and write files to the "output_path".
 
         Parameters:
             batch_structures: batch of structures.
             output_path: str, the output path.
             file_name_list: list(str), the list of file names.
             system_list: str|list(str), the 1st line of output file i.e., the annotation or title of the file.
-            coord_type: str, 'D' or 'C', which means whether the coordination is "Direct" or "Cartesian".
+            coord_type: str, 'D' or 'C', which means whether the coordinates is "Direct" or "Cartesian".
 
         Returns: None
         """
@@ -237,11 +240,11 @@ class Write2JDFTX:
                 out_coord_type: str,
                 ) -> None:
         """
-        Convert coordination matrix to POSCAR format, and write a file to the output_path.
+        Convert coordinates matrix to POSCAR format, and write a file to the output_path.
 
         Parameters:
             cell: list|ndarray|torchTensor, the lattice vector of cell.
-            coord: list|ndarray|torchTensor, the coordination of atoms, in the order of atom_label.
+            coord: list|ndarray|torchTensor, the coordinates of atoms, in the order of atom_label.
             atom_list: list|
             output_path: str, the output path.
             file_name: str, the file name.
@@ -390,3 +393,123 @@ def write_xyz(
             )
             for ii, fn in enumerate(filename_list)
         )
+
+
+def write_cif(
+        cells: Sequence[Sequence],
+        coords: Sequence[np.ndarray],
+        atom_labels: Sequence[Sequence[str]],
+        atom_numbers: Sequence[Sequence[int]],
+        output_path: str = './',
+        file_name_list: str | Sequence[str] = 'POSCAR',
+        system_list: str | Sequence[str] = 'untitled',
+        coord_type: List[Literal['C', 'D']] | Literal['C', 'D'] = 'C',
+        n_core: int = -1
+    ) -> None:
+    """
+    Convert coordinates matrices to POSCAR format, and write files to the "output_path".
+
+    Args:
+        cells: List|ndarray, a batch of lattice vectors. shape: (n_batch, 3, 3)
+        atom_labels: 2D list|ndarray of str, a batch of list of element symbols. shape: (n_batch, n_atom)
+        atom_numbers:2D list|ndarray of int, list of atom number of each element, in the order of atom_label. shape: (n_batch, n_atom)
+        coords: list|ndarray, the batch of atoms coordinates, in the order of atom_label. shape: (n_batch, n_atom, 3)
+        output_path: str, the output path.
+        file_name_list: list(str), the list of file names.
+        system_list: str|list(str), the 1st line of output file i.e., the annotation or title of the file.
+        coord_type: List[Literal['C', 'D']]|Literal['C', 'D'], 'D' or 'C', which means whether the input coordinates are "Direct" or "Cartesian".
+            If only a string, `coord_type` would set to be '[`coord_type`] * n_batch'.
+        n_core: int, the number of CPU cores to write files in parallel.
+
+    Returns: None
+
+    """
+    def _write_single(
+            file_name,
+            cell,
+            coord,
+            atom_label,
+            atom_number,
+            _coord_type,
+            system_name: str | Sequence[str] = 'untitled',
+    ):
+        atom_label_str = ' '.join(atom_label)
+        formula = ''.join([f'{atom_label[_]}{atom_number[_]}' for _ in range(len(atom_number))])
+
+        atom_label_list = list()
+        atom_sequence_list = list()
+        for i, num in enumerate(atom_number):
+            atom_label_list.extend([atom_label[i]] * num)
+            atom_sequence_list.extend(range(1, num + 1))
+
+        a, b, c = np.linalg.norm(cell, axis=1)
+        alpha = np.rad2deg(np.arccos(cell[1] @ cell[2] / (b * c)))
+        beta = np.rad2deg(np.arccos(cell[0] @ cell[2] / (a * c)))
+        gamma = np.rad2deg(np.arccos(cell[0] @ cell[1] / (a * b)))
+        volume = np.linalg.det(cell)
+        if volume < 0.: warnings.warn(f'The cell of {file_name} is a left-hand system.', RuntimeWarning)
+        volume = np.abs(volume)
+        if _coord_type == 'C':
+            coord = coord @ np.linalg.inv(cell)
+
+        with open(os.path.join(output_path, file_name), "w") as cif:
+            cif.write(f'# {system_name}\ndata_{formula}\n')
+            cif.write("_symmetry_space_group_name_H-M   'P 1'\n")
+            cif.write(
+                f'_cell_length_a   {a}\n'
+                f'_cell_length_b   {b}\n'
+                f'_cell_length_c   {c}\n'
+                f'_cell_angle_alpha   {alpha}\n'
+                f'_cell_angle_beta   {beta}\n'
+                f'_cell_angle_gamma   {gamma}\n'
+                '_symmetry_Int_Tables_number   1\n'
+                f'_chemical_formula_structural   \'{atom_label_str}\'\n'
+                f'_chemical_formula_sum   {formula}\n'
+                f'_cell_volume   {volume}\n'
+                'loop_\n'
+                ' _symmetry_equiv_pos_site_id\n'
+                ' _symmetry_equiv_pos_as_xyz\n' 
+                '  1  \'x, y, z\'\n'
+                'loop_\n'
+                ' _atom_site_label\n'
+                ' _atom_site_type_symbol\n'
+                ' _atom_site_symmetry_multiplicity\n'
+                ' _atom_site_fract_x\n'
+                ' _atom_site_fract_y\n'
+                ' _atom_site_fract_z\n'
+                ' _atom_site_occupancy\n'
+            )
+            for i, coo in enumerate(coord):
+                cif.write(
+                    f'{atom_label_list[i]}{atom_sequence_list[i]:<4d}  {atom_label_list[i]}  1  '
+                    f'{np.array2string(coo, **FLOAT_ARRAY_FORMAT)[1:-1]}  1\n'
+                )
+
+    # loading data
+    n_batch = len(cells)
+    if file_name_list is None:
+        filename_list = [f'{_}.cif' for _ in range(n_batch)]
+    elif not isinstance(file_name_list, (List, Tuple)):
+        raise TypeError(f'Invalid type of `filename_list`: {type(file_name_list)}')
+    elif len(file_name_list) != n_batch:
+        raise ValueError(f'Number of file names ({len(file_name_list)}) and structures ({n_batch}) does not match')
+    # check n_core
+    if n_core == -1:
+        n_core = jb.cpu_count(True)
+    if n_core > n_batch:
+        n_core = n_batch
+
+    _para = jb.Parallel(n_core, )
+    _para(
+        jb.delayed(_write_single)(
+            fn,
+            cells[ii],
+            coords[ii],
+            atom_labels[ii],
+            atom_numbers[ii],
+            coord_type[ii],
+            system_list[ii]
+        )
+        for ii, fn in enumerate(file_name_list)
+    )
+

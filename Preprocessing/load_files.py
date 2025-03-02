@@ -73,12 +73,12 @@ def load_from_csv(
 
 class POSCARs2Feat(BatchStructures):
     """
-    Read and convert a folder of POSCAR files from given path into arrays of atoms, coordinates, cell vectors etc.
+    Read and convert a folder of POSCAR files from given path into arrays of atoms, coordinates, cell vectors, etc.
     """
 
     def __init__(self, path: str = './', verbose: int = 0, *args, **kwargs) -> None:
         """
-        Read and convert a folder of POSCAR files from given path into arrays of atoms, coordinates, cell vectors etc.
+        Read and convert a folder of POSCAR files from given path into arrays of atoms, coordinates, cell vectors, etc.
 
         Parameters:
             path: str, the path of POSCAR files
@@ -93,7 +93,7 @@ class POSCARs2Feat(BatchStructures):
             Coord: list, coordinates of atoms. Shape: List[NDArray[(n_atoms, 3), dtype=float32]]
             Cells: list, cell vector of crystals. Shape: List[NDArray[(3,3), dtype=float32]]
             Elements: list, elements of crystals. Shape: List[List[str(element symbols)]]
-            Numbers: list, element numbers of crystals. Shape: List[List[int(atom number of each element)]]. the same order of Elements.
+            Numbers: list, element numbers of crystals. Shape: List[List[int(atom number of each element)]]. The same order of Elements.
 
         Returns: None
         """
@@ -102,12 +102,15 @@ class POSCARs2Feat(BatchStructures):
         self.verbose = verbose
         self.files_list = list()
 
-    def para_read(self,
-                  file_list: Optional[List] = None,
-                  output_coord_type: str = 'cartesian',
-                  n_core: int = -1,
-                  backend='loky'):
+    def para_read(
+            self,
+            file_list: Optional[List] = None,
+            output_coord_type: str = 'cartesian',
+            n_core: int = -1,
+            backend='loky'
+    ):
         r"""
+        Reading file in parallel.
         Parameters:
             file_list: list (or other Sequences), the list of selected files to be read. 'None' means read all files in the input path.
             output_coord_type: str, 'cartesian' or 'direct'. The coordination type of output atom coordination.
@@ -153,10 +156,20 @@ class POSCARs2Feat(BatchStructures):
             self.Numbers.append(temp[3])  # Element numbers
             self.Coords.append(temp[4])  # Atom coordination (cartesian)
             self.Fixed.append(temp[5])
-
+        self._check_id()
+        self._check_len()
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - time_st:<5.4f}')
 
     def read(self, file_list: Optional[List] = None, output_coord_type: str = 'cartesian', ) -> None:
+        """
+
+        Args:
+            file_list: list (or other Sequences), the list of selected files to be read. 'None' means read all files in the input path.
+            output_coord_type: str, 'cartesian' or 'direct'. The coordination type of output atom coordination.
+
+        Returns:
+
+        """
         time_st = time.perf_counter()
 
         Z_dict = {key: i for i, key in enumerate(_ALL_ELEMENT, 1)}  # a dictionary which map element symbols into their atomic numbers.
@@ -219,10 +232,10 @@ class POSCARs2Feat(BatchStructures):
 
         if self.verbose > 0: print('Progress: ' + '>' * 20 + '|100%  ', end='\r')
         self._indecies = {_id: ii for ii, _id in enumerate(self._Sample_ids)}
+        self._check_id()
+        self._check_len()
         if self.verbose > 0: print('\nAll files were read successfully!\n' + '*' * 60)
-
-        time_ed = time.perf_counter()
-        if self.verbose > 0: print(f'Total time: {(time_ed - time_st):<5.4f}')
+        if self.verbose > 0: print(f'Total time: {(time.perf_counter() - time_st):<5.4f}')
         #print(self.coord_data)
 
     def _load(self, fileName: str) -> Tuple[str, np.ndarray, List[str], List[int], np.ndarray, np.ndarray]:
@@ -604,7 +617,6 @@ class OUTCAR2Feat(BatchStructures):
         else:
             _para = jb.Parallel(n_jobs=n_core, backend=backend, verbose=self.verbose)
             _dat = _para(jb.delayed(self._read_single_file)(fi_name, parallel=True) for fi_name in file_list)
-            if (_dat is None) or (_dat[0] == []): raise RuntimeError('Occurred empty data.')
             for temp in _dat:
                 self._Sample_ids.extend(temp[0])
                 self.Elements.extend(temp[1])
@@ -615,6 +627,9 @@ class OUTCAR2Feat(BatchStructures):
                 self.Forces.extend(temp[6])
                 self.Fixed.extend(temp[7])
                 self.Coords_type.extend(temp[8])
+        if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._check_id()
+        self._check_len()
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
 
 class Xyz2Feat(BatchStructures):
@@ -709,6 +724,8 @@ class Xyz2Feat(BatchStructures):
                 )
                 if self.verbose > 0:
                     warnings.warn(f"Error: {e}")
+            self._check_id()
+            self._check_len()
 
 
 class ExtXyz2Feat(BatchStructures):
@@ -859,7 +876,7 @@ class ExtXyz2Feat(BatchStructures):
 
     def read(
             self,
-            file_list,
+            file_list = None,
             n_core: int = -1,
             backend: Literal['loky', 'threading', 'multiprocessing']|str = 'loky',
             lattice_tag: str = 'lattice',
@@ -883,7 +900,7 @@ class ExtXyz2Feat(BatchStructures):
                              detailed see https://wiki.fysik.dtu.dk/ase/dev/_modules/ase/io/extxyz.html.
             element_tag: As a content in `column_info_tag`, name of element column.
             coordinates_tag: As a content in `column_info_tag`, name of atom coordinates column.
-            forces_tag: As a content in `column_info_tag`, name of forces column. If file do not contain forces, set it to None.
+            forces_tag: As a content in `column_info_tag`, name of forces column. If the file does not contain forces, set it to None.
             fixed_atom_tag: As a content in `column_info_tag`, name of the mask column specified which atom was fixed.
 
         Returns: None
@@ -920,7 +937,6 @@ class ExtXyz2Feat(BatchStructures):
             forces_tag,
             fixed_atom_tag
         ) for fi_name in file_list)
-        if (_dat is None) or (_dat[0] == []): raise RuntimeError('Occurred empty data.')
         # idx, Cell_list, Energy_list, Forces_list, Elem_list, Number_list, Coords_list, Coord_type
         for temp in _dat:
             self._Sample_ids.extend(temp[0])
@@ -932,8 +948,141 @@ class ExtXyz2Feat(BatchStructures):
             self.Coords.extend(temp[6])
             self.Fixed.extend(temp[7])
             self.Coords_type.extend(temp[8])
+        if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._check_id()
+        self._check_len()
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
 
+
+class Cif2Feat(BatchStructures):
+    """
+    Read CIF file with multiple structures.
+    Notes: CIF file could not contain the fixation information, so all atoms would be free.
+
+    """
+
+    def __init__(self, path: str, verbose: int = 1):
+        super().__init__()
+        self.verbose = verbose
+        self.path = path
+        self.Energies = None
+        self.Forces = None
+
+    def read(
+            self,
+            file_list,
+            n_core: int = -1,
+            backend: Literal['loky', 'threading', 'multiprocessing'] | str = 'loky',
+    ):
+        t_st = time.perf_counter()
+        # file check
+        if file_list is None:
+            file_list = os.listdir(self.path)
+            file_list = [f_ for f_ in file_list if os.path.isfile(os.path.join(self.path, f_))]
+        elif not isinstance(file_list, Sequence):
+            raise TypeError(f'Invalid type of files_list: {type(file_list)}')
+        # para. set
+        if n_core > len(file_list):
+            warnings.warn(f'`n_core` is greater than file numbers, so `n_core` was reset to {len(file_list)}', RuntimeWarning)
+            n_core = len(file_list)
+        elif n_core == -1:
+            n_core = jb.cpu_count(only_physical_cores=True)
+        elif (not isinstance(n_core, int)) or n_core < -1:
+            raise ValueError(f'Invalid `n_core` number: {n_core}.')
+
+        _para = jb.Parallel(n_jobs=n_core, backend=backend, verbose=self.verbose)
+        _dat = _para(jb.delayed(self._read_single)(fi_name) for fi_name in file_list)
+        # file_name, cell, elements, elem_numbers, coo,
+        for temp in _dat:
+            if temp is not None:
+                self._Sample_ids.append(temp[0])
+                self.Cells.append(temp[1])
+                self.Elements.append(temp[2])
+                self.Numbers.append(temp[3])
+                self.Coords.append(temp[4])
+                self.Fixed.append(temp[5])
+        if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self.Coords_type = ['D'] * len(self._Sample_ids)
+        self._check_id()
+        self._check_len()
+
+        if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
+
+    def _read_single(
+            self,
+            file_name: str,
+    ):
+        if not os.path.isfile(os.path.join(self.path, file_name)):
+            warnings.warn(f'No OUTCAR file in given directory {os.path.join(self.path, file_name)}')
+            return None
+
+        try:
+            with open(os.path.join(self.path, file_name), 'r') as _f:
+                data = _f.readlines()
+
+            # manage information
+            cell_info_dict = dict()
+            atom_info_seq_dict = dict()
+            coords_info_list = list()
+            i_seq = 0  # serial numbers of atom information
+            is_read_atom = False  # detect if reading atom coo. info.
+            for dat in data[1:]:
+                _data_list = dat.split()
+                if _data_list[0] == 'loop_': is_read_atom = False
+                if is_read_atom and _data_list[0][0] != '_':
+                    coords_info_list.append(_data_list)
+                elif _data_list[0][:5] == '_cell':
+                    cell_info_dict[_data_list[0]] = _data_list[1]
+                elif _data_list[0][:5] == '_atom':
+                    atom_info_seq_dict[_data_list[0]] = i_seq
+                    i_seq = i_seq + 1
+                    is_read_atom = True
+
+            # manage cell vectors
+            a = float(cell_info_dict['_cell_length_a'])
+            b = float(cell_info_dict['_cell_length_b'])
+            c = float(cell_info_dict['_cell_length_c'])
+            alpha = np.deg2rad(float(cell_info_dict['_cell_angle_alpha']))
+            beta  = np.deg2rad(float(cell_info_dict['_cell_angle_beta']))
+            gamma = np.deg2rad(float(cell_info_dict['_cell_angle_gamma']))
+            b1 = b * np.cos(gamma)
+            b2 = np.sqrt(b**2 - b1**2)
+            c1 = c * np.cos(beta)
+            c2 = (b * c * np.cos(alpha) - b1 * c1)/b2
+            c3 = np.sqrt(c**2 - c1**2 - c2**2)
+            cell = np.array(
+                [[a, 0., 0.],
+                 [b1, b2, 0.],
+                 [c1, c2, c3]],
+                dtype=np.float32
+            )
+
+            # manage coordinates
+            coords_info_list = np.asarray(coords_info_list)
+            ix, iy, iz = atom_info_seq_dict['_atom_site_fract_x'], atom_info_seq_dict['_atom_site_fract_y'], atom_info_seq_dict['_atom_site_fract_z']
+            coo = coords_info_list[:, [ix, iy, iz]].astype(np.float32)
+            fix = np.ones_like(coo, dtype=np.int8)
+            atom_list = coords_info_list[:, atom_info_seq_dict['_atom_site_type_symbol']].tolist()
+            # elements
+            _elem_old = atom_list[0]
+            elements = [atom_list[0], ]
+            elem_numbers = list()
+            count_i = 0
+            for elem in atom_list:
+                if elem == _elem_old:
+                    count_i += 1
+                else:
+                    _elem_old = elem
+                    elem_numbers.append(count_i)
+                    elements.append(elem)
+                    count_i = 1
+            elem_numbers.append(count_i)
+
+            return file_name, cell, elements, elem_numbers, coo, fix
+
+        except Exception as err:
+            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
+            return None
 
 
 class ASEDB2Feat(BatchStructures):
@@ -943,6 +1092,7 @@ class ASEDB2Feat(BatchStructures):
 
     def __init__(self, path: str) -> None:
         super().__init__()
+        raise NotImplementedError('TODO :)')
         from ase import io
         self.ase_io = io
         self.Energies = list()
@@ -950,14 +1100,3 @@ class ASEDB2Feat(BatchStructures):
 
         atom_list = io.read(path)
         # TODO
-
-
-if __name__ == '__main__':
-    tst = time.perf_counter()
-    g = BatchStructures()
-    g.load_from_file('/media/ppx/My PSSD/DataSet/OC20All/')
-
-    f = ExtXyz2Feat('/media/ppx/EXTERNAL_USB/s2ef_train_all/s2ef_train_all/s2ef_train_all/')
-    f.read([f'{_}.extxyz' for _ in range(10)], backend='loky', n_core=6)
-    print(f'Total time: {time.perf_counter() - tst}')
-    pass

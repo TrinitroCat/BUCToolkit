@@ -788,7 +788,7 @@ class BlockedRW:
         # write the first chunk file
         f = self.reader(files_path, verbose)
         f.read(file_name_list[:chunk_size], **read_configs)
-        f.save2file(save_path, 'w')
+        f.save(save_path, 'w')
         del f
         gc.collect()
         for i in range(1, n_loop + 1):
@@ -797,7 +797,7 @@ class BlockedRW:
             files = file_name_list[chunk_size * i: chunk_size * (i + 1)]
             f = self.reader(files_path, verbose)
             f.read(files, **read_configs)
-            f.save2file(save_path, 'a')
+            f.save(save_path, 'a')
             del f
             gc.collect()
         pass
