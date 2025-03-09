@@ -14,10 +14,13 @@ import time
 import os
 import copy
 import warnings
+
 import joblib as jb
 import numpy as np
 
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
+from BM4Ckit.utils._CheckModules import check_module
+from BM4Ckit.utils.ElemListReduce import elem_list_reduce
 
 ''' CONSTANCE '''
 _ALL_ELEMENT = ['H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
@@ -536,7 +539,14 @@ class OUTCAR2Feat(BatchStructures):
                     _dat = [re.split(r'[0-9][\n\s\t]+', dat_) for dat_ in _dat[:-2]]  #去除空字符或都是横线的行，然后循环的对每一行进行划分 <<< # TODO
                     _data.append(_dat)  #将原子坐标的列表添加进列表中
                     energies.append(float(_energies[i]))
-                    cells.append(cells_str[i].split())
+                    # sometimes the cell vector would not split by \s e.g., "0.000000000-10.955671660 20.223087260"
+                    _cell_line: List[str] = cells_str[i].split()
+                    if len(_cell_line) != 3:
+                        __cell_line = list()
+                        [__cell_line.extend(_.replace('-', ' -').split()) for _ in _cell_line]
+                        _cell_line = __cell_line
+                        del __cell_line
+                    cells.append(_cell_line)
 
             cells = np.array(cells, dtype=np.float32).reshape(-1, 3, 6)
             cells = cells[:, :, :3]
@@ -970,7 +980,7 @@ class Cif2Feat(BatchStructures):
 
     def read(
             self,
-            file_list,
+            file_list = None,
             n_core: int = -1,
             backend: Literal['loky', 'threading', 'multiprocessing'] | str = 'loky',
     ):
@@ -1085,18 +1095,98 @@ class Cif2Feat(BatchStructures):
             return None
 
 
-class ASEDB2Feat(BatchStructures):
+class ASETraj2Feat(BatchStructures):
     """
-    read ASE_db files to BatchStructures.
+    read ASE files to BatchStructures.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, verbose: int = 1) -> None:
         super().__init__()
-        raise NotImplementedError('TODO :)')
-        from ase import io
-        self.ase_io = io
+        #raise NotImplementedError('TODO :)')
+        ase_io = check_module('ase.io')
+        if ase_io is None:
+            raise ImportError(f'`ASETraj2Feat` requires the ase package which is not found.')
+        self.ase_io = ase_io
+        self.path = path
+        self.verbose = verbose
         self.Energies = list()
         self.Forces = list()
 
-        atom_list = io.read(path)
-        # TODO
+    def _read_single(self, ase_file):
+        try:
+            idx = list()
+            Cell_list = list()
+            Energy_list = list()
+            Elem_list = list()
+            Number_list = list()
+            Coords_list = list()
+            Coords_type = list()
+            Forces_list = list()
+            Fixed_list = list()
+            atom_list = self.ase_io.read(ase_file, ':')
+            base_name = os.path.basename(ase_file)
+            base_name, _ = os.path.splitext(base_name)  # remove postfix
+            for i, atm in enumerate(atom_list):
+                if getattr(atm, 'calc', None) is None:  # skip the energy-empty sample
+                    continue
+                Cell_list.append(np.asarray(atm.cell, dtype=np.float32))
+                Coords_list.append(atm.positions.astype(np.float32))
+                coord_type = 'D' if np.all(np.abs(atm.positions) <= 1.) else 'C'
+                Coords_type.append(coord_type)
+                Energy_list.append(atm.get_potential_energy())
+                Forces_list.append(np.asarray(atm.get_forces(), dtype=np.float32))
+                fix = np.ones_like(atm.positions, dtype=np.float32)
+                fix[atm.constraints[0].index] = 0
+                Fixed_list.append(fix)
+                elem_sym, atomic_num, atom_count = elem_list_reduce(atm.numbers)
+                Elem_list.append(elem_sym)
+                Number_list.append(atom_count)
+                idx.append(f'{base_name}_{i}')
+
+            return idx, Cell_list, Energy_list, Forces_list, Elem_list, Number_list, Coords_list, Coords_type, Fixed_list
+
+        except Exception as err:
+            warnings.warn(f'An Error occurred when reading file {ase_file}, skipped.\nError: {err}.')
+            return [], [], [], [], [], [], [], [], []
+
+    def read(
+            self,
+            file_list = None,
+            n_core: int = -1,
+            backend: Literal['loky', 'threading', 'multiprocessing'] | str = 'loky',
+    ):
+        t_st = time.perf_counter()
+        # file check
+        if file_list is None:
+            file_list = os.listdir(self.path)
+            file_list = [f_ for f_ in file_list if os.path.isfile(os.path.join(self.path, f_))]
+        elif not isinstance(file_list, Sequence):
+            raise TypeError(f'Invalid type of files_list: {type(file_list)}')
+        # para. set
+        if n_core > len(file_list):
+            warnings.warn(f'`n_core` is greater than file numbers, so `n_core` was reset to {len(file_list)}', RuntimeWarning)
+            n_core = len(file_list)
+        elif n_core == -1:
+            n_core = jb.cpu_count(only_physical_cores=True)
+        elif (not isinstance(n_core, int)) or n_core < -1:
+            raise ValueError(f'Invalid `n_core` number: {n_core}.')
+
+        _para = jb.Parallel(n_jobs=n_core, backend=backend, verbose=self.verbose)
+        _dat = _para(jb.delayed(self._read_single)(os.path.join(self.path, fi_name)) for fi_name in file_list)
+        # file_name, cell, elements, elem_numbers, coo,
+        # idx, Cell_list, Energy_list, Forces_list, Elem_list, Number_list, Coords_list, Coord_type, fixed
+        for temp in _dat:
+            self._Sample_ids.extend(temp[0])
+            self.Cells.extend(temp[1])
+            self.Energies.extend(temp[2])
+            self.Forces.extend(temp[3])
+            self.Elements.extend(temp[4])
+            self.Numbers.extend(temp[5])
+            self.Coords.extend(temp[6])
+            self.Coords_type.extend(temp[7])
+            self.Fixed.extend(temp[8])
+        if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._check_id()
+        self._check_len()
+
+        if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
