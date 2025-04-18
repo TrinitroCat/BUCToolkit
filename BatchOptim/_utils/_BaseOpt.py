@@ -16,7 +16,7 @@ import torch as th
 from torch import nn
 from BM4Ckit.BatchOptim._utils._line_search import _LineSearch
 from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
-from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 
 
 class _BaseOpt:

@@ -11,16 +11,16 @@ VAL_BATCH_SIZE: 5 # default is the same as BATCH_SIZE
 VAL_PER_STEP: 1500
 
 # I/O configs
-LOAD_CHK_FILE_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/best_checkpoint.pt
-CHK_SAVE_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/GemNet_oc/forces
-OUTPUT_PATH: /home/ppx/PythonProjects/FAIR_CHEM/MD_test
+LOAD_CHK_FILE_PATH: /path/to/your/file/best_checkpoint.pt
+CHK_SAVE_PATH: /path/to/save/chk
+OUTPUT_PATH: /path/to/your/file/
 OUTPUT_POSTFIX: MD
-PREDICTIONS_SAVE_FILE: /home/ppx/PythonProjects/FAIR_CHEM/MyTrainerResults/Predictions.npz  # path of saving predictions
+PREDICTIONS_SAVE_FILE: /path/to/your/file/Predictions.npz  # path of saving predictions
 
 # model configs
-MODEL_NAME: GemNet_OC
+MODEL_NAME: SOME_MODEL
 MODEL_CONFIG: {}
-  #...
+  # Model hyperparameters ...
 
 # molecular dynamics
 MD:

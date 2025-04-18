@@ -22,6 +22,16 @@ from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
 from BM4Ckit.utils._CheckModules import check_module
 from BM4Ckit.utils.ElemListReduce import elem_list_reduce
 
+__all__ = [
+    'POSCARs2Feat',
+    'OUTCAR2Feat',
+    'ASETraj2Feat',
+    'ExtXyz2Feat',
+    'load_from_csv',
+    'Cif2Feat',
+
+]
+
 ''' CONSTANCE '''
 _ALL_ELEMENT = ['H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
                 'K', 'Ca', 'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn', 'Ga', 'Ge', 'As', 'Se', 'Br', 'Kr',
@@ -159,6 +169,7 @@ class POSCARs2Feat(BatchStructures):
             self.Numbers.append(temp[3])  # Element numbers
             self.Coords.append(temp[4])  # Atom coordination (cartesian)
             self.Fixed.append(temp[5])
+        self._update_indices()
         self._check_id()
         self._check_len()
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - time_st:<5.4f}')
@@ -235,6 +246,7 @@ class POSCARs2Feat(BatchStructures):
 
         if self.verbose > 0: print('Progress: ' + '>' * 20 + '|100%  ', end='\r')
         self._indecies = {_id: ii for ii, _id in enumerate(self._Sample_ids)}
+        self._update_indices()
         self._check_id()
         self._check_len()
         if self.verbose > 0: print('\nAll files were read successfully!\n' + '*' * 60)
@@ -638,6 +650,7 @@ class OUTCAR2Feat(BatchStructures):
                 self.Fixed.extend(temp[7])
                 self.Coords_type.extend(temp[8])
         if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._update_indices()
         self._check_id()
         self._check_len()
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
@@ -726,6 +739,7 @@ class Xyz2Feat(BatchStructures):
                 self.Numbers.extend(temp[5])
                 self.Coords.extend(temp[6])
                 self.Coords_type.extend(temp[7])
+                self.Fixed.extend([np.ones_like(_) for _ in temp[6]])
 
             except Exception as e:
                 err += 1
@@ -734,8 +748,9 @@ class Xyz2Feat(BatchStructures):
                 )
                 if self.verbose > 0:
                     warnings.warn(f"Error: {e}")
-            self._check_id()
-            self._check_len()
+        self._update_indices()
+        self._check_id()
+        self._check_len()
 
 
 class ExtXyz2Feat(BatchStructures):
@@ -860,10 +875,14 @@ class ExtXyz2Feat(BatchStructures):
                     warnings.warn('`forces_tag` was set, while it cannot be found in the column information.')
                 # fixed masks
                 if fixed_atom_tag is not None:
-                    fixed = main_info[:, col_content[f'{fixed_atom_tag}'][1]:col_content[f'{fixed_atom_tag}'][2]].flatten()
-                    fixed = self.fix_mask_trans_func(fixed, self.FIXED_DICT)
+                    fixed = main_info[:, col_content[f'{fixed_atom_tag}'][1]:col_content[f'{fixed_atom_tag}'][2]]
+                    fixed: np.ndarray = self.fix_mask_trans_func(fixed, self.FIXED_DICT)
+                    if fixed.ndim != 2: raise RuntimeError('Unsupported format of atom fixing.')
+                    if fixed.shape[1:2] != (3, ):
+                        fixed = fixed.repeat(3, 1)
+                    fixed.astype(np.int8)
                 else:
-                    fixed = None
+                    fixed = np.ones_like(coords, dtype=np.int8)
 
                 # write data
                 idx.append(f'{os.path.splitext(file_name)[0]}_{i_structure}')
@@ -898,7 +917,7 @@ class ExtXyz2Feat(BatchStructures):
             fixed_atom_tag: str | None = 'move_mask'
     ):
         """
-        Read *.extxyz file to BatchStructures.
+        Read *.extxyz files to BatchStructures.
         Args:
             file_list: List[str], the list of files to read. Default for all files under given path.
             n_core: int, the number of CPU cores used in reading files. -1 for all cores.
@@ -959,6 +978,7 @@ class ExtXyz2Feat(BatchStructures):
             self.Fixed.extend(temp[7])
             self.Coords_type.extend(temp[8])
         if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._update_indices()
         self._check_id()
         self._check_len()
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
@@ -1013,6 +1033,7 @@ class Cif2Feat(BatchStructures):
                 self.Fixed.append(temp[5])
         if not self._Sample_ids: raise RuntimeError('All data are empty.')
         self.Coords_type = ['D'] * len(self._Sample_ids)
+        self._update_indices()
         self._check_id()
         self._check_len()
 
@@ -1102,7 +1123,6 @@ class ASETraj2Feat(BatchStructures):
 
     def __init__(self, path: str, verbose: int = 1) -> None:
         super().__init__()
-        #raise NotImplementedError('TODO :)')
         ase_io = check_module('ase.io')
         if ase_io is None:
             raise ImportError(f'`ASETraj2Feat` requires the ase package which is not found.')
@@ -1135,7 +1155,7 @@ class ASETraj2Feat(BatchStructures):
                 Coords_type.append(coord_type)
                 Energy_list.append(atm.get_potential_energy())
                 Forces_list.append(np.asarray(atm.get_forces(), dtype=np.float32))
-                fix = np.ones_like(atm.positions, dtype=np.float32)
+                fix = np.ones_like(atm.positions, dtype=np.int8)
                 fix[atm.constraints[0].index] = 0
                 Fixed_list.append(fix)
                 elem_sym, atomic_num, atom_count = elem_list_reduce(atm.numbers)
@@ -1186,7 +1206,205 @@ class ASETraj2Feat(BatchStructures):
             self.Coords_type.extend(temp[7])
             self.Fixed.extend(temp[8])
         if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._update_indices()
         self._check_id()
         self._check_len()
 
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
+
+class Output2Feat(BatchStructures):
+    """
+    A class of post-processing to reading output files of BatchOptimization and BatchMD
+    """
+    def __init__(self, path: str, verbose: int = 1) -> None:
+        super().__init__()
+        ase_io = check_module('ase.io')
+        if ase_io is None:
+            raise ImportError(f'`ASETraj2Feat` requires the ase package which is not found.')
+        self.ase_io = ase_io
+        self.path = path
+        self.verbose = verbose
+        self.Energies = list()
+        self.Forces = list()
+
+    def read(self, file_list: List[str], n_core: int = -1, backend='loky'):
+        t_st = time.perf_counter()
+        # file check
+        if file_list is None:
+            file_list = os.listdir(self.path)
+            file_list = [f_ for f_ in file_list if os.path.isfile(os.path.join(self.path, f_))]
+        elif not isinstance(file_list, Sequence):
+            raise TypeError(f'Invalid type of files_list: {type(file_list)}')
+        # para. set
+        if n_core > len(file_list):
+            warnings.warn(f'`n_core` is greater than file numbers, so `n_core` was reset to {len(file_list)}', RuntimeWarning)
+            n_core = len(file_list)
+        elif n_core == -1:
+            n_core = min(jb.cpu_count(only_physical_cores=True), len(file_list))
+        elif (not isinstance(n_core, int)) or n_core < -1:
+            raise ValueError(f'Invalid `n_core` number: {n_core}.')
+
+        _para = jb.Parallel(n_jobs=n_core, backend=backend, verbose=self.verbose)
+        _dat = _para(jb.delayed(self._read_single)(fi_name) for fi_name in file_list)
+        # file_name, cell, elements, elem_numbers, coo,
+        # samp_id, cell, elements, elem_numbers, energies, forces, coo, fix
+        is_no_force = False
+        for temp in _dat:
+            self._Sample_ids.extend(temp[0])
+            self.Cells.extend(temp[1])
+            self.Elements.extend(temp[2])
+            self.Numbers.extend(temp[3])
+            self.Energies.extend(temp[4])
+            if len(temp[5]) != 0:
+                self.Forces.extend(temp[5])
+            else:
+                is_no_force = True
+                warnings.warn(f'Forces are not output in some files, so that all forces are set to None.')
+            self.Coords.extend(temp[6])
+            self.Fixed.extend(temp[7])
+        if is_no_force:
+            self.Forces = None
+        self.Coords_type = ['C'] * len(self)
+        if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._update_indices()
+        self._check_id()
+        self._check_len()
+
+        if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
+        pass
+
+    def _read_single(self, file_name):
+        if not os.path.isfile(os.path.join(self.path, file_name)):
+            warnings.warn(f'No output file in given directory {os.path.join(self.path, file_name)}')
+            return None
+        samp_id = list()
+        cell = list()
+        elements = list()
+        elem_numbers = list()
+        energies = list()
+        forces = list()
+        coo = list()
+        fix = list()
+        number_pattern = re.compile(r'[\s\-.0-9]+')
+        try:
+            with open(os.path.join(self.path, file_name), 'r') as _f:
+                data = _f.readlines()
+            # identify tasks
+            task_tag = None
+            for line in data:
+                if re.search(r'TASK: Structure Optimization <<', line) is not None:
+                    task_tag = 'opt'
+                    Id_pattern = re.compile(r'Structure names:\s\[(.+)]')
+                    Elem_tag = re.compile(r'Structure\s*[0-9]+:\s*(.*)$')
+                    Iter_pattern = re.compile(r'ITERATION\s*([0-9]+)')
+                    E_pattern = re.compile(r'\s*Energies: +\[([+\s0-9e.-]+)]')
+                    F_tag = re.compile(r'\s*Gradients (forces):')
+                    Coo_tag = re.compile(r'\s*Coordinates:')
+                    Cell_tag = re.compile(r'Cell Vectors:')
+                    break
+                elif re.search(r'TASK: Molecular Dynamics <<', line) is not None:
+                    task_tag = 'md'
+                    raise NotImplementedError
+            if task_tag is None: raise RuntimeError(f'Unknown task type.')
+
+            i_batch = -1
+            # MAIN LOOP
+            for i, line in enumerate(data):
+                is_name = re.match(Id_pattern, line)
+                if is_name is not None:  # it is the name line
+                    name = is_name.group(1).replace('\'', '').split(',')
+                    i_batch += 1
+                    n_batch = len(name)
+                    cell_temp = list()
+                    elements_temp = list()
+                    elem_numbers_temp = list()
+                    continue
+                # cell
+                is_cell = re.match(Cell_tag, line)
+                if is_cell is not None:
+                    _cell = list()
+                    for _sub_line in data[i+1:]:
+                        is_empty = re.match(r'^\s*$', _sub_line)
+                        if is_empty is not None:
+                            cell_temp.append(np.asarray(_cell, dtype=np.float32))
+                            _cell = list()
+                            continue
+                        is_numbers = re.match(number_pattern, _sub_line)
+                        if is_numbers is not None:
+                            _numbers = is_numbers.group().split()
+                            _cell.append(_numbers)
+                        else:
+                            break  # neither empty line nor numbers, thus skipping
+                    continue
+                # element & numbers
+                is_elem = re.match(Elem_tag, line)
+                if is_elem is not None:
+                    _elem = list()
+                    _number = list()
+                    for ii, _ in enumerate(is_elem.group(1).replace(':', '').split()):
+                        if ii % 2 == 0:
+                            _elem.append(_)
+                        else:
+                            _number.append(int(_))
+                    elements_temp.append(_elem)
+                    elem_numbers_temp.append(_number)
+                    continue
+                # main iterations
+                is_in_iter = re.match(Iter_pattern, line)
+                if is_in_iter is not None:
+                    _samp_id = is_in_iter.group(1)
+                    for ii in range(n_batch):
+                        samp_id.append(f'{file_name}_{name[ii]}_iter{_samp_id}')
+                        cell.append(cell_temp[-n_batch + ii])
+                        elements.append(elements_temp[-n_batch + ii])
+                        elem_numbers.append(elem_numbers_temp[-n_batch + ii])
+                    continue
+                # energy
+                is_energy = re.match(E_pattern, line)
+                if is_energy is not None:
+                    _ener = is_energy.group(1).split()
+                    for _ in _ener:
+                        energies.append(float(_))
+                    continue
+                # coords
+                is_coo = re.match(Coo_tag, line)
+                if is_coo is not None:
+                    _coo = list()
+                    for _sub_line in data[i+2:]:
+                        is_empty = re.match(r'^\s*$', _sub_line)
+                        if is_empty is not None:
+                            _coo = np.asarray(_coo, dtype=np.float32)
+                            coo.append(_coo)
+                            fix.append(np.ones_like(_coo, dtype=np.int8))
+                            _coo = list()
+                            continue
+                        is_numbers = re.match(number_pattern, _sub_line)
+                        if is_numbers is not None:
+                            _numbers = is_numbers.group().split()
+                            _coo.append(_numbers)
+                        else:
+                            break  # neither empty line nor numbers, thus skipping
+                    continue
+                # forces
+                is_forc = re.match(F_tag, line)
+                if is_forc is not None:
+                    _forc = list()
+                    for _sub_line in data[i + 2:]:
+                        is_empty = re.match(r'^\s*$', _sub_line)
+                        if is_empty is not None:
+                            forces.append(np.asarray(_forc, dtype=np.float32))
+                            _forc = list()
+                            continue
+                        is_numbers = re.match(number_pattern, _sub_line)
+                        if is_numbers is not None:
+                            _numbers = is_numbers.group().split()
+                            _forc.append(_numbers)
+                        else:
+                            break  # neither empty line nor numbers, thus skipping
+                    continue
+
+            return samp_id, cell, elements, elem_numbers, energies, forces, coo, fix
+
+        except Exception as err:
+            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
+            return None

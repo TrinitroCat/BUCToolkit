@@ -1,5 +1,5 @@
 # BM4CKit
-A Python based package containing various tools for machine learning applied in catalytic chemistry.
+A Python-based package containing various tools for machine learning applied in catalytic chemistry.
 
 ## 1. Logging
 * logger level: 

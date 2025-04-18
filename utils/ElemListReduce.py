@@ -7,7 +7,7 @@
 Convert a dense element list (atomic number corresponds to coordinates one by one) into VASP-like compressed format.
 """
 from typing import List, Tuple
-from ._Masses import ATOMIC_NUMBER, ATOMIC_SYMBOL
+from ._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 import numpy as np
 
 

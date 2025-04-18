@@ -188,7 +188,7 @@ class _LineSearch:
 
         self.device = X0.device
         steplength = th.full((self.n_batch, 1, 1), self.steplength, device=self.device)
-        is_converge = False;
+        is_converge = False
         _steplength = steplength
         if self.method == 'Backtrack':
             with th.no_grad():
@@ -208,7 +208,19 @@ class _LineSearch:
             a = 0.5
             for i in range(self.maxiter):
                 armijo_mask, curve_mask, y1, direct_grad0, direct_grad1 = (
-                    self._Wolfe_cond(func, grad_func, X0, y0, grad, p, _steplength, rho=0.05, func_args=func_args, func_kwargs=func_kwargs)
+                    self._Wolfe_cond(
+                        func,
+                        grad_func,
+                        X0,
+                        y0,
+                        grad,
+                        p,
+                        _steplength,
+                        is_grad_func_contain_y,
+                        rho=0.05,
+                        func_args=func_args,
+                        func_kwargs=func_kwargs
+                    )
                 )
                 if th.all(armijo_mask * curve_mask):
                     is_converge = True
@@ -354,11 +366,11 @@ class _LineSearch:
 
         elif self.method == 'Golden':  # golden section method
             with th.no_grad():
-                _steplength1 = th.zeros_like(steplength);
-                _steplength2 = steplength;
+                _steplength1 = th.zeros_like(steplength)
+                _steplength2 = steplength
                 GOLDEN_SEC = 0.6180339887498948482
-                is_converge = False;
-                is_get_inteval = False;
+                is_converge = False
+                is_get_inteval = False
                 Xn = X0
                 f1 = y0
                 # Search Interval

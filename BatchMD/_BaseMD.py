@@ -5,7 +5,6 @@
 #  File: _BaseMD.py
 #  Environment: Python 3.12
 
-# ruff: noqa: E701, E702, E703
 import sys
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 import time
@@ -16,8 +15,8 @@ from torch import nn
 
 import numpy as np
 
-from BM4Ckit.utils._Masses import MASS, N_MASS, ATOMIC_NUMBER
-from .._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class _BaseMD:

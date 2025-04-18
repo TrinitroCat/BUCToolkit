@@ -1,0 +1,68 @@
+
+import torch as th
+
+from BM4Ckit import Structures
+from BM4Ckit.Preprocessing.load_files import OUTCAR2Feat, ExtXyz2Feat, ASETraj2Feat
+from BM4Ckit.Preprocessing.preprocessing import CreatePygData
+from BM4Ckit.TrainingMethod.DataLoaders import PyGDataLoader
+from BM4Ckit.TrainingMethod.Trainer import Trainer
+from YOUR MODEL PATH import YOUR_MODEL
+
+# -----------------------------------------------------
+
+# -----------------------------------------------------
+
+# Load Data
+f = Structures()
+f.load('/your/training/data/path')  # path of files saved by f.save(`path`)
+g = Structures()
+g.load('/your/training/data/path')
+#g = g.contain_only_in(BM4Ckit.TRANSITION_P_METALS | {'C', 'H'})  # select by elements
+#g = g.select_by_sample_id(r'[^_].*')  # select by file name, support regular expression
+
+f = OUTCAR2Feat(YOUR_OUTCAR_FILE_PATH)  # Also can load OUTCAR-format files in parallel, only input path
+f.read(['OUTCAR1', '2OUTCAR2', 'OUTCAR3'])  # specific files to read, default to read all files in this path
+
+f = ExtXyz2Feat(YOUR_OUTCAR_FILE_PATH)  # Also can load extxyz-format files in parallel, only input path
+f.read(['1.xyz', '2.xyz', '3.xyz'])  # specific files to read, default to read all files in this path
+
+f = ASETraj2Feat(YOUR_OUTCAR_FILE_PATH)  # Also can load ase-trajectory files in parallel, only input path
+f.read()  # the same above
+
+# Load Model
+model = YOUR_MODEL
+inp = './template_train.inp'
+
+# Convert Data
+train_data_list = CreatePygData(1).feat2data_list(f, n_core=1)  # transfer to torch-geometric form
+val_data_list = CreatePygData(1).feat2data_list(g, n_core=1)
+
+trn_ener = [f[atm.idx].Energies[0] for atm in train_data_list]
+trn_forc = [f[atm.idx].Forces[0] for atm in train_data_list]
+train_data = {'data':train_data_list, 'labels':{'energy':trn_ener, 'forces':trn_forc}}
+val_ener = [g[atm.idx].Energies[0] for atm in val_data_list]
+val_forc = [g[atm.idx].Forces[0] for atm in val_data_list]
+valid_data = {'data':val_data_list, 'labels':{'energy':val_ener, 'forces':val_forc}}
+
+lr_scheduler = th.optim.lr_scheduler.CosineAnnealingWarmRestarts
+lr_scheduler_config = {
+    'T_0': 200,
+    'T_mult': 2,
+    'eta_min': 1e-5
+}
+
+# set data loader
+dataloader = PyGDataLoader
+
+# set trainer
+trainer = Trainer(inp, 2, 'cuda:0')
+trainer.set_dataset(train_data, valid_data) # type: ignore
+trainer.set_dataloader(dataloader, {'shuffle':True})
+#trainer.set_loss_fn(Energy_Force_Loss, {'coeff_F':0.})  # optional, set loss manually
+trainer.set_lr_scheduler(lr_scheduler, lr_scheduler_config)
+trainer.set_layerwise_optim_config(
+    {'force_block.*': {'lr': 1.e-3}, 'energy_block.*': {'lr': 1.e-3}}
+)  # optional, set different learning-rate for diff. layers; layer name input supports regular expression
+
+# training
+trainer.train(model)

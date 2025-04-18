@@ -1,4 +1,4 @@
-""" Preprocessing """
+""" Preprocessing, including data transformations. """
 
 #  Copyright (c) 2024.12.10, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
@@ -8,10 +8,12 @@
 
 import copy
 import gc
+import random
 # basic modules
 import re
 import time
 import warnings
+from math import floor
 from typing import Dict, Set, Tuple, List, Sequence, Any, Union, Literal
 
 import joblib as jb
@@ -39,7 +41,13 @@ ALL_ELEMENT = {'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg',
                'Fr', 'Ra', 'Ac', 'Th', 'Pa', 'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk', 'Cf', 'Es', 'Fm', 'Md', 'No', 'Lr',
                'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds', 'Rg', }  # element set
 
-""" screening samples """
+__all__ = [
+    "CreateASE",
+    "CreatePygData",
+    "CreateDglData",
+    "BlockedRW",
+    "split_dataset"
+]
 
 
 class ScreenSampleByElement:
@@ -285,7 +293,7 @@ class BandKit:
         Calculate the effective mass at `k` k-point.
         Args:
             n: the index of band to calc. effective mass.
-            k: for `k` is int, the `k`th k-point with 0 weight would be selected. The order is same as given EIGENVAL.
+            k: for `k` is int, the `k`th k-point with 0 weight would be selected. The order is as same as given EIGENVAL.
                 for `k` is ndarray or List, it must have the shape of (3, ), and the k-point with this given coordinate would be selected.
                 If there are more than 1 k-points had same coordinate, the 1st one would be selected.
 
@@ -466,6 +474,7 @@ class CreateASE:
         Convert to ase.Atoms from given BatchStructures.
 
         Parameters:
+            n_core:
             feat: BatchStructures.
             set_tags: bool, whether set Atoms.tags = np.ones(n_atom) automatically.
         
@@ -745,20 +754,26 @@ class CreateDglData:
 
 class BlockedRW:
     """
-    Blocked read and save files to a memory-mapping file. Used to manage big files that memory cannot be loaded at once.
+    Blocked read files and save to a memory-mapping file, or load the memory-mapping file and write to specific files inversely.
+    Used to manage big files that memory cannot be loaded at once.
     """
 
-    def __init__(self, files_reader: Literal['OUTCAR', 'EXTXYZ', 'POSCAR']):
-        if files_reader == 'OUTCAR':
+    def __init__(self, file_format: Literal['OUTCAR', 'EXTXYZ', 'POSCAR']):
+        """
+        Args:
+            file_format: format of files to read or write.
+        """
+        if file_format == 'OUTCAR':
             ff = OUTCAR2Feat
-        elif files_reader == 'EXTXYZ':
+        elif file_format == 'EXTXYZ':
             ff = ExtXyz2Feat
-        elif files_reader == 'POSCAR':
+        elif file_format == 'POSCAR':
             ff = POSCARs2Feat
         else:
-            raise ValueError(f'`files_reader {files_reader} is invalid.')
+            raise ValueError(f'`file_format {file_format} is invalid.')
 
         self.reader = ff
+        self.file_format = file_format
 
     def save(
             self,
@@ -800,7 +815,6 @@ class BlockedRW:
             f.save(save_path, 'a')
             del f
             gc.collect()
-        pass
 
     def load(
             self,
@@ -812,12 +826,79 @@ class BlockedRW:
         """
         Blocked load data from given BatchStructure memory-mapping path.
         Args:
-            load_path: the path to load memory-mapping
+            load_path: the path to load memory-mapping.
             load_range:
             chunck_size:
             verbose:
 
-        Returns:
-
+        Returns: None
         """
+        raise NotImplementedError
+
         pass
+
+
+def split_dataset(
+        data: BatchStructures,
+        ratio: float|List[float] = 0.9,
+        save_path: str|List[str]|None = None,
+        shuffle: bool = False,
+        seed: int = None
+):
+    """
+    Splitting the data set into parts with given ratios. It would overwrite if `save_path` already exists.
+    Args:
+        data: data set with BatchStructure format
+        ratio: splitting ratio. If only a float number was given, data would be split into 2 parts with ratio `ratio` and `1 - ratio`.
+               The summation of all ratios must be 1.
+        save_path: if None, List of split data would be directly returned; otherwise they will be saved as memory-mapping files in given paths.
+                   The length of `save_path` must be the same as `ratio`.
+        shuffle: whether to shuffle data. If not, data will be divided sequentially.
+        seed: random seed for shuffle.
+
+    Returns: List | None
+
+    """
+    # check vars
+    if not isinstance(data, BatchStructures):
+        raise TypeError('data must be BatchStructures.')
+    if isinstance(ratio, float): ratio = [ratio, 1 - ratio]
+    if sum(ratio) != 1.:
+        raise ValueError(f'Summation of `ratio` must be 1., but got {sum(ratio)}.')
+    for _ in ratio:
+        if (_ >= 1.) or (_ <= 0.): raise ValueError(f'All values in `ratio` must between (0, 1), but got {_}.')
+    if save_path is not None:
+        assert len(save_path) == len(ratio), f'`save_path` must have a same length with `ratio`, but got {len(save_path), len(ratio)}.'
+    result_list: list[BatchStructures] = list()
+    # shuffle
+    if shuffle:
+        # create a shuffle indices
+        indx = list(range(len(data)))
+        random.seed(seed)
+        random.shuffle(indx)
+        # create an inverse indices
+        inv_indx = [0] * len(data)
+        for j, k in enumerate(indx):
+            inv_indx[k] = j
+        data.rearrange(indx)
+
+    n_sample = len(data)
+    data_indx_now = 0
+    for i, _ in enumerate(ratio[:-1]):
+        sub_BS = data[data_indx_now : data_indx_now + floor(n_sample * _)]
+        if save_path is not None:
+            sub_BS.save(save_path[i])
+        else:
+            result_list.append(sub_BS)
+        data_indx_now += floor(n_sample * _)
+    sub_BS = data[data_indx_now:]
+    if save_path is not None:
+        sub_BS.save(save_path[-1])
+    else:
+        result_list.append(sub_BS)
+
+    return result_list if save_path is None else None
+
+
+
+

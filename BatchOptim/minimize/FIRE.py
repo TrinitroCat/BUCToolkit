@@ -18,8 +18,8 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BM4Ckit.utils._Masses import MASS, N_MASS
-from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.utils._Element_info import MASS, N_MASS
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from .._utils._warnings import FaildToConvergeWarning
 
 

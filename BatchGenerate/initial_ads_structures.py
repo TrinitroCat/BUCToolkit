@@ -349,27 +349,3 @@ class _Loss(nn.Module):
         k_o_loss = th.sum((dist_mat - origin_dist_mat)**2)
         return k_o_loss
 
-
-if __name__ == '__main__':
-    from BM4Ckit.Preprocessing.load_files import POSCARs2Feat
-    f0 = POSCARs2Feat('/home/ppx/PythonProjects/test_files/test_Slabs')
-    f0.read()
-    mol_elems = {'C': 3, 'H': 7}
-    mol_coords = th.tensor(
-        [[4.366752869     ,    5.194936163     ,   7.370416754     ],
-             [5.706862669,         5.375525243,        8.078497269],
-             [6.210541270,         6.812369109,        8.183432195],
-             [3.961925510,         4.184904780,        7.545806886],
-             [3.623250069,         5.927264731,        7.728475650],
-             [6.477085363,         4.734992709,        7.601127703],
-             [5.597747186,         4.968108932,        9.104960900],
-             [6.320431086,         7.273528606,        7.180864998],
-             [7.193091322,         6.860955256,        8.675641514],
-             [5.507056659,         7.444790778,        8.749347576]], device='cpu'
-    )
-
-    slab_site = get_highest_atom_indices(f0)
-
-    a = InitAdsStructure(f0, mol_coords, mol_elems, 'z', 'cpu', 1)
-    result = a.run(slab_site, [0,], 2., 100., 0.3, 2.)
-    result.write2text(output_path='/home/ppx/PythonProjects/test_files/test_Slabs/results')

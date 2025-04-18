@@ -138,26 +138,3 @@ def supercell(supercell_index: Tuple[int, int, int] | List[int],
     Numbers_ = [Numbers[i] * n_cell for i in range(n_batch)]
 
     return Cells_, Coords_, Elements_, Numbers_
-
-
-if __name__ == '__main__':
-    from BM4Ckit.Preprocessing.load_files import POSCARs2Feat
-    import time
-    from cProfile import Profile
-
-    def main():
-        f = POSCARs2Feat('/home/ppx/Desktop/DC/simple/simple1_-01_01/')
-        f.read(['POSCAR_27653_CuHoIn.vasp'])
-        cell = th.from_numpy(np.asarray(f.Cells))
-        coord = th.from_numpy(np.asarray(f.Coords))
-        res = supercell([3, 3, 1], cell, coord, f.Elements, f.Numbers, 'cuda:0')
-        f.Cells = [res[0].numpy(force=True)[0]]
-        f.Coords = [res[1].numpy(force=True)[0]]
-        f.Elements = res[2]
-        f.Numbers = res[3]
-        f.Fixed = [np.ones_like(f.Coords[0])]
-        f.write2text(n_core=1)
-
-    t = time.perf_counter()
-    main()
-    print(time.perf_counter() - t)

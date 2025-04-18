@@ -3,7 +3,7 @@
 #  Copyright (c) 2024.12.10, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.7b
-#  File: _Masses.py
+#  File: _Element_info.py
 #  Environment: Python 3.12
 
 MASS = {
@@ -360,4 +360,145 @@ ATOMIC_SYMBOL: 'dict(element symbol : atomic number)' = {
     "Po": 84,
     "At": 85,
     "Rn": 86,
+}
+
+NONRADIOACTIVE_METALS: "Te set of non-radioactive metals" = {
+    "Li",  # 锂
+    "Be",  # 铍
+    "Na",  # 钠
+    "Mg",  # 镁
+    "Al",  # 铝
+    "K",   # 钾
+    "Ca",  # 钙
+    "Sc",  # 钪
+    "Ti",  # 钛
+    "V",   # 钒
+    "Cr",  # 铬
+    "Mn",  # 锰
+    "Fe",  # 铁
+    "Co",  # 钴
+    "Ni",  # 镍
+    "Cu",  # 铜
+    "Zn",  # 锌
+    "Ga",  # 镓
+    "Rb",  # 铷
+    "Sr",  # 锶
+    "Y",   # 钇
+    "Zr",  # 锆
+    "Nb",  # 铌
+    "Mo",  # 钼
+    "Ru",  # 钌
+    "Rh",  # 铑
+    "Pd",  # 钯
+    "Ag",  # 银
+    "Cd",  # 镉
+    "In",  # 铟
+    "Sn",  # 锡
+    "Cs",  # 铯
+    "Ba",  # 钡
+    "La",  # 镧
+    "Ce",  # 铈
+    "Pr",  # 镨
+    "Nd",  # 钕
+    "Sm",  # 钐
+    "Eu",  # 铕
+    "Gd",  # 钆
+    "Tb",  # 铽
+    "Dy",  # 镝
+    "Ho",  # 钬
+    "Er",  # 铒
+    "Tm",  # 铥
+    "Yb",  # 镱
+    "Lu",  # 镥
+    "Hf",  # 铪
+    "Ta",  # 钽
+    "W",   # 钨
+    "Re",  # 铼
+    "Os",  # 锇
+    "Ir",  # 铱
+    "Pt",  # 铂
+    "Au",  # 金
+    "Hg",  # 汞
+    "Tl",  # 铊
+    "Pb",  # 铅
+    "Bi"   # 铋
+}
+
+TRANSITION_METALS: "The set of transition metals" = {
+    "Sc",
+    "Ti",
+    "V",
+    "Cr",
+    "Mn",
+    "Fe",
+    "Co",
+    "Ni",
+    "Cu",
+    "Zn",
+    "Y",
+    "Zr",
+    "Nb",
+    "Mo",
+    "Ru",
+    "Rh",
+    "Pd",
+    "Ag",
+    "Cd",
+    "Hf",
+    "Ta",
+    "W",
+    "Re",
+    "Os",
+    "Ir",
+    "Pt",
+    "Au",
+    "Hg",
+}
+
+TRANSITION_P_METALS: "The set of transition metals & p-zone metals" = {
+    "Sc",
+    "Ti",
+    "V",
+    "Cr",
+    "Mn",
+    "Fe",
+    "Co",
+    "Ni",
+    "Cu",
+    "Zn",
+    "Y",
+    "Zr",
+    "Nb",
+    "Mo",
+    "Ru",
+    "Rh",
+    "Pd",
+    "Ag",
+    "Cd",
+    "Hf",
+    "Ta",
+    "W",
+    "Re",
+    "Os",
+    "Ir",
+    "Pt",
+    "Au",
+    "Hg",
+    "Al",
+    "Ga",
+    "In",
+    "Sn",
+    "Tl",
+    "Pb",
+    "Bi"
+}
+
+NOBLE_METALS: "The set of noble metals" = {
+    "Rh",
+    "Ru",
+    "Os",
+    "Pt",
+    "Ir",
+    "Pd",
+    "Au"
 }

@@ -6,7 +6,7 @@
 
 import os
 import time
-import warnings
+import traceback
 from typing import Dict, Any, Literal
 
 import numpy as np
@@ -15,16 +15,19 @@ from torch import nn
 
 from BM4Ckit.BatchMD import NVE, NVT
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
-from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 
 
 class MolecularDynamics(_CONFIGS):
     """
-    Molecular Dynamics Simulation
+    Class of molecular dynamics simulation.
+    Users need to set the dataset and dataloader manually.
 
     Args:
         config_file: path to input file.
-        data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph
+        data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph.
+        verbose: control the verboseness of output.
+        device: the device that models run on.
 
     Input file parameters:
         ENSEMBLE: Literal[NVE, NVT], the ensemble for MD.
@@ -32,7 +35,7 @@ class MolecularDynamics(_CONFIGS):
                     'VR' is Velocity Rescaling and 'CSVR' is Canonical Sampling Velocity Rescaling by Bussi et al. [1].
         THERMOSTAT_CONFIG: Dict, the configs of thermostat.
                            * For 'Langevin', option key 'damping_coeff' (fs^-1) is to control the damping coefficient. Large damping_coeff lead to a strong coupling. Default: 0.01
-                           * For 'CSVR', option key 'time_const' (fs) is to control the characteristic timescale. Large time_const lead to a weak coupling. Defalt: 10*TIME_STEP
+                           * For 'CSVR', option key 'time_const' (fs) is to control the characteristic timescale. Large time_const leads to a weak coupling. Default: 10*TIME_STEP
         TIME_STEP: float, the time step (fs) for MD. Default: 1
         MAX_STEP: int, total time (fs) = TIME_STEP * MAX_STEP
         T_INIT: float, initial Temperature (K). Default: 298.15
@@ -44,7 +47,13 @@ class MolecularDynamics(_CONFIGS):
         [1] J. Chem. Phys., 2007, 126, 014101.
     """
 
-    def __init__(self, config_file: str, data_type: Literal['pyg', 'dgl'] = 'pyg', verbose: int = 0, device: str | th.device = 'cpu') -> None:
+    def __init__(
+            self,
+            config_file: str,
+            data_type: Literal['pyg', 'dgl'] = 'pyg',
+            verbose: int = 0,
+            device: str | th.device = 'cpu'
+    ) -> None:
         super().__init__(config_file, device)
 
         self.config_file = config_file
@@ -82,7 +91,7 @@ class MolecularDynamics(_CONFIGS):
     def run(self, model):
         """
         Parameters:
-            model: the input model which is uninstantiated nn.Module class.
+            model: the input model which is non-instantiated nn.Module class.
         """
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
@@ -94,8 +103,8 @@ class MolecularDynamics(_CONFIGS):
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
             epoch_now = chk_data['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
-            warnings.warn(
-                'The model was not read trained parameters from checkpoint file. \nI HOPE YOU KNOW WHAT YOU ARE DOING!', RuntimeWarning
+            self.logger.warning(
+                'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
             )
             epoch_now = 0
             if self.param is not None:
@@ -182,46 +191,54 @@ class MolecularDynamics(_CONFIGS):
             n_c = 1  # running batch now
             X_dict = dict()
             for val_data, val_label in val_set:
-                # to avoid get an empty batch
-                if get_batch_size(val_data) <= 0:
-                    if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
-                    continue
-                # MD
-                if self.verbose > 0:
-                    self.logger.info('*' * 100)
-                    self.logger.info(f'Running Batch {n_c}.')
-                    self.logger.info('*' * 100)
-                    cell_str = np.array2string(
-                        get_cell_vec(val_data), **FLOAT_ARRAY_FORMAT
-                    ).replace("[", " ").replace("]", " ")  # TODO, Now it support pygData and DGLGraph.
-                    self.logger.info(f'Cell Vectors:\n{cell_str}')
+                try:
+                    # to avoid get an empty batch
+                    if get_batch_size(val_data) <= 0:
+                        if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
+                        continue
+                    # MD
+                    if self.verbose > 0:
+                        self.logger.info('*' * 100)
+                        self.logger.info(f'Running Batch {n_c}.')
+                        self.logger.info('*' * 100)
+                        cell_str = np.array2string(
+                            get_cell_vec(val_data), **FLOAT_ARRAY_FORMAT
+                        ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
+                        self.logger.info(f'Cell Vectors:\n{cell_str}')
 
-                if self.data_type == 'pyg':
-                    batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
-                else:
-                    batch_indx = val_data.batch_num_nodes('atom')
-                # initial atom coordinates
-                if self.data_type == 'pyg':
-                    X_init = val_data.pos.unsqueeze(0)
-                else:
-                    X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
+                    if self.data_type == 'pyg':
+                        batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
+                    else:
+                        batch_indx = val_data.batch_num_nodes('atom')
+                    # initial atom coordinates
+                    if self.data_type == 'pyg':
+                        X_init = val_data.pos.unsqueeze(0)
+                    else:
+                        X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
 
-                mole_dynam.run(
-                    model_wrap.Energy,
-                    X_init,  # TODO, Now it support pygData and DGLGraph.
-                    get_atomic_number(val_data),
-                    V_init=None,  # TODO, Support user-defined initial velocities.
-                    grad_func=model_wrap.Grad,
-                    func_args=(val_data,), grad_func_args=(val_data,),
-                    is_grad_func_contain_y=False,
-                    fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
-                    batch_indices=batch_indx,
-                )
+                    mole_dynam.run(
+                        model_wrap.Energy,
+                        X_init,  # TODO, Now it support pygData and DGLGraph.
+                        get_atomic_number(val_data),
+                        V_init=None,  # TODO, Support user-defined initial velocities.
+                        grad_func=model_wrap.Grad,
+                        func_args=(val_data,), grad_func_args=(val_data,),
+                        is_grad_func_contain_y=False,
+                        fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
+                        batch_indices=batch_indx,
+                    )
 
-                # Print info
-                if self.verbose > 0:
-                    self.logger.info(f'Batch {n_c} done.')
-                n_c += 1
+                    # Print info
+                    if self.verbose > 0:
+                        self.logger.info(f'Batch {n_c} done.')
+                    n_c += 1
+
+                except Exception as e:
+                    self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
+                    if self.verbose > 1:
+                        excp = traceback.format_exc()
+                        self.logger.warning(f"Traceback:\n{excp}")
+                    n_c += 1
 
             if self.verbose: self.logger.info(f'Molecular Dynamics Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
             if self.SAVE_PREDICTIONS:
@@ -235,7 +252,8 @@ class MolecularDynamics(_CONFIGS):
 
         except Exception as e:
             th.cuda.synchronize()
-            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n')
+            excp = traceback.format_exc()
+            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
             th.cuda.synchronize()

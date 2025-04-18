@@ -17,9 +17,8 @@ import numpy as np
 import torch as th
 from torch import nn
 from torch.nn import functional as Fn
-from .._utils._warnings import FaildToConvergeWarning
 
-from ..._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)
 

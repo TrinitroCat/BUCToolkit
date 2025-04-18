@@ -98,24 +98,3 @@ def flatten(x, flat_num: int=-1, ncore: int=-1):
     pools.join()
 
     return z
-
-
-if __name__ == '__main__':
-    a = [2, [3411, 422], [53, 44, [231, 44], 23], 351, 1231, [[22, 14, 221, 12, 3], 53]]
-    b = _flatten_until_1d(a)
-
-    tt = time.perf_counter()
-    c = flatten(a, ncore=4)
-    print(f'TIME: {time.perf_counter() - tt}, res: {c}')
-
-    tt = time.perf_counter()
-    c = flatten(a, ncore=4)
-    print(f'TIME: {time.perf_counter() - tt}, res: {c}')
-
-    #f = th.compile(flatten, )
-
-    #tt = time.perf_counter()
-    #d = f(a)
-    #print(f'TIME: {time.perf_counter() - tt}, res: {d}')
-
-    pass

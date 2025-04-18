@@ -185,10 +185,13 @@ class _CONFIGS(object):
         if self.START != 'from_scratch' and self.START != 0:
             self.LOAD_CHK_FILE_PATH = self.config['LOAD_CHK_FILE_PATH']
             if not isinstance(self.LOAD_CHK_FILE_PATH, str): raise TypeError('LOAD_CHK_FILE_PATH must be a str.')
+            self.STRICT_LOAD = self.config.get('STRICT_LOAD', True)
+            if not isinstance(self.STRICT_LOAD, bool): raise TypeError(f'STRICT_LOAD must be a boolean, but got {type(self.STRICT_LOAD)}')
         self.EPOCH: int = self.config.get('EPOCH', 0)
         self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', 1)
         self.VAL_PER_STEP: int = self.config.get('VAL_PER_STEP', 10)
         self.VAL_BATCH_SIZE: int = self.config.get('VAL_BATCH_SIZE', self.BATCH_SIZE)
+        self.VAL_IF_TRN_LOSS_BELOW: float = self.config.get('VAL_IF_TRN_LOSS_BELOW', th.inf)
 
         # model info
         self.MODEL_NAME: str = self.config.get('MODEL_NAME', 'Untitled')
@@ -264,6 +267,8 @@ class _CONFIGS(object):
         # debug mode
         self.DEBUG_MODE = self.config.get('DEBUG_MODE', False)
         if not isinstance(self.DEBUG_MODE, bool): raise TypeError('DEBUG_MODE must be a boolean.')
+        self.CHECK_NAN = self.config.get('CHECK_NAN', False)
+        if not isinstance(self.CHECK_NAN, bool): raise TypeError('CHECK_NAN must be a boolean.')
 
         # logging
         # logging.getLogger().disabled = True
@@ -273,7 +278,7 @@ class _CONFIGS(object):
         formatter = logging.Formatter('%(message)s')
         if self.REDIRECT:
             output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-            # check whether path exist
+            # check whether path exists
             if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
             # set log handler
             self.log_handler = logging.FileHandler(output_file, 'w', delay=True)

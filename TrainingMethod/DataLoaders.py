@@ -56,7 +56,8 @@ class DglGraphLoader:
     def __init__(
             self,
             data: Dict[Literal['data', 'labels'] | Literal['data', 'names'], Any],
-            batch_size: int, device: str | th.device = 'cpu',
+            batch_size: int,
+            device: str | th.device = 'cpu',
             shuffle: bool = True,
             is_train: bool = True,
             data_names: Sequence[str] | None = None
@@ -125,13 +126,15 @@ class PyGDataLoader:
     A Data loader to form pygData IN MEMORY
 
     Args:
-        data:
-            when is_train == True:
-                Dict: {
-                    'data': List[pyg.Data],
-                    'label': Dict{'energy': Sequence[float], 'forces': Sequence[np.NDArray[n_atom, 3]]}
-                }. Wherein 'force' is optional.
-            else see `data_names`.
+        data: pyg.Data that contain attributes `pos`, `cell`, `atomic_numbers`, `natoms`, `tags`, `fixed`, `pbc`, `idx`.
+              `pos`: Tensor, atom coordinates.
+              `cell`: Tensor, cell vectors.
+              `atomic_numbers`: Tensor, atomic numbers, corresponding to `pos` one by one.
+              `natoms`: int, number of atoms.
+              `tags`: Tensor, to be compatible with 'FAIR-CHEM' (https://fair-chem.github.io/),
+                      which fixed slab part is set to 0, free slab part is 1, adsorbate is 2.
+              `fixed`: Tensor, fixed tag, which fixed atoms are 0, free atoms are 1.
+              `pbc`: List[bool, bool, bool], where to be periodic at x, y, z directions.
         batch_size: batch size.
         device: the device that data put on.
         shuffle: whether shuffle data.
@@ -147,13 +150,15 @@ class PyGDataLoader:
          or (pyg.Data, data_names | None) [when is_train == False]
 
     """
-    def __init__(self,
-                 data: Dict[Literal['data', 'labels'] | Literal['data', 'names'], Any],
-                 batch_size: int, device: str | th.device = 'cpu',
-                 shuffle: bool = True,
-                 is_train: bool = True,
-                 data_names: Sequence[str] | None = None
-                 ) -> None:
+    def __init__(
+            self,
+            data: Dict[Literal['data', 'labels'] | Literal['data', 'names'], Any],
+            batch_size: int,
+            device: str | th.device = 'cpu',
+            shuffle: bool = True,
+            is_train: bool = True,
+            data_names: Sequence[str] | None = None
+    ) -> None:
 
         # check module
         if pygBatch is None:
@@ -218,6 +223,18 @@ class BatchStructuresDataLoader:
     """
     A Data loader to form BatchStructure
     """
-    def __init__(self):  # TODO
 
-        pass
+    def __init__(
+            self,
+            data_path: str,
+            batch_size: int,
+            device: str | th.device = 'cpu',
+            shuffle: bool = True,
+            is_train: bool = True,
+            data_names: Sequence[str] | None = None
+    ) -> None:
+        self.data_path = data_path
+        self.data_names = data_names
+        self.batchsize = batch_size
+        self._index = 0
+        self.device = device

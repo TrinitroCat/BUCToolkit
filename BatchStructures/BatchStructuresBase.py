@@ -8,18 +8,20 @@ BatchStructure base class.
 #  Environment: Python 3.12
 
 import gc
+import re
 import logging
 import pickle
 import os
+import random
 import sys
+import copy
 import time
 import traceback
 import warnings
 from itertools import accumulate
 import hashlib
-from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple, Any, Hashable
+from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple, Any, Hashable, Iterable
 
-import multiprocessing as mp
 import joblib as jb
 import numpy as np
 
@@ -88,8 +90,8 @@ class BatchStructures(object):
         self.Forces = None  # forces of structures. None | List[np.NdArray[N, 3]]
         self.Dist_mat = None  # distance matrices of structures. None | List[np.NdArray[N, N]]
         # Others
-        self._indices = None
-        Z_dict = {key: i for i, key in enumerate(self._ALL_ELEMENTS, 1)}  # a dict which map element symbols into their atomic numbers.
+        self._indices = None  # a dict of {sample_id: index}, str -> int.
+        Z_dict = {key: i for i, key in enumerate(self._ALL_ELEMENTS, 1)}  # a dict which maps element symbols into their atomic numbers.
         self._Z_dict = Z_dict
         self.Labels = None  # structure labels
 
@@ -132,7 +134,7 @@ class BatchStructures(object):
 
     @Sample_ids.setter
     def Sample_ids(self, val):
-        raise ValueError('Sample_ids cannot be modified')
+        raise ValueError('Sample_ids cannot be directly modified.')
 
     def _generate_checksum_in_mem(self, ):
         checksum = hashlib.sha256()
@@ -194,23 +196,19 @@ class BatchStructures(object):
 
         self.Cells = [_ for _ in self.Cells_]
 
+        self._Sample_ids = self._Sample_ids_.tolist()
+        self.Coords_type = self.Coords_type_.tolist()
+        if self.Energies_ is not None: self.Energies = self.Energies_.tolist()
+        if self.Labels_ is not None: self.Labels = self.Labels_.tolist()
+
         if release_mem:
             self.Numbers_ = None
             self.Elements_ = None
-            self._Sample_ids = self._Sample_ids_.tolist()
             self._Sample_ids_ = None
-            self.Coords_type = self.Coords_type_.tolist()
             self.Coords_type_ = None
-            if self.Energies_ is not None: self.Energies = self.Energies_.tolist()
             self.Energies_ = None
-            if self.Labels_ is not None: self.Labels = self.Labels_.tolist()
             self.Labels_ = None
             gc.collect()
-        else:
-            self._Sample_ids = self._Sample_ids_.tolist()
-            self.Coords_type = self.Coords_type_.tolist()
-            if self.Energies_ is not None: self.Energies = self.Energies_.tolist()
-            if self.Labels_ is not None: self.Labels = self.Labels_.tolist()
 
         self.Mode = 'L'
 
@@ -268,14 +266,18 @@ class BatchStructures(object):
 
         self.Mode = 'A'
 
+    def _update_indices(self, ):
+        if self.Mode == 'L':
+            self._indices = {_: ii for ii, _ in enumerate(self._Sample_ids)}
+        else:
+            self._indices = {_: ii for ii, _ in enumerate(self._Sample_ids_.tolist())}
+
     def _check_id(self, ):
         """ check whether duplication in Sample_ids """
-        if self.Mode == 'L':
-            id_set = set(self._Sample_ids)
-        else:
-            id_set = set(self._Sample_ids_.tolist())
+        if self._indices is None:
+            self._update_indices()
 
-        if len(id_set) != len(self):
+        if len(self._indices) != len(self):
             raise RuntimeError(f'There are duplicate names in the Sample_ids: {set([x for x in self._Sample_ids if self._Sample_ids.count(x) > 1])}')
 
     def _check_len(self, ):
@@ -300,7 +302,7 @@ class BatchStructures(object):
             'If you did not manually modify any attributes in this class, '
             'please report this bug to us.\nSample size of all properties:'
             f' Sample ids: {len(self._Sample_ids)}\n Coordinates: {len(self.Coords)}\n Coordinates type: {len(self.Coords_type)}\n'
-            f' Elements: {len(self.Elements)}\n Element Numbers: {len(self.Numbers)}\n Cells: {len(self.Cells)}\n Fixations: {len(self.Fixed)}'
+            f' Elements: {len(self.Elements)}\n Element Numbers: {len(self.Numbers)}\n Cells: {len(self.Cells)}\n Fixations: {len(self.Fixed)}\n'
             f' Energies: {len(self.Energies) if self.Energies is not None else None}\n'
             f' Forces: {len(self.Forces) if self.Forces is not None else None}\n'
             f' Labels: {len(self.Labels) if self.Labels is not None else None}'
@@ -310,10 +312,13 @@ class BatchStructures(object):
 
     def save(self, path: str, mode: Literal['w', 'a'] = 'w'):
         """
-        Saving this BatchStructures to a memory-mapping file.
+        Saving this BatchStructures to a numpy memory-mapping file.
+        Each attribute in BatchStructures will be saved in the numpy memmap file with the same name.
+        Additionally, file 'head' will record the information which is data type & shape of all attributes, and record which attributes are `None`.
+
         Args:
             path: the saving directory.
-            mode: if 'w', create or overwrite the existing file for reading and writing. if 'a', data will append to the existing file.
+            mode: if 'w', create or overwrite the existing file for reading and writing. If 'a', data will append to the existing file.
 
         Returns: None
 
@@ -337,6 +342,7 @@ class BatchStructures(object):
             raise RuntimeError('Files does not exist.')
         # check self
         if len(self) == 0: raise RuntimeError('BatchStructures are empty now!')
+        self._update_indices()
         self._check_id()
         self._check_len()
 
@@ -458,8 +464,8 @@ class BatchStructures(object):
         WARNING: It would overwrite the existing BatchStructure data. Use `append_from_file` to retain existing data.
         Args:
             path: the file path.
-            data_slice: The piece of data in files to be read. if None, all data in files would be read into memory.
-            mode: the data load mode. 'w' for write or overwrite existing data from data in file; 'a' for appending data in file to existing data.
+            data_slice: The piece of data in files to be read. If None, all data in files would be read into memory.
+            mode: the data load mode. 'W' for write or overwrite existing data from data in file; 'a' for appending data in file to existing data.
 
         Returns: None
 
@@ -467,9 +473,9 @@ class BatchStructures(object):
         # check vars
         if data_slice is not None:
             assert isinstance(data_slice[0], int) and isinstance(data_slice[1], int), (f"`data_slice` must be an integer tuple, "
-                                                                                       f"but occurred ({type(data_slice[0])}, {type(data_slice[1])})")
-            assert data_slice[0] <= data_slice[1], f"`data_slice[0]` cannot be greater than `data_slice[1]`, but occurred {data_slice}"
-        # Read head file
+                                                                                       f"but got ({type(data_slice[0])}, {type(data_slice[1])})")
+            assert data_slice[0] <= data_slice[1], f"`data_slice[0]` cannot be greater than `data_slice[1]`, but got {data_slice}"
+        # Read the head file
         with open(os.path.join(path, 'head'), 'rb') as head:
             head_info = pickle.load(head)
         # Read mmap file
@@ -478,8 +484,8 @@ class BatchStructures(object):
             for i, filename in enumerate(self._ATTR_NAMES):
                 _dtype, _shape = head_info[filename]
                 if filename not in head_info['which_None']:
-                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
-                    _data_dict[filename] = np.asarray(_mmdata)
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='r', shape=_shape)
+                    _data_dict[filename] = np.array(_mmdata)
                     del _mmdata
                     gc.collect()
                 else:
@@ -487,16 +493,16 @@ class BatchStructures(object):
         else:
             #if data_slice[1] > head_info['n_batch']: raise ValueError(f'`data_slice` out of range. Sample number: {head_info['n_batch']}')
             _dtype, _shape = head_info['Batch_indices']
-            natom_slice = np.memmap(os.path.join(path, 'Batch_indices'), dtype=_dtype, mode='c', shape=_shape)
-            natom_slice = np.asarray(natom_slice[data_slice[0]: data_slice[1] + 1])
+            natom_slice = np.memmap(os.path.join(path, 'Batch_indices'), dtype=_dtype, mode='r', shape=_shape)
+            natom_slice = np.array(natom_slice[data_slice[0]: data_slice[1] + 1])
             _dtype, _shape = head_info['Elements_batch_indices']
-            elem_slice = np.memmap(os.path.join(path, 'Elements_batch_indices'), dtype=_dtype, mode='c', shape=_shape)
-            elem_slice = np.asarray(elem_slice[data_slice[0]: data_slice[1] + 1])
+            elem_slice = np.memmap(os.path.join(path, 'Elements_batch_indices'), dtype=_dtype, mode='r', shape=_shape)
+            elem_slice = np.array(elem_slice[data_slice[0]: data_slice[1] + 1])
             for filename in ('Coords', 'Fixed', 'Forces'):
                 if filename not in head_info['which_None']:
                     _dtype, _shape = head_info[filename]
-                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
-                    _data_dict[filename] = np.asarray(_mmdata[natom_slice[0]:natom_slice[-1]])
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='r', shape=_shape)
+                    _data_dict[filename] = np.array(_mmdata[natom_slice[0]:natom_slice[-1]])
                     del _mmdata
                     gc.collect()
                 else:
@@ -504,8 +510,8 @@ class BatchStructures(object):
             for filename in ('Elements', 'Numbers'):
                 if filename not in head_info['which_None']:
                     _dtype, _shape = head_info[filename]
-                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
-                    _data_dict[filename] = np.asarray(_mmdata[elem_slice[0]:elem_slice[-1]])
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='r', shape=_shape)
+                    _data_dict[filename] = np.array(_mmdata[elem_slice[0]:elem_slice[-1]])
                     del _mmdata
                     gc.collect()
                 else:
@@ -513,8 +519,8 @@ class BatchStructures(object):
             for filename in ('Sample_ids', 'Cells', 'Coords_type', 'Energies', 'Labels'):
                 if filename not in head_info['which_None']:
                     _dtype, _shape = head_info[filename]
-                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='c', shape=_shape)
-                    _data_dict[filename] = np.asarray(_mmdata[data_slice[0]:data_slice[1]])
+                    _mmdata = np.memmap(os.path.join(path, filename), dtype=_dtype, mode='r', shape=_shape)
+                    _data_dict[filename] = np.array(_mmdata[data_slice[0]:data_slice[1]])
                     del _mmdata
                     gc.collect()
                 else:
@@ -557,14 +563,14 @@ class BatchStructures(object):
             if self.Mode == 'L':
                 self.append(subcls)
                 del subcls
-                gc.collect()
             else:
                 self._np2list(release_mem=True)
                 self._clear_np()
                 self.append(subcls)
                 self._list2np(release_mem=True)
                 del subcls
-                gc.collect()
+        gc.collect()
+        self._update_indices()
         self._check_id()
         self._check_len()
 
@@ -781,7 +787,7 @@ class BatchStructures(object):
 
     def generate_atom_list(self, force_update: bool = False) -> None:
         r"""
-        Generate attribute self.Atom_list (List[str]) which is the atom lists in order of the sequence of atom coordinates.
+        Generate an attribute self.Atom_list (List[str]) which is the atom lists in order of the atomic coordinates sequence.
 
         Parameters:
             force_update: bool. if False, Atom_list would not be updated when it's not None.
@@ -839,8 +845,54 @@ class BatchStructures(object):
                 self.Coords[i] @= cell
                 self.Coords_type[i] = 'C'
 
-    def rearrange(self, labels: Optional[Dict | List] = None, split_ratio: float = 0.2, n_core: int = 1, verbose: int = 0) -> (
-            Tuple[List[List[np.ndarray]], List[List[np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]):
+    def shuffle(self, seed:int = None):
+        """
+        Shuffle the samples with given random seed.
+        Args:
+            seed: random seed.
+
+        Returns: None
+
+        """
+        # generate indices
+        indx = list(range(len(self)))
+        random.seed(seed)
+        random.shuffle(indx)
+        self.rearrange(indx)
+
+    def rearrange(self, indices: List[int]):
+        """
+        Rearrange the order of samples by given indices.
+        Args:
+            indices: indices of sample orders.
+
+        Returns: None
+
+        """
+        indx = list(indices)
+        if self.Energies is not None:
+            self.Energies = [self.Energies[_] for _ in indx]
+        if self.Forces is not None:
+            self.Forces = [self.Forces[_] for _ in indx]
+        if self.Labels is not None:
+            self.Labels = [self.Labels[_] for _ in indx]
+
+        self._Sample_ids = [self._Sample_ids[_] for _ in indx]  # mp_ids
+        self.Cells = [self.Cells[_] for _ in indx]  # Lattice parameters
+        self.Elements = [self.Elements[_] for _ in indx]  # Element symbols
+        self.Numbers = [self.Numbers[_] for _ in indx]  # Element numbers
+        self.Coords_type = [self.Coords_type[_] for _ in indx]  # coordinates type
+        self.Coords = [self.Coords[_] for _ in indx]  # Atom coordinates
+        self.Fixed = [self.Fixed[_] for _ in indx]  # fixed masks
+
+
+    def sort_split_by_natoms(
+            self,
+            labels: Optional[Dict | List] = None,
+            split_ratio: float = 0.2,
+            n_core: int = 1,
+            verbose: int = 0
+    ) -> (Tuple[List[List[np.ndarray]], List[List[np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]):
         """
         Rearrange samples with different atom number into List[np.array] that list of NDArrays with the same atom number.
         Only work in 'L' Mode.
@@ -970,30 +1022,10 @@ class BatchStructures(object):
         if verbose > 0: self.logger.info(f'Done. Total Time: {time.perf_counter() - t_st}')
         return training_batches, val_batches, training_labels, val_labels, training_args, val_args
 
-    def append(self, batch_structures):
+    def _raw_append(self, batch_structures):
         """
-        Append information of another BatchStructures to self.
-        If original data do not have some properties but appending data do, these properties of original data would be padding with `None`, and vice versa.
-        Args:
-            batch_structures: the BatchStructures to append
-
-        Returns: None
-
+        Directly append without a check.
         """
-        if not isinstance(batch_structures, BatchStructures):
-            raise TypeError('`batch_structures` must be BatchStructures')
-        id_set = set(self._Sample_ids)
-        for i, _ids in enumerate(batch_structures.Sample_ids):
-            if _ids in id_set:
-                raise RuntimeError(f'The {i}th sample in given `batch_structures` has the same sample_id ({_ids}) as existing samples.')
-        self._Sample_ids.extend(batch_structures.Sample_ids)  # mp_ids
-        self.Cells.extend(batch_structures.Cells)  # Lattice parameters
-        self.Elements.extend(batch_structures.Elements)  # Element symbols
-        self.Numbers.extend(batch_structures.Numbers)  # Element numbers
-        self.Coords_type.extend(batch_structures.Coords_type)  # coordinates type
-        self.Coords.extend(batch_structures.Coords)  # Atom coordinates
-        self.Fixed.extend(batch_structures.Fixed)  # fixed masks
-
         if batch_structures.Energies is not None:
             if self.Energies is None:
                 self.Energies = [None, ] * len(self)
@@ -1013,8 +1045,162 @@ class BatchStructures(object):
         elif self.Labels is not None:
             self.Labels.extend([None] * len(batch_structures))
 
-        #self.generate_atom_list(True)
-        #self.generate_atomic_number_list(True)
+        self._Sample_ids.extend(batch_structures.Sample_ids)  # mp_ids
+        self.Cells.extend(batch_structures.Cells)  # Lattice parameters
+        self.Elements.extend(batch_structures.Elements)  # Element symbols
+        self.Numbers.extend(batch_structures.Numbers)  # Element numbers
+        self.Coords_type.extend(batch_structures.Coords_type)  # coordinates type
+        self.Coords.extend(batch_structures.Coords)  # Atom coordinates
+        self.Fixed.extend(batch_structures.Fixed)  # fixed masks
+
+    def append(self, batch_structures, strict: bool = True):
+        """
+        Append information of another BatchStructures to self.
+        If original data do not have some properties but appending data do,
+         these properties of original data would be padded with `None`, and vice versa.
+        Args:
+            batch_structures: the BatchStructures to append
+            strict: If True, `batch_structures` contains any id which is already in `self` would raise an Error;
+                    otherwise, the data will be overwritten if encountered the same id.
+
+        Returns: None
+
+        """
+        if not isinstance(batch_structures, BatchStructures):
+            raise TypeError('`batch_structures` must be BatchStructures')
+        if self._indices is None:
+            self._update_indices()
+        for i, _ids in enumerate(batch_structures.Sample_ids):
+            if _ids in self._indices:
+                if strict:
+                    raise RuntimeError(f'The {i}th sample in given `batch_structures` has the same sample_id ({_ids}) as existing samples.')
+                else:
+                    self.remove(_ids)
+        self._raw_append(batch_structures)
+        self._update_indices()
+
+    def extend(self, batch_structures_list: Sequence, strict: bool = True):
+        """
+        Extend a list of BatchStructures to self.
+        If original data do not have some properties but appending data do,
+         these properties of original data would be padded with `None`, and vice versa.
+        Args:
+            batch_structures_list: the BatchStructures to append
+            strict: If True, `batch_structures` contains any id which is already in `self` would raise an Error;
+                    otherwise, the data will be overwritten if encountered the same id.
+
+        Returns: None
+
+        """
+        if not isinstance(batch_structures_list, Sequence):
+            raise TypeError('`batch_structures_list` must be BatchStructures')
+        _temp_bs = BatchStructures()
+        _bs: BatchStructures
+        for _bs in batch_structures_list:
+            assert isinstance(_bs, BatchStructures), f'Encountered invalid type {type(_bs)} in `batch_structures_list`'
+            _temp_bs._raw_append(_bs)
+        _temp_bs._check_id()
+        # check repetitions of id
+        if self._indices is None:
+            self._update_indices()
+        for i, _ids in enumerate(_temp_bs.Sample_ids):
+            if _ids in self._indices:
+                if strict:
+                    raise RuntimeError(f'The {i}th sample in given `batch_structures` has the same sample_id ({_ids}) as existing samples.')
+                else:
+                    self.remove(_ids)
+        self._raw_append(_temp_bs)
+        self._update_indices()
+        self._check_id()
+        self._check_len()
+
+    def remove(self, key: int | str | slice):
+        """
+        Remove the data of given `key` in-place.
+        Args:
+            key: int for index, str for Sample_ids, slice for a slice of indices.
+
+        Returns: None
+
+        """
+        # check key
+        if isinstance(key, int):
+            if key >= len(self): raise ValueError(f'key {key} is out of range {len(self)}')
+            indx = slice(key, key + 1) if key != -1 else slice(key, None)
+        elif isinstance(key, slice):
+            indx = key
+        elif isinstance(key, str):
+            if self._indices is None:
+                self._update_indices()
+                self._check_id()
+            if key not in self._indices: raise KeyError(f'the input key `"{key}"` does not exist.')
+            indx = self._indices[key]
+            indx = slice(indx, indx + 1)
+        else:
+            raise TypeError(f'Invalid type of key: {type(key)}')
+
+        # load data
+        if self.Atom_list is not None:
+            del self.Atom_list[indx]
+        if self.Atomic_number_list is not None:
+            del self.Atomic_number_list[indx]
+        del self.Sample_ids[indx]
+        del self.Cells[indx]
+        del self.Elements[indx]
+        del self.Numbers[indx]
+        del self.Coords[indx]
+        del self.Coords_type[indx]
+        del self.Fixed[indx]
+        if self.Energies is not None: del self.Energies[indx]
+        if self.Forces is not None:   del self.Forces[indx]
+        if self.Labels is not None:   del self.Labels[indx]
+        # update id dict
+        self._update_indices()
+
+    def remove_copy(self, key: int | str | slice):
+        """
+        Remove the data of given `key` in a copy of self and return. The original data is not affected.
+        Args:
+            key: int for index, str for Sample_ids, slice for a slice of indices.
+
+        Returns: copy of
+
+        """
+        # check key
+        if isinstance(key, int):
+            if key >= len(self): raise ValueError(f'key {key} is out of range {len(self)}')
+            indx = slice(key, key + 1) if key != -1 else slice(key, None)
+        elif isinstance(key, slice):
+            indx = key
+        elif isinstance(key, str):
+            if self._indices is None:
+                self._update_indices()
+                self._check_id()
+            if key not in self._indices: raise KeyError(f'the input key `"{key}"` does not exist.')
+            indx = self._indices[key]
+            indx = slice(indx, indx + 1)
+        else:
+            raise TypeError(f'Invalid type of key: {type(key)}')
+
+        # load data
+        sub_self = copy.deepcopy(self)
+        if self.Atom_list is not None:
+            del sub_self.Atom_list[indx]
+        if self.Atomic_number_list is not None:
+            del sub_self.Atomic_number_list[indx]
+        del sub_self.Sample_ids[indx]
+        del sub_self.Cells[indx]
+        del sub_self.Elements[indx]
+        del sub_self.Numbers[indx]
+        del sub_self.Coords[indx]
+        del sub_self.Coords_type[indx]
+        del sub_self.Fixed[indx]
+        if self.Energies is not None: del sub_self.Energies[indx]
+        if self.Forces is not None:   del sub_self.Forces[indx]
+        if self.Labels is not None:   del sub_self.Labels[indx]
+        sub_self._update_indices()
+
+        return sub_self
 
     def contain_any(self, elements: List[str] | Set[str]):
         """
@@ -1227,13 +1413,13 @@ class BatchStructures(object):
 
         return sub_self
 
-    def select_by_prop(self, prop: Any, prop_range: Tuple[float, float]):
+    def select_by_prop(self, prop: str, prop_range: Tuple[float, float]):
         """
         Return a view of BatchStructures that given properties of BatchStructures between prop_range.
         The given properties must be comparable.
 
         Args:
-            prop: an attribute of self e.g., Number, Energies
+            prop: an attribute name of self e.g., "Number", "Energies"
             prop_range: Tuple[float, float], range of prop to select. It is a left closed right open interval.
 
         Returns:
@@ -1248,7 +1434,8 @@ class BatchStructures(object):
         if prop_range[0] >= prop_range[1]: raise ValueError('Interval error.')
         if self.Energies is None: raise RuntimeError('No Energy Information yet.')
 
-        for i, ener in enumerate(prop):
+        properties = getattr(self, prop)
+        for i, ener in enumerate(properties):
             # judge
             if (ener < prop_range[1]) and (ener >= prop_range[0]):
                 sub_self._Sample_ids.append(self.Sample_ids[i])
@@ -1262,6 +1449,28 @@ class BatchStructures(object):
                 if sub_self.Forces is not None: sub_self.Forces.append(self.Forces[i])  # type: ignore
                 if sub_self.Labels is not None: sub_self.Labels.append(self.Labels[i])  # type: ignore
 
+        return sub_self
+
+    def select_by_sample_id(self, pattern: str):
+        """
+        Return a view of BatchStructures in which sample id could match the given pattern.
+        Regular expressions are supported.
+        For non-string sample id, str(*) would be applied first to convert id into string.
+        Args:
+            pattern: the (regular expressions) pattern to match sample ids in self.
+
+        Returns: BatchStructures
+
+        """
+        _pattern = re.compile(pattern)
+        sub_self = BatchStructures()
+        for i, name in enumerate(self.Sample_ids):
+            _name = str(name)
+            has_match = re.match(_pattern, _name)
+            if has_match is not None:
+                sub_self._raw_append(self[i])
+        sub_self._check_id()
+        sub_self._check_len()
         return sub_self
 
     def elem_distribution(self, count_for: Literal['Atom', 'Structure'] = 'Structure'):
@@ -1323,10 +1532,13 @@ class BatchStructures(object):
         qq = (Qid & Qcoo & Qct & Qcel & Qelm & Qnum & Qfix & Qe & Qf & Ql)
         return qq
 
-    def __getitem__(self, key: int | str | slice):  # tips: this method was not efficient and used to occasionally inquire information
+    def __getitem__(self, key: int | str | slice | Iterable):  # tips: this method was not efficient and used to occasionally inquire information
         """
         Args:
-            key: if int, inquire the `key`th data; if other Hashable type, inquire the data that Samp_id is `key`.
+            key: if `int`, inquiring the `key`th data;
+                 if other `Hashable` types (e.g., str), inquire the data which Samp_id is `key`;
+                 if `slice`, inquiring the range which slice indicates.
+                 if `Iterable`, each element in the `key` will be recursively inquired and appended to return.
 
         Returns: a subclass of BatchStructure.
         """
@@ -1334,15 +1546,26 @@ class BatchStructures(object):
         if isinstance(key, int):
             if key >= len(self): raise ValueError(f'key {key} is out of range {len(self)}')
             indx = slice(key, key + 1) if key != -1 else slice(key, None)
+
         elif isinstance(key, slice):
             indx = key
-        else:
+
+        elif isinstance(key, str):
             if self._indices is None:
+                self._update_indices()
                 self._check_id()
-                self._indices = {_id: ii for ii, _id in enumerate(self._Sample_ids)}
             if key not in self._indices: raise KeyError(f'the input key `"{key}"` does not exist.')
             indx = self._indices[key]
             indx = slice(indx, indx + 1)
+
+        elif isinstance(key, Iterable):  # use a recursive strategy
+            sub_self = BatchStructures()
+            for _indx_ in key:
+                sub_self._raw_append(self[_indx_])
+            return sub_self
+
+        else:
+            raise TypeError(f'Invalid type of key: {type(key)}')
         # load data
         if self.Atom_list is None:
             atomlist = None
@@ -1369,22 +1592,19 @@ class BatchStructures(object):
 
         return sub_self
 
-    def __setitem__(self, key, value, *args, **kwargs):
-        if isinstance(value, BatchStructures):
+    def __setitem__(self, key: int | str | slice, value, *args, **kwargs):
+        if not isinstance(value, BatchStructures):
             raise TypeError('The set value must be a BatchStructure type.')
-        if isinstance(key, (int, slice)):
+        if not isinstance(key, (int, slice, str)):
             raise TypeError(f'`key` does not support type {type(key)}')
         if key not in value:
             raise ValueError(f'The sample id `{key}` does not in given value.')
         elif key not in self:
             self.append(value)
         else:
-            self[key] = value
-
-    def help(self, ):  # TODO
-        self.logger.info(
-            'Manual of BatchStructures:\n'
-        )
+            raise NotImplementedError(
+                'Directly modifying the data of `key` is not implemented yet. You may use self.append with `strict = False` instead.'
+            )
 
     def show(self, number: int | slice):
         """

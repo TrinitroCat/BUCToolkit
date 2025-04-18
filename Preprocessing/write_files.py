@@ -6,13 +6,12 @@
 
 import os
 import warnings
-from itertools import accumulate
 from typing import Sequence, List, Literal, Tuple
 import joblib as jb
 import numpy as np
 
 # from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
-from BM4Ckit._print_formatter import STRING_ARRAY_FORMAT, AS_PRINT_COORDS, FLOAT_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import STRING_ARRAY_FORMAT, AS_PRINT_COORDS, FLOAT_ARRAY_FORMAT
 
 
 class WritePOSCARs:

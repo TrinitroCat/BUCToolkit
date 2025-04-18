@@ -13,7 +13,7 @@ import torch as th
 
 import numpy as np
 
-from BM4Ckit.utils._Masses import ATOMIC_SYMBOL
+from BM4Ckit.utils._Element_info import ATOMIC_SYMBOL
 
 
 class RandReplace:

@@ -7,7 +7,6 @@
 import os
 import time
 import traceback
-import warnings
 from typing import Any, Literal, Dict
 
 import numpy as np
@@ -16,14 +15,20 @@ from torch import nn
 
 from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
 from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
-from BM4Ckit._print_formatter import FLOAT_ARRAY_FORMAT
-from BM4Ckit.utils._Masses import ATOMIC_NUMBER
-from BM4Ckit.utils import IrregularTensorReformat
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
 
 
 class StructureOptimization(_CONFIGS):
     """
-    Structure optimization for relaxation and transition state.
+    The class of structure optimization for relaxation and transition state.
+    Users need to set the dataset and dataloader manually.
+
+    Args:
+        config_file: the path of input file.
+        data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph.
+        verbose: control the verboseness of output.
+        device: the device that models run on.
 
     Input file parameters:
           ALGO: Literal[CG, BFGS, MIX, FIRE], the optimization algo.
@@ -48,7 +53,13 @@ class StructureOptimization(_CONFIGS):
           MASS: float = 20.0
     """
 
-    def __init__(self, config_file: str, data_type: Literal['pyg', 'dgl'] = 'pyg', verbose: int = 0, device: str | th.device = 'cpu') -> None:
+    def __init__(
+            self,
+            config_file: str,
+            data_type: Literal['pyg', 'dgl'] = 'pyg',
+            verbose: int = 0,
+            device: str | th.device = 'cpu'
+    ) -> None:
         super().__init__(config_file, device)
 
         self.config_file = config_file
@@ -112,14 +123,16 @@ class StructureOptimization(_CONFIGS):
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH)
+            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
                 _model.load_state_dict(chk_data['model_state_dict'], strict=False)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
             epoch_now = chk_data['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
-            warnings.warn('The model was not read trained parameters from checkpoint file. \nI HOPE YOU KNOW WHAT YOU ARE DOING!', RuntimeWarning)
+            self.logger.warning(
+                'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
+            )
             epoch_now = 0
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
@@ -323,11 +336,12 @@ class StructureOptimization(_CONFIGS):
                     if self.verbose > 0:
                         self.logger.info('-' * 100)
                     n_c += 1
+
                 except Exception as e:
-                    self.logger.warning(f'An error occurred in {n_c}th batch. Error: {e}.')
+                    self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
                     if self.verbose > 1:
                         excp = traceback.format_exc()
-                        self.logger.warning(f"traceback:\n{excp}")
+                        self.logger.warning(f"Traceback:\n{excp}")
                     n_c += 1
 
             if self.verbose: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
@@ -341,9 +355,12 @@ class StructureOptimization(_CONFIGS):
                 return X_dict
 
         except Exception as e:
-            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n')
+            th.cuda.synchronize()
+            excp = traceback.format_exc()
+            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
+            th.cuda.synchronize()
             pass
 
     def TS(self, model):

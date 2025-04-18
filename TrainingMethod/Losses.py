@@ -1,6 +1,6 @@
-'''
-
-'''
+"""
+Build-in Losses function
+"""
 #  Copyright (c) 2024.12.10, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.7b
@@ -8,6 +8,7 @@
 #  Environment: Python 3.12
 
 from typing import Literal, List, Dict, Sequence, Tuple
+import math
 import numpy as np
 import torch as th
 import torch.nn as nn
@@ -15,7 +16,8 @@ import torch.nn.functional as F
 
 class Energy_Force_Loss(nn.Module):
     """
-    A loss function that evaluate both predicted energy and forces.
+    A loss function that evaluates both predicted energy and forces.
+    Both energy & force losses would be averaged over each atom.
 
     Parameters:
         loss_E: the loss function of energy.
@@ -35,11 +37,11 @@ class Energy_Force_Loss(nn.Module):
                  coeff_F: float=1.) -> None:
         super().__init__()
         if loss_E == 'MAE':
-            self.loss_E = nn.SmoothL1Loss()
+            self.loss_E = nn.SmoothL1Loss(reduction='sum')
         elif loss_E == 'MSE':
-            self.loss_E = nn.MSELoss()
+            self.loss_E = nn.MSELoss(reduction='sum')
         elif loss_E == 'SmoothMAE':
-            self.loss_E = nn.SmoothL1Loss()
+            self.loss_E = nn.SmoothL1Loss(reduction='sum')
         else:
             self.loss_E = loss_E
 
@@ -54,12 +56,14 @@ class Energy_Force_Loss(nn.Module):
         self.coeff_F = coeff_F
     
     def forward(self, pred:Dict[Literal['energy', 'forces'], th.Tensor], label:Dict[Literal['energy', 'forces'], th.Tensor]):
-        loss = self.coeff_E * self.loss_E(pred['energy'], label['energy']) + self.coeff_F * self.loss_F(pred['forces'], label['forces'])
+        n_atom = math.prod(pred['forces'].shape[:-1])
+        loss = (self.coeff_E * self.loss_E(pred['energy'], label['energy']) +
+                self.coeff_F * self.loss_F(pred['forces'], label['forces']))/n_atom
         return loss
 
 class Energy_Loss(nn.Module):
     """
-    A loss function that evaluate both predicted energy and forces.
+    A loss function that evaluates both predicted energy and forces.
 
     Parameters:
         loss_E: the loss function of energy.

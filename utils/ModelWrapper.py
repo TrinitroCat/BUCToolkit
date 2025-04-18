@@ -165,18 +165,3 @@ class ResidualsBoostModel(nn.Module):
                     y = {key: y[key] + mod(X)[key] for key in self.output_key}
 
         return y
-
-
-if __name__ == '__main__':
-    from fairchem.core.models import gemnet_oc
-    import yaml
-    with open('/home/ppx/PythonProjects/MAIN/PropDehydro/Pred/template_pred.inp', 'r') as f:
-        config = yaml.safe_load(f)
-    config = config['MODEL_CONFIG']
-
-    modelsxx = MeanModel((gemnet_oc.GemNetOC, gemnet_oc.GemNetOC), (config, config))
-    para_num = sum(p.numel() for p in modelsxx.parameters())
-
-    modelsxx.named_parameters()
-
-    pass
