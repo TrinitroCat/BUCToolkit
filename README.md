@@ -6,7 +6,9 @@ including reading, writing, filtering, modifying, and format conversion of batch
 
 Manuals would be completed soon. You can find the current manuals in [Manual](Manual/).
 
-This project uses the following third-party libraries:
+The project is still in an early version and may change significantly in the future.
+
+These following third-party libraries are used:
 - **PyTorch** (BSD-3-Clause License), Copyright © 2016-present Facebook Inc.  
 - **NumPy** (BSD-3-Clause License), Copyright © 2005-2025 NumPy Developers.  
 See [LICENSES/](LICENSES/) for full license texts.
