@@ -11,6 +11,7 @@ The project is still in an early version and may change significantly in the fut
 These following third-party libraries are used:
 - **PyTorch** (BSD-3-Clause License), Copyright © 2016-present Facebook Inc.  
 - **NumPy** (BSD-3-Clause License), Copyright © 2005-2025 NumPy Developers.
+
 These following third-party libraries are optional:
 - **DGL** (Apache-2.3 License)
 - **torch-geometric** (MIT License)
