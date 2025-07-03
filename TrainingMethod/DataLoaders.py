@@ -92,7 +92,7 @@ class DglGraphLoader:
     def __iter__(self, ) -> Self:
         return self
 
-    def __next__(self, ) -> Tuple[dgl.DGLGraph, Dict[Literal['energy', 'forces'], th.Tensor] | None]:
+    def __next__(self, ) -> "Tuple[dgl.DGLGraph, Dict[Literal['energy', 'forces'], th.Tensor] | None]":
         if self._index * self.batchsize < self._n_samp:
             data = self.data[self._index * self.batchsize: (self._index + 1) * self.batchsize]
             data = dgl.batch(data)

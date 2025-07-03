@@ -427,7 +427,7 @@ class CreateASE:
             return samp
 
         _para = jb.Parallel(n_jobs=n_core, verbose=self.verbose)
-        ase_list = _para(jb.delayed(_base_convert)(symb, feat.Coords[i], feat.Cells[i], True, set_tags) for i, symb in enumerate(feat.Atom_list_))
+        ase_list = _para(jb.delayed(_base_convert)(symb, feat.Coords[i], feat.Cells[i], True, set_tags) for i, symb in enumerate(feat.Atom_list))
 
         if ase_list is None: raise RuntimeError
         if self.verbose: print(f'Done. Total Time: {time.perf_counter() - t_st:<5.4f}')
