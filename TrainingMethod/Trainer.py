@@ -41,14 +41,12 @@ class Trainer(_CONFIGS):
 
     """
 
-    def __init__(self, config_file: str, verbose: int = 0, device: str | th.device = 'cpu') -> None:
-        super().__init__(config_file, device)
+    def __init__(self, config_file: str) -> None:
+        super().__init__(config_file)
 
         self.config_file = config_file
-        self.verbose = verbose
-        self.DEVICE = device
         self.reload_config(config_file)
-        if self.verbose: self.logger.info('Config File Was Successfully Read.')
+        if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
         self._data_loader = None
@@ -178,7 +176,7 @@ class Trainer(_CONFIGS):
 
         try:
             # I/O
-            if self.verbose > 0:
+            if self.VERBOSE > 0:
                 __time = time.strftime("%Y%m%d_%H:%M:%S")
                 para_count_all = sum(p.numel() for p in _model.parameters())
                 para_count_train = sum(p.numel() for p in _model.parameters() if p.requires_grad)
@@ -191,7 +189,9 @@ class Trainer(_CONFIGS):
                     self.logger.info(' RESUME <<')
                 else:
                     self.logger.info(' RESUME (ONLY MODEL PARAMETERS) <<')
+                self.logger.info(f' COMMENTS: {self.COMMENTS}')
                 self.logger.info(f' I/O INFORMATION:')
+                self.logger.info(f'\tVERBOSITY LEVEL: {self.VERBOSE}')
                 if not self.REDIRECT:
                     self.logger.info('\tTRAINING LOG OUTPUT TO SCREEN')
                 else:
@@ -207,7 +207,7 @@ class Trainer(_CONFIGS):
                 self.logger.info(f'\tTOTAL PARAMETERS: {para_count_all}')
                 self.logger.info(f'\tTOTAL TRAINABLE PARAMETERS: {para_count_train}')
                 self.logger.info(f'\tHYPER-PARAMETERS:')
-                if self.verbose > 1:
+                if self.VERBOSE > 1:
                     for hp, hpv in self.MODEL_CONFIG.items():
                         self.logger.info(f'\t\t{hp}: {hpv}')
                 self.logger.info(f' MODEL WILL TRAIN ON {self.DEVICE}')
@@ -223,7 +223,7 @@ class Trainer(_CONFIGS):
                 self.logger.info(f' OPTIMIZER INFORMATION:')
                 __opt_repr = re.split(r'\(\n|\)$|\s{2,}|\n', repr(OPTIMIZER))  # type: ignore
                 self.logger.info(f'\tOPTIMIZER: {__opt_repr[0]}')
-                if self.verbose > 1:
+                if self.VERBOSE > 1:
                     if self._layerwise_opt_configs is not None:
                         _layer_grp_name = list(self._layerwise_opt_configs.keys())
                     else:
@@ -285,7 +285,7 @@ class Trainer(_CONFIGS):
                     else:
                         len_data = len(batch_data)
                     if len_data <= 0:
-                        if self.verbose: self.logger.info(f'An empty batch occurred in step {num_step}. Skipped.')
+                        if self.VERBOSE: self.logger.info(f'An empty batch occurred in step {num_step}. Skipped.')
                         continue
                     # batch device
                     batch_data = batch_data.to(self.DEVICE)
@@ -365,7 +365,7 @@ class Trainer(_CONFIGS):
                         num_update += 1
                         _can_valid = True
                         # print per step
-                        if self.verbose:
+                        if self.VERBOSE:
                             with _LoggingEnd(self.log_handler):
                                 self.logger.info(f'epoch: {i + 1:>6}, ({real_n_samp:>8d}/{n_trn_samp:>8d}), train_loss: {__loss:> 4.4e}')
                                 if len(self.METRICS) > 0:
@@ -381,13 +381,13 @@ class Trainer(_CONFIGS):
                     if _is_start_val and _is_step_to_val and _can_valid:
                         time_val = time.perf_counter()
                         with _LoggingEnd(self.log_handler):
-                            if self.verbose: self.logger.info('VALIDATION...')
+                            if self.VERBOSE: self.logger.info('VALIDATION...')
                         with th.no_grad():
                             _val_loss, _metr_list = self._val(_model, LOSS)
                             # print val results
                             if _val_loss is not None:
                                 history['val_loss'].append(_val_loss)
-                                if self.verbose:
+                                if self.VERBOSE:
                                     self.logger.info('Done.')
                                     with _LoggingEnd(self.log_handler):
                                         self.logger.info(f'Validation loss: {_val_loss:> 4.4e}')
@@ -398,7 +398,7 @@ class Trainer(_CONFIGS):
                                 if self.SAVE_CHK:
                                     if _val_loss < val_loss_old:
                                         with _LoggingEnd(self.log_handler):
-                                            if self.verbose: self.logger.info('Validation loss descent. Saving checkpoint file...')
+                                            if self.VERBOSE: self.logger.info('Validation loss descent. Saving checkpoint file...')
                                         val_loss_old = copy.deepcopy(_val_loss)
                                         states = {
                                             'epoch': i,
@@ -408,9 +408,9 @@ class Trainer(_CONFIGS):
                                         }
                                         if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
                                         th.save(states, os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
-                                        if self.verbose: self.logger.info('Done.')
+                                        if self.VERBOSE: self.logger.info('Done.')
                                     else:
-                                        if self.verbose: self.logger.info(f'Validation loss NOT descent. Minimum loss: {val_loss_old:< 4.4e}.')
+                                        if self.VERBOSE: self.logger.info(f'Validation loss NOT descent. Minimum loss: {val_loss_old:< 4.4e}.')
                         _can_valid = False
 
                     time_gp = time.perf_counter()
@@ -421,10 +421,10 @@ class Trainer(_CONFIGS):
 
             # save the last chkpt.
             if len(history['val_loss']) == 0:  # avoid empty validation loss.
-                if self.verbose: self.logger.info('\nThe model has not yet been validated, skipped saving.')
+                if self.VERBOSE: self.logger.info('\nThe model has not yet been validated, skipped saving.')
             elif self.SAVE_CHK:
                 with _LoggingEnd(self.log_handler):
-                    if self.verbose: self.logger.info('\nSaving the last check point file...')
+                    if self.VERBOSE: self.logger.info('\nSaving the last check point file...')
                 states = {
                     'epoch': self.EPOCH,
                     'model_state_dict': _model.state_dict(),
@@ -433,7 +433,7 @@ class Trainer(_CONFIGS):
                 }
                 if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
                 th.save(states, os.path.join(self.CHK_SAVE_PATH, f'checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
-                if self.verbose: self.logger.info('Done.')
+                if self.VERBOSE: self.logger.info('Done.')
 
         except Exception as e:
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n')
@@ -473,7 +473,7 @@ class Trainer(_CONFIGS):
                 else:
                     len_data = len(val_data)
                 if len_data <= 0:
-                    if self.verbose: self.logger.info(f'An empty batch occurred in validation. Skipped.')
+                    if self.VERBOSE: self.logger.info(f'An empty batch occurred in validation. Skipped.')
                     continue
                 # pred & loss
                 pred_y = model(val_data)

@@ -22,26 +22,55 @@ class _LineSearch:
             method: Literal['Backtrack', 'Wolfe', 'NWolfe', '2PT', '3PT', 'Golden', 'Newton', 'None'],
             maxiter: int = 10,
             thres: float = 0.02,
-            steplength=0.5,
-            factor: float = 0.05,
+            factor: float = 1.5,
     ) -> None:
         self.method = method
         self.maxiter = maxiter
         self.linesearch_thres = thres
-        self.steplength = steplength
         self.factor = factor
+        self.factor2 = 0.9/maxiter  # relaxation factor that might be used in backtracking algo.
         pass
 
-    def _Armijo_cond(self, func: Any | nn.Module, X0: th.Tensor, y0: th.Tensor, grad: th.Tensor, p: th.Tensor, steplength: th.Tensor,
-                     rho: float = 0.05,
-                     func_args: Sequence = tuple(), func_kwargs=None) -> th.Tensor:
+    def _Armijo_cond(
+            self,
+            func: Any | nn.Module,
+            X0: th.Tensor,
+            y0: th.Tensor,
+            grad: th.Tensor,
+            p: th.Tensor,
+            steplength: th.Tensor,
+            rho: float = 0.05,
+            func_args: Sequence = tuple(),
+            func_kwargs=None
+    ) -> th.Tensor:
         if func_kwargs is None:
             func_kwargs = dict()
         with th.no_grad():
             y1 = func(X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
-            if self.is_concat_X: y1 = th.sum(y1, dim=(0, -1), keepdim=True)
+            if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
         a: th.Tensor = (y1 <= (
                 y0 + rho * steplength * (grad.mT @ p)))  # Tensor[bool]: (n_batch, ) = (n_batch, ) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
+        return a  # (n_batch, 1, 1)
+
+    def _inv_Armijo_cond(
+            self,
+            func: Any | nn.Module,
+            X0: th.Tensor,
+            y0: th.Tensor,
+            grad: th.Tensor,
+            p: th.Tensor,
+            steplength: th.Tensor,
+            rho: float = 0.05,
+            func_args: Sequence = tuple(),
+            func_kwargs=None
+    ) -> th.Tensor:
+        if func_kwargs is None:
+            func_kwargs = dict()
+        with th.no_grad():
+            y1 = func(X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
+            if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
+        # Tensor[bool]: (n_batch, 1, 1) = (n_batch, 1, 1) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
+        a: th.Tensor = (y1 >= (y0 + rho * steplength * (grad.mT @ p)))
         return a  # (n_batch, 1, 1)
 
     def _Wolfe_cond(
@@ -50,23 +79,24 @@ class _LineSearch:
             grad_func: Any | nn.Module,
             X0: th.Tensor,
             y0: th.Tensor,
-            grad: th.Tensor,
+            direct_grad0: th.Tensor,
             p: th.Tensor,
             steplength: th.Tensor,
             is_grad_func_contain_y: bool,
-            rho: float = 0.5,
+            rho: float = 0.05,
+            beta: float = 0.9,
             func_args: Sequence = tuple(),
             func_kwargs=None,
             grad_func_args: Sequence = tuple(),
             grad_func_kwargs=None,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """
         Weak Wolfe-Powell condition.
         Args:
             func:
             X0:
             y0:
-            grad:
+            direct_grad0:
             p:
             steplength:
             rho:
@@ -76,7 +106,8 @@ class _LineSearch:
         Returns:
             a: Armijo condition mask
             b: Wolfe gradient condition mask
-            y1:
+            y1: function value at current steplength
+            direct_grad1: direction gradient at current point
 
         """
         if func_kwargs is None:
@@ -85,7 +116,7 @@ class _LineSearch:
         with th.enable_grad():
             Xn.requires_grad_()
             y1 = (func(Xn, *func_args, **func_kwargs)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
-            if self.is_concat_X: y1 = th.sum(y1, keepdim=True)
+            if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
             if is_grad_func_contain_y:
                 dy1 = grad_func(y1, Xn, *grad_func_args, **grad_func_kwargs)
             else:
@@ -96,12 +127,11 @@ class _LineSearch:
         Xn = Xn.detach()
         dy1 = dy1.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
         with th.no_grad():
-            direct_grad0 = grad.mT @ p
             direct_grad1 = dy1.mT @ p
-            a: th.Tensor = (y1 <= (y0 + rho * steplength * (grad.mT @ p)))  # descent cond
-            b = (direct_grad1 > rho * direct_grad0)  # curve cond
+            a: th.Tensor = (y1 <= (y0 + rho * steplength * direct_grad0))  # descent cond
+            b = (direct_grad1 > beta * direct_grad0)  # curve cond
 
-        return a, b, y1, direct_grad0, direct_grad1
+        return a, b, y1, direct_grad1
 
     def _NWolfe_cond(
             self,
@@ -113,7 +143,8 @@ class _LineSearch:
             p: th.Tensor,
             steplength: th.Tensor,
             is_grad_func_contain_y: bool,
-            rho: float = 0.5,
+            rho: float = 0.05,
+            beta: float = 0.9,
             func_args: Sequence = tuple(),
             func_kwargs=None,
             grad_func_args: Sequence = tuple(),
@@ -138,23 +169,29 @@ class _LineSearch:
             y1:
 
         """
-        ds = 1e-4  # finite difference steplength
+        ds = 1e-2  # finite difference steplength
         if func_kwargs is None:
             func_kwargs = dict()
         Xn = X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
         y1 = (func(Xn, *func_args, **func_kwargs)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
-        if self.is_concat_X: y1 = th.sum(y1, keepdim=True)
+        if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
         # detach grad graph
         direct_grad0 = grad.mT @ p  # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) -> (n_batch, 1, 1)
         Xn_a = Xn + ds * p.view(self.n_batch, self.n_atom, self.n_dim)
         Xn_b = Xn - ds * p.view(self.n_batch, self.n_atom, self.n_dim)
         direct_grad1 = ((func(Xn_a, *func_args, **func_kwargs) - func(Xn_b, *func_args, **func_kwargs)) /
                         (2 * ds)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
-        if self.is_concat_X: direct_grad1 = th.sum(direct_grad1, keepdim=True)
+        if self.is_concat_X: direct_grad1 = th.sum(direct_grad1 * self.had_converge_mask, keepdim=True)
         a: th.Tensor = (y1 <= (y0 + rho * steplength * (grad.mT @ p)))  # descent cond
-        b = (direct_grad1 > rho * direct_grad0)  # curve cond
+        b = (direct_grad1 > beta * direct_grad0)  # curve cond
 
         return a, b, y1, direct_grad0, direct_grad1
+
+    def _backtrack_update(self, steplength_in, i_: int):
+        # applied shrinking
+        steplength_out = (steplength_in - (steplength_in - 1e-4)*((i_ + 1)/self.maxiter)**self.factor)
+        # update factor. If not converge, decrease the factor.
+        return steplength_out
 
     def __call__(
             self,
@@ -164,12 +201,16 @@ class _LineSearch:
             y0: th.Tensor,
             grad: th.Tensor,
             p: th.Tensor,
+            steplength: th.Tensor|float,
             is_grad_func_contain_y: bool,
             func_args: Sequence = tuple(),
             func_kwargs=None,
             grad_func_args: Sequence = tuple(),
             grad_func_kwargs=None,
+            converge_mask: th.Tensor|None = None  # the mask of the batch that has been converged has the same shape as y0
     ) -> th.Tensor:
+        self.had_converge_mask = ~converge_mask if converge_mask is not None else th.ones_like(y0)
+        self.steplength = steplength
         if func_kwargs is None:
             func_kwargs = dict()
         if grad_func_kwargs is None:
@@ -179,18 +220,25 @@ class _LineSearch:
         # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
         if self.n_batch != y0.shape[0]:
             if self.n_batch == 1:
-                y0 = th.sum(y0, dim=(0, -1), keepdim=True)
+                y0 = th.sum(y0 * self.had_converge_mask, dim=(0, -1), keepdim=True)
                 self.is_concat_X = True
             else:
                 raise RuntimeError(f'Batch size of X ({self.n_batch}) and y ({y0.shape[0]}) do not match.')
         else:
             self.is_concat_X = False
+        # reformat input
+        grad = th.atleast_3d(grad)
+        p = th.atleast_3d(p)
 
         self.device = X0.device
-        steplength = th.full((self.n_batch, 1, 1), self.steplength, device=self.device)
+        if isinstance(self.steplength, float):
+            steplength = th.full((self.n_batch, 1, 1), self.steplength, device=self.device)
+        elif self.steplength.shape != (self.n_batch, 1, 1):
+            raise RuntimeError(f'Expected a steplength with shape {(self.n_batch, 1, 1)}, but got {self.steplength.shape}')
         is_converge = False
         _steplength = steplength
-        if self.method == 'Backtrack':
+        if self.method == 'Backtrack':  # Adaptive backtrack
+            self.factor = max(self.factor, 0.2)
             with th.no_grad():
                 for i in range(self.maxiter):
                     mask = self._Armijo_cond(func, X0, y0, grad, p, _steplength, rho=0.05, func_args=func_args, func_kwargs=func_kwargs)
@@ -198,81 +246,97 @@ class _LineSearch:
                         is_converge = True
                         break
                     # A kind of 'slow' backtrack.
-                    _steplength = th.where(mask, _steplength,
-                                           steplength * ((self.maxiter - 2 - i) ** 2 / (self.maxiter - 1) ** 2) ** (1. / self.factor))
+                    _steplength = th.where(mask, _steplength, self._backtrack_update(steplength, i))
 
                 if not is_converge: warnings.warn(f'linesearch did not converge in {self.maxiter} steps.', RuntimeWarning)
                 return th.where(_steplength > 1.e-4, _steplength, 1.e-4)  # (n_batch, 1, 1)
 
-        elif self.method == 'Wolfe_old':  # advance & retreat algo.
-            a = 0.5
-            for i in range(self.maxiter):
-                armijo_mask, curve_mask, y1, direct_grad0, direct_grad1 = (
-                    self._Wolfe_cond(
-                        func,
-                        grad_func,
-                        X0,
-                        y0,
-                        grad,
-                        p,
-                        _steplength,
-                        is_grad_func_contain_y,
-                        rho=0.05,
-                        func_args=func_args,
-                        func_kwargs=func_kwargs
-                    )
-                )
-                if th.all(armijo_mask * curve_mask):
-                    is_converge = True
-                    break
-                _steplength = th.where(armijo_mask, _steplength, _steplength * self.factor)
-                _steplength = th.where(armijo_mask * (~curve_mask), _steplength * (((1 - a) * self.factor + a) / self.factor), _steplength)
+        elif self.method == '_raise_backtrack':  # advance & retreat algo.
+            self.factor = max(self.factor, 0.2)
+            with th.no_grad():
+                for i in range(self.maxiter):
+                    mask = self._inv_Armijo_cond(func, X0, y0, grad, p, _steplength, rho=0.05, func_args=func_args, func_kwargs=func_kwargs)
+                    if th.all(mask):
+                        is_converge = True
+                        break
+                    # A kind of 'slow' backtrack.
+                    _steplength = th.where(mask, _steplength, self._backtrack_update(steplength, i))
 
-            if not is_converge: warnings.warn(f'line search did not converge in {self.maxiter} steps.', RuntimeWarning)
-            return _steplength  # (n_batch, 1, 1) 
+                if not is_converge: warnings.warn(f'linesearch did not converge in {self.maxiter} steps.', RuntimeWarning)
+                return th.where(_steplength > 1.e-4, _steplength, 1.e-4)  # (n_batch, 1, 1)
 
         elif (self.method == 'Wolfe') or (self.method == 'NWolfe'):  # 2-points interpolation algo.
             a1 = th.zeros_like(_steplength)  # init min step length
-            a2 = 2. * _steplength  # init max step length
+            direct_grad0 = grad.mT @ p
+            self.factor = max(self.factor, 0.2)
             if self.method == 'Wolfe':
                 wolfCond = self._Wolfe_cond
             else:
                 wolfCond = self._NWolfe_cond
 
-            neg_mask = th.full_like(_steplength, False, dtype=th.bool)
+            cumulative_mask = th.full_like(_steplength, False, dtype=th.bool)
+            stored_values = th.zeros_like(_steplength)
             for i in range(self.maxiter):
-                armijo_mask, curve_mask, y1, direct_grad0, direct_grad1 = (
+                armijo_mask, curve_mask, y1, direct_grad1 = (
                     wolfCond(
-                        func, grad_func, X0, y0, grad, p, _steplength, is_grad_func_contain_y, rho=0.05,
+                        func, grad_func, X0, y0, direct_grad0, p, _steplength, is_grad_func_contain_y, rho=0.05,
                         func_args=func_args, func_kwargs=func_kwargs, grad_func_args=grad_func_args, grad_func_kwargs=grad_func_kwargs
                     )
                 )
-                if th.all(armijo_mask * (curve_mask + neg_mask)):
+                if th.all(armijo_mask * curve_mask):
                     is_converge = True
                     break
-                # Armijo cond. judge; interpolation
+
                 with th.no_grad():
+                    # Armijo cond. judge; interpolation step
+                    interp2 = a1 - (direct_grad0 * (_steplength - a1) ** 2) / (2 * (y1 - y0 - direct_grad0 * (_steplength - a1)))  # 2nd interp
+                    bt = (_steplength - (steplength - 1e-4) * (1 / self.maxiter))  # backtrack
+                    interval_mask = (interp2 <= 0.) + (interp2 > 2 * self.steplength)
+                    shrink_step = th.where(
+                        interval_mask,
+                        bt,
+                        interp2
+                    )
                     _steplength_temp = th.where(
                         armijo_mask,
                         _steplength,
-                        a1 - (direct_grad0 * (_steplength - a1) ** 2) / (2 * (y1 - y0 - direct_grad0 * (_steplength - a1)))
+                        shrink_step
                     )
-
+                    # save steplength that 1st time satisfied Armijo condition.
+                    first_time_mask = armijo_mask * (~cumulative_mask)
+                    stored_values = th.where(first_time_mask, _steplength_temp, stored_values)
+                    cumulative_mask = cumulative_mask + armijo_mask
                     # Wolfe curve. cond. judge; extrapolation
+                    # 3rd extrapolation
+                    exterp3 = _steplength + (direct_grad1 * (_steplength - a1)) / (direct_grad0 - direct_grad1)
+                    linexterp = _steplength + (2 * self.steplength - _steplength)/self.maxiter
+                    interval_mask2 = (exterp3 <= 0.) + (exterp3 > 2 * self.steplength)
+                    extend_step = th.where(
+                        interval_mask2,
+                        linexterp,
+                        exterp3
+                    )
                     _steplength_temp = th.where(
-                        armijo_mask * (~curve_mask) + neg_mask,
-                        _steplength + (direct_grad1 * (_steplength - a1)) / (direct_grad0 - direct_grad1),
+                        armijo_mask * (~curve_mask),
+                        extend_step,
                         _steplength_temp
                     )
-                    # if step length < 0, use backtrack instead
-                    _steplength = th.where(
-                        _steplength_temp < 0.,
-                        steplength * ((self.maxiter - 2 - i) ** 2 / (self.maxiter - 1) ** 2) ** (1. / self.factor),
-                        _steplength_temp
-                    )
-                    neg_mask = th.where(_steplength_temp < 0., True, False)
 
-            if not is_converge: warnings.warn(f'linesearch did not converge in {self.maxiter} steps.', RuntimeWarning)
+                    # minimum steplength
+                    _steplength = th.where(
+                        _steplength_temp < 1e-4,
+                        1e-4,
+                        _steplength_temp
+                    )
+
+            if not is_converge:
+                warnings.warn(f'linesearch did not converge in {self.maxiter} steps.', RuntimeWarning)
+                _steplength = th.where(
+                    cumulative_mask,
+                    stored_values,
+                    1e-4
+                )
+
             return _steplength  # (n_batch, 1, 1)
 
         elif self.method == '2PT_':

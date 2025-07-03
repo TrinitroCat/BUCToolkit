@@ -13,8 +13,21 @@ def scatter_reduce(
         src: th.Tensor,
         batch_indices: th.Tensor,
         dim: int = -1,
-        ops: Literal['sum', 'prod', 'mean', 'amin', 'amax'] = 'sum'
+        ops: Literal['sum', 'prod', 'mean', 'amin', 'amax'] = 'sum',
+        init_value: float|int|bool = 0.
 ) -> th.Tensor:
+    """
+    scatter_reduce method that reduces element in `src` with the same indices in `batch_indices` by `ops`.
+    Args:
+        src: source tensor
+        batch_indices: indices tensor
+        dim: reduce dimension
+        ops: reduce operation
+        init_value: default value of the output tensor that reduced values filled in.
+
+    Returns:
+
+    """
     # manage batch_indices
     _batch_indices = batch_indices.clone().to(th.int64)
     if dim < 0:
@@ -26,7 +39,7 @@ def scatter_reduce(
     # main
     src_shape = list(src.shape)
     src_shape[dim] = th.max(_batch_indices).item() + 1
-    out = th.zeros(src_shape, device=src.device)
+    out = th.full(src_shape, init_value, device=src.device)
     out.scatter_reduce_(
         dim,
         _batch_indices,

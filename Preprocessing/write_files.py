@@ -67,6 +67,16 @@ class WritePOSCARs:
                              f' It should be type: List | Tuple, length: {n_batch}')
         if fixed is None:
             fixed = [np.full_like(_, 1, dtype=np.int8) for _ in coords]
+        # check len
+        if isinstance(file_name_list, Sequence):
+            if not (len(file_name_list) == len(cells) == len(atom_labels) == len(atom_numbers) == len(coords) == len(system_list) == len(fixed)):
+                raise ValueError(
+                    f'Inconsistent length of inputs.'
+                    f'length of file_name_list, cells, atom_labels, atom_numbers, coords, system_list, fixed: '
+                    f'{
+                    (len(file_name_list), len(cells), len(atom_labels), len(atom_numbers), len(coords), len(system_list), len(fixed))
+                    }'
+                )
         # check parallel
         tot_cores = jb.cpu_count()
         if not isinstance(ncore, int):
@@ -145,7 +155,7 @@ class WritePOSCARs:
             raise TypeError(f'Unknown type of coord, type : {type(coord)}')
         if not (isinstance(output_path, str) and isinstance(file_name, str) and isinstance(system, str)):
             raise TypeError(f'output_path||file_name||system must be strings, '
-                            f'but type {type(output_path)}||{type(file_name)}||{type(system)} occurred.')
+                            f'but got type {type(output_path)}||{type(file_name)}||{type(system)}.')
         elif coord_type != 'C' and coord_type != 'D':
             raise ValueError(f'Unknown coord_type : "{coord_type}"')
 

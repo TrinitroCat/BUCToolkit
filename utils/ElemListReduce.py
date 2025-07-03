@@ -15,6 +15,7 @@ def elem_list_reduce(
         atom_list: List[str|int]|np.ndarray
 ) -> Tuple[List[str], List[int], List[int]]:
     """
+    Convert a dense element list (atomic number corresponds to coordinates one by one) into VASP-like compressed format.
 
     Args:
         atom_list:

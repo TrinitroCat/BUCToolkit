@@ -1,27 +1,33 @@
-#  Copyright (c) 2024.12.10, BM4Ckit.
+""" Calculating Normal Mode Vibration Frequencies """
+#  Copyright (c) 2025.5.19, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.7b
-#  File: StuctureOptimization.py
+#  File: VibrationAnalysis.py
 #  Environment: Python 3.12
 
 import os
 import time
 import traceback
+import warnings
 from typing import Any, Literal, Dict
 
 import numpy as np
 import torch as th
 from torch import nn
 
-from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
-from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from BM4Ckit.BatchOptim.frequency import Frequency
+from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_regularBatch_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
-from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
+from BM4Ckit.utils._Element_info import ATOMIC_NUMBER, MASS, N_MASS
+
+REVISED_FLOAT_ARRAY_FORMAT = FLOAT_ARRAY_FORMAT  # reduce the line_width to exhibit eigen-frequencies.
+REVISED_FLOAT_ARRAY_FORMAT['max_line_width'] = 64
 
 
-class StructureOptimization(_CONFIGS):
+class VibrationAnalysis(_CONFIGS):
     """
-    The class of structure optimization for relaxation and transition state.
+    The class of normal mode frequencies calculation by finite difference algo.
+    Due to the huge computation cost, it would run sequentially instead of batched.
     Users need to set the dataset and dataloader manually.
 
     Args:
@@ -31,91 +37,36 @@ class StructureOptimization(_CONFIGS):
         device: the device that models run on.
 
     Input file parameters:
-          ALGO: Literal[CG, BFGS, MIX, FIRE], the optimization algo.
-          ITER_SCHEME: Literal['PR+', 'FR', 'PR', 'WYL'], only use for ALGO=CG, the iteration scheme of CG. Default: PR+.
-          E_THRES: float, threshold of Energy difference (eV). Default: 1e-4.
-          F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
-          MAXITER: int, the maximum iteration numbers. Default: 300.
-          STEPLENGTH: float, the initial step length for line search. Default: 0.5.
+        BLOCK_SIZE: int, the batch size of points (i.e., one structure image of finite difference) for parallel computing at one time. Default: 1.
+        DELTA: float, the step length of finite difference. Default: 1e-2.
+        SAVE_HESSIAN: bool, whether to save calculated Hessian matrix. Default: False.
 
-          LINESEARCH: Literal[Backtrack, Golden, Wolfe], only used for ALGO=CG, BFGS or MIX.
-            'Backtrack' with Armijo's cond., 'Golden' for exact line search by golden sec. Algo., 'Wolfe' for advance & retreat algo. With weak Wolfe cond.
-          LINESEARCH_MAXITER: the maximum iteration numbers of line search, only used for CG, BFGS and MIX. Default: 10.
-          LINESEARCH_THRES: float, threshold of exact line search. Only used for LINESEARCH=Golden.
-          LINESEARCH_FACTOR: A factor in linesearch. Shrinkage factor for "Backtrack" & "Wolfe", scaling factor in interval search for "Golden". Default: 0.6.
-
-          # Following parameters are only for ALGO=FIRE
-          ALPHA:
-          ALPHA_FAC:
-          FAC_INC:
-          FAC_DEC: float = 0.5
-          N_MIN: int = 5
-          MASS: float = 20.0
     """
 
     def __init__(
             self,
             config_file: str,
             data_type: Literal['pyg', 'dgl'] = 'pyg',
-            verbose: int = 0,
-            device: str | th.device = 'cpu'
     ) -> None:
-        super().__init__(config_file, device)
+        super().__init__(config_file)
 
         self.config_file = config_file
         assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
         self.data_type = data_type
-        self.verbose = verbose
-        self.DEVICE = device
         self.reload_config(config_file)
-        if self.verbose: self.logger.info('Config File Was Successfully Read.')
+        if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
         self._data_loader = None
 
-        __relax_dict = {'CG': CG, 'BFGS': QN, 'FIRE': FIRE}
-        if self.RELAXATION is None:
-            raise RuntimeError('Structure Optimization Algorithm was NOT Set.')
-        if self.RELAXATION['ALGO'] == 'BFGS':
-            _iterschem = 'BFGS'
-            iterschem = 'iter_scheme'
-        elif self.RELAXATION['ALGO'] == 'MIX':
-            _iterschem = self.RELAXATION.get('ITER_SCHEME', 'PR+')
-            iterschem = 'iterschem_CG'  # iter_scheme QN was automatically set to 'BFGS'
-        elif self.RELAXATION['ALGO'] == 'CG':
-            _iterschem = self.RELAXATION.get('ITER_SCHEME', 'PR+')
-            iterschem = 'iter_scheme'
-        else:
-            _iterschem = 'FIRE'
-            iterschem = 'iter_scheme'
-        self.Stru_Opt = __relax_dict[self.RELAXATION['ALGO']]
-        if self.RELAXATION['ALGO'] != 'FIRE':
-            self.Stru_Opt_config = {iterschem: _iterschem,
-                                    'E_threshold': self.RELAXATION.get('E_THRES', 1.e-4),
-                                    'F_threshold': self.RELAXATION.get('F_THRES', 0.05),
-                                    'maxiter': self.RELAXATION.get('MAXITER', 300),
-                                    'linesearch': self.RELAXATION.get('LINESEARCH', 'Backtrack'),
-                                    'linesearch_maxiter': self.RELAXATION.get('LINESEARCH_MAXITER', 10),
-                                    'linesearch_thres': self.RELAXATION.get('LINESEARCH_THRES', 0.05),
-                                    'linesearch_factor': self.RELAXATION.get('LINESEARCH_FACTOR', 0.6),
-                                    'steplength': self.RELAXATION.get('STEPLENGTH', 0.5),
-                                    'device': self.DEVICE,
-                                    'verbose': self.verbose}
-        else:
-            self.Stru_Opt_config = {'E_threshold': self.RELAXATION.get('E_THRES', 1.e-4),
-                                    'F_threshold': self.RELAXATION.get('F_THRES', 0.05),
-                                    'maxiter': self.RELAXATION.get('MAXITER', 300),
-                                    'steplength': self.RELAXATION.get('STEPLENGTH', 0.5),
-                                    'alpha': self.RELAXATION.get('ALPHA', 0.1),
-                                    'alpha_fac': self.RELAXATION.get('ALPHA_FAC', 0.99),
-                                    'fac_inc': self.RELAXATION.get('FAC_INC', 1.1),
-                                    'fac_dec': self.RELAXATION.get('FAC_DEC', 0.5),
-                                    'N_min': self.RELAXATION.get('ALPHA_FAC', 5),
-                                    'mass': self.RELAXATION.get('MASS', 20),
-                                    'device': self.DEVICE,
-                                    'verbose': self.verbose}
+        self.Vib_config = {
+            'method': self.VIBRATION.get('METHOD', 'Coord'),
+            'block_size': int(self.VIBRATION.get('BLOCK_SIZE', 1)),
+            'delta': float(self.VIBRATION.get('DELTA', 1e-2)),
+        }
+        self.is_save_Hessian = bool(self.VIBRATION.get('SAVE_HESSIAN', False))
 
-    def relax(self, model):
+    def run(self, model):
         """
         Parameters:
             model: the input model which is `uninstantiated` nn.Module class.
@@ -151,16 +102,18 @@ class StructureOptimization(_CONFIGS):
 
         # I/O
         try:
-            if self.verbose > 0:
+            if self.VERBOSE > 0:
                 __time = time.strftime("%Y%m%d_%H:%M:%S")
                 para_count = sum(p.numel() for p in _model.parameters() if p.requires_grad)
                 self.logger.info('*' * 60 + f'\n TIME: {__time}')
-                self.logger.info(' TASK: Structure Optimization <<')
+                self.logger.info(' TASK: Vibration Calculation <<')
                 if (self.START == 0) or (self.START == 'from_scratch'):
                     self.logger.info(' FROM_SCRATCH <<')
                 else:
                     self.logger.info(' RESUME <<')
+                self.logger.info(f' COMMENTS: {self.COMMENTS}')
                 self.logger.info(f' I/O INFORMATION:')
+                self.logger.info(f'\tVERBOSITY LEVEL: {self.VERBOSE}')
                 if not self.REDIRECT:
                     self.logger.info('\tPREDICTION LOG OUTPUT TO SCREEN')
                 else:
@@ -171,7 +124,7 @@ class StructureOptimization(_CONFIGS):
                 self.logger.info(f' MODEL NAME: {self.MODEL_NAME}')
                 self.logger.info(f' MODEL INFORMATION:')
                 self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
-                if self.verbose > 1:
+                if self.VERBOSE > 1:
                     for hp, hpv in self.MODEL_CONFIG.items():
                         self.logger.info(f'\t\t{hp}: {hpv}')
                 self.logger.info(f' MODEL WILL RUN ON {self.DEVICE}')
@@ -180,8 +133,8 @@ class StructureOptimization(_CONFIGS):
                 else:
                     self.logger.info(f' PREDICTIONS WILL SAVE IN MEMORY AND RETURN AS A VARIABLE.')
                 self.logger.info(f' ITERATION INFORMATION:')
-                self.logger.info(f'\tALGO: {self.RELAXATION["ALGO"]}')
-                for _algo_conf_name, _algo_conf in self.Stru_Opt_config.items():
+                self.logger.info(f'\tALGO: {"Finite Difference" if self.Vib_config["method"] == "Coord" else "Automatic Differentiation"}')
+                for _algo_conf_name, _algo_conf in self.Vib_config.items():
                     self.logger.info(f'\t{_algo_conf_name}: {_algo_conf}')
                 self.logger.info(f'\tBATCH SIZE: {self.BATCH_SIZE}' +
                                  f'\n\tTOTAL SAMPLE NUMBER: {self.n_samp}\n' +
@@ -192,7 +145,7 @@ class StructureOptimization(_CONFIGS):
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = _Model_Wrapper_regularBatch_pyg(_model)
 
                 def get_batch_size(data):
                     return len(data)
@@ -210,8 +163,12 @@ class StructureOptimization(_CONFIGS):
                 def get_fixed_mask(data):
                     return data.fixed.unsqueeze(0)
 
+                def rebatched_graph(single_graph, batch_size: int):
+                    return model_wrap.pygBatch.from_data_list([single_graph, ]*batch_size)
+
             else:
                 model_wrap = _Model_Wrapper_dgl(_model)
+                raise NotImplementedError  # TODO <<<< complete dgl format
 
                 def get_batch_size(data):
                     return data.num_nodes('atom')
@@ -229,21 +186,29 @@ class StructureOptimization(_CONFIGS):
                 def get_fixed_mask(data):
                     return data.nodes['atom'].data.get('fix', None)
 
-            optimizer = self.Stru_Opt(**self.Stru_Opt_config)
+            vib_calculator = Frequency(**self.Vib_config)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             # To record the minimized X, Force, and Energies.
-            X_dict = dict()
-            F_dict = dict()
-            E_dict = dict()
+            freq_dict = dict()
+            normal_mode_dict = dict()
+            hessian_dict = dict()
+            if (self.VERBOSE < 1) and (not self.SAVE_PREDICTIONS):
+                warnings.warn('WARNING: Neither`verbose` nor `self.SAVE_PREDICTIONS` was turn on.'
+                              ' Hence NOTHING WILL BE OUTPUT. I HOPE YOU KNOW WHAT YOU ARE DOING!')
+                if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
             for val_data, val_label in val_set:
                 try:  # Catch error in each loop & continue, instead of directly exit.
                     t_bt = time.perf_counter()
                     # to avoid get an empty batch
-                    if get_batch_size(val_data) <= 0:
-                        if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
+                    n_batch = get_batch_size(val_data)
+                    if n_batch <= 0:
+                        if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
+                    elif n_batch > 1:
+                        if self.VERBOSE: self.logger.error(f'Vibration do not support batched calculation yet. You should set BATCH_SIZE to 1.')
+                        raise RuntimeError(f'Vibration do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                     # batch indices
                     batch_indx1 = th.sum(
                         th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1
@@ -259,20 +224,26 @@ class StructureOptimization(_CONFIGS):
                         X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
                     CELL = get_cell_vec(val_data)
                     fixed_mask = get_fixed_mask(val_data)
+                    element_list = get_atomic_number(val_data)
+                    # get masses
+                    masses = list()
+                    for _Elem in element_list:
+                        masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
+                    masses = th.tensor(masses, dtype=th.float32, device=self.DEVICE)
+                    masses = masses.unsqueeze(-1).expand_as(X_init)  # (n_batch, n_atom, n_dim)
                     # get id
                     idx = get_indx(val_data)
                     idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
                     n_s += len(batch_indx)
-                    if self.verbose > 0:
+                    if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
-                        self.logger.info(f'Relaxation Batch {n_c}.')
+                        self.logger.info(f'Vibration Calculation Batch {n_c}.')
                         cell_str = np.array2string(
                             CELL, **FLOAT_ARRAY_FORMAT
                         ).replace("[", " ").replace("]", " ")
                         self.logger.info(f'Structure names: {idx}\n')
                         self.logger.info(f'Cell Vectors:\n{cell_str}\n')
                         # print Atoms Information
-                        element_list = get_atomic_number(val_data)
                         elem_list = list()
                         _element_list = list()
                         if batch_indx is not None:
@@ -307,52 +278,60 @@ class StructureOptimization(_CONFIGS):
                         for i, ee in enumerate(elem_list):
                             self.logger.info(f'Structure {i:>5d}: {ee}')
                         self.logger.info('*' * 100)
-                    # relax
-                    min_ener, min_x, min_force = optimizer.run(
-                        model_wrap.Energy,
-                        X_init,
-                        model_wrap.Grad,
-                        func_args=(val_data,),
-                        grad_func_args=(val_data,),
-                        is_grad_func_contain_y=False,
-                        output_grad=True,
-                        batch_indices=batch_indx,
-                        fixed_atom_tensor=fixed_mask,
-                    )
+                    # run
+                    #graph = rebatched_graph(val_data, )  # TODO, determining batch size in priori is difficult because batch size may change in calculation.
                     with th.no_grad():
-                        min_ener.detach_()
-                        min_x.detach_()
-                        min_force.detach_()
-
-                        min_x = min_x.cpu().squeeze(0)
-                        min_force = min_force.cpu().squeeze(0)
-                        min_ener = min_ener.cpu()
-                        x_list = th.split(min_x, batch_indx)
-                        f_list = th.split(min_force, batch_indx)
-                        X_dict.update({_id: x_list[i] for i, _id in enumerate(idx)})
-                        F_dict.update({_id: f_list[i] for i, _id in enumerate(idx)})
-                        E_dict.update({_id: min_ener[i] for i, _id in enumerate(idx)})
+                        eig_freq, normal_mode = vib_calculator.normal_mode(
+                            model_wrap.Energy,
+                            X_init.squeeze(0),  # input format: (n_atom, 3) instead of (1, n_atom, 3) like structure opt. or MD.
+                            masses.squeeze(0),
+                            func_args=(val_data,),
+                            grad_func=model_wrap.Grad,
+                            grad_func_args=(val_data,),
+                            fixed_atom_tensor=fixed_mask.squeeze(0),
+                            save_hessian=self.is_save_Hessian
+                        )
+                        if self.is_save_Hessian:
+                            vib_hessian = vib_calculator.hessian
                     # Print info
-                    if self.verbose > 0:
+                    eig_freq_THz = eig_freq * 15.63330456  # THz
+                    eig_freq_cm1 = eig_freq * 521.47091 # cm^-1
+                    if self.VERBOSE > 0:
+                        self.logger.info(f'Eigen Vibration Frequency (cm^-1):\n{
+                        np.array2string(eig_freq_cm1.numpy(force=True), **REVISED_FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        }')
+                        self.logger.info(f'\nNormal Mode:\n{
+                        np.array2string(normal_mode.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        }\n')
+                        if self.is_save_Hessian:
+                            self.logger.info(f'Hessian Matrix:\n{
+                            np.array2string(vib_hessian.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                            }\n')
                         self.logger.info('-' * 100)
+                    if self.SAVE_PREDICTIONS:
+                        freq_dict[idx] = eig_freq
+                        normal_mode_dict[idx] = normal_mode
+                        if self.is_save_Hessian:
+                            hessian_dict[idx] = vib_hessian
                     n_c += 1
 
                 except Exception as e:
                     self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
-                    if self.verbose > 1:
+                    if self.VERBOSE > 1:
                         excp = traceback.format_exc()
                         self.logger.warning(f"Traceback:\n{excp}")
                     n_c += 1
 
-            if self.verbose: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
+            if self.VERBOSE: self.logger.info(f'VIBRATION CALCULATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
             if self.SAVE_PREDICTIONS:
                 t_save = time.perf_counter()
                 with _LoggingEnd(self.log_handler):
-                    if self.verbose: self.logger.info(f'SAVING RESULTS...')
-                th.save({'Coordinates': X_dict, 'Forces': F_dict, 'Energies': E_dict}, self.PREDICTIONS_SAVE_FILE)
-                if self.verbose: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
-            else:
-                return X_dict
+                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS...')
+                info_dict = {'Frequencies': freq_dict, 'Forces': normal_mode_dict,}
+                if self.is_save_Hessian:
+                    info_dict['Hessian'] = vib_hessian
+                th.save(info_dict, self.PREDICTIONS_SAVE_FILE)
+                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
 
         except Exception as e:
             th.cuda.synchronize()
@@ -362,9 +341,3 @@ class StructureOptimization(_CONFIGS):
         finally:
             th.cuda.synchronize()
             pass
-
-    def TS(self, model):
-        """
-
-        """
-        raise NotImplementedError

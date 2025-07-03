@@ -2,6 +2,8 @@
 
 # global configs
 START: 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH
+DEVICE: 'cuda:0'
+VERBOSE: 1
 REDIRECT: true    # whether output training logs to OUTPUT_PATH or directlt print on screen.
 SAVE_PREDICTIONS: false  # only for predictions. Whether output predictions to a npz file.
 BATCH_SIZE: 1

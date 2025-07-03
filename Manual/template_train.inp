@@ -2,6 +2,8 @@
 
 # global configs
 START: 0          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH
+DEVICE: 'cuda:0'
+VERBOSE: 1
 EPOCH: 10
 BATCH_SIZE: 10
 VAL_BATCH_SIZE: 20 # default is the same as BATCH_SIZE

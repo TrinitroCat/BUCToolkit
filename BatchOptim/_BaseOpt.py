@@ -17,6 +17,7 @@ from torch import nn
 from BM4Ckit.BatchOptim._utils._line_search import _LineSearch
 from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.utils.scatter_reduce import scatter_reduce
 
 
 class _BaseOpt:
@@ -31,6 +32,7 @@ class _BaseOpt:
             linesearch_thres: float = 0.02,
             linesearch_factor: float = 0.6,
             steplength: float = 0.5,
+            use_bb: bool = True,
             device: str | th.device = 'cpu',
             verbose: int = 2
     ) -> None:
@@ -54,6 +56,7 @@ class _BaseOpt:
             linesearch_thres: Threshold for linesearch. Only for "Golden" and "Newton".
             linesearch_factor: A factor in linesearch. Shrinkage factor for "Backtrack", scaling factor in interval search for "Golden" and line steplength for "Newton".
             steplength: The initial step length.
+            use_bb: whether to use Barzilai-Borwein steplength (BB1 or long BB) as initial steplength instead of fixed one.
             device: The device that program runs on.
             verbose: amount of print information.
         
@@ -72,11 +75,11 @@ class _BaseOpt:
         self.linesearch_factor = linesearch_factor
         self.verbose = verbose
         self.device = device
+        self.use_bb = use_bb
         self._line_search = _LineSearch(
             linesearch,
             maxiter=linesearch_maxiter,
             thres=linesearch_thres,
-            steplength=steplength,
             factor=linesearch_factor
         )
         self.E_threshold = E_threshold
@@ -159,11 +162,17 @@ class _BaseOpt:
             batch_indx_dict = {
                 i: slice(_, batch_slice_indx[i + 1]) for i, _ in enumerate(batch_slice_indx[:-1])
             }  # dict of {batch indx: split point slice}
-            batch_indices_tensor = th.tensor(batch_indices, device=self.device)
+            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)
+            batch_tensor = self.batch_tensor
+            self.batch_scatter = th.repeat_interleave(
+                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
+                self.batch_tensor,
+                dim=0
+            )
         else:
             n_inner_batch = 1
             batch_indx_dict = dict()
-            batch_indices_tensor = None
+            batch_tensor = None
         # initialize vars
         E_threshold = self.E_threshold
         F_threshold = self.F_threshold
@@ -209,6 +218,7 @@ class _BaseOpt:
         p = 0.
         self.converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
         g_old = th.full((n_batch, n_atom * n_dim, 1), 1e-6, dtype=th.float32, device=self.device)  # initial old grad
+        displace = th.full_like(g_old, th.inf)
         #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
             self.logger.info('-' * 100)
@@ -246,28 +256,19 @@ class _BaseOpt:
                 # manage the irregular tensors
                 if self.is_concat_X:
                     F_eps = th.abs(X_grad)  # (1, n_batch*n_atom, 3)
-                    f_converge = th.cat([
-                        th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < F_threshold)) for i in range(n_inner_batch)
-                    ])  # Tensor[bool], length == n_inner_batch
+                    f_converge = scatter_reduce(
+                        th.all(F_eps[0] < F_threshold, dim=-1).to(th.int64), self.batch_scatter, 0, 'amin', 1
+                    ).bool()
                     self.converge_mask = (E_eps < E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
+                    _stepsize_converge_mask = self.converge_mask.unsqueeze(0).unsqueeze(-1)
                     converge_str = self.converge_mask.numpy(force=True)
-                    self.converge_mask = th.repeat_interleave(
-                        self.converge_mask.unsqueeze(0).unsqueeze(-1),
-                        batch_indices_tensor,
-                        dim=1
-                    )  # (1, n_inner_batch*n_atom, 1)  # TODO, optimize the repeat_interleave
+                    self.converge_mask = self.converge_mask.unsqueeze(0).unsqueeze(-1)[:, self.batch_scatter, ...]
                 else:
                     F_eps = th.abs(X_grad)  # (n_batch, n_atom, 3)
                     self.converge_mask = ((E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) *
-                                     th.all(F_eps < F_threshold, dim=(1, 2),keepdim=True))  # To stop the update of converged samples.
+                                     th.all(F_eps < F_threshold, dim=(1, 2),keepdim=True))  # (n_batch, 1, 1), to stop the update of converged samples.
+                    _stepsize_converge_mask = self.converge_mask.transpose(-2, -1)
                     converge_str = (self.converge_mask[:, 0, 0]).numpy(force=True)
-                # split batches if specified batch
-                if batch_indices is not None:
-                    X_tup = th.split(X, batch_indices, dim=1)
-                    if self.verbose > 2: F_tup = th.split(- X_grad, batch_indices)
-                else:
-                    X_tup = (X,)
-                    if self.verbose > 2: F_tup = (- X_grad, )
 
                 # Print information / Verbose
                 if self.verbose > 0:
@@ -278,16 +279,27 @@ class _BaseOpt:
                                      f"Converged:    {converge_str}\n "
                                      f"TIME:         {time.perf_counter() - t_st:>6.4f} s")
                 if self.verbose > 1:
+                    # split batches if specified batch
+                    if batch_indices is not None:
+                        X_np = X.numpy(force=True)
+                        X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
+                        if self.verbose > 2:
+                            F_np = (- X_grad).numpy(force=True)
+                            F_tup = np.split(F_np, batch_slice_indx[1:-1], axis=1)
+                    else:
+                        X_tup = (X.numpy(force=True),)
+                        if self.verbose > 2:
+                            F_tup = (- X_grad.numpy(force=True),)
                     self.logger.info(f" Coordinates:\n")
                     X_str = [
-                        np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
                         for xi in X_tup
                     ]
                     [self.logger.info(f'{x_str}\n') for x_str in X_str]
                 if self.verbose > 2:
-                    self.logger.info(f"Gradients (forces):\n")
+                    self.logger.info(f" Forces:\n")
                     X_str = [
-                        np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
                         for xi in F_tup
                     ]
                     [self.logger.info(f'{x_str}\n') for x_str in X_str]
@@ -300,12 +312,26 @@ class _BaseOpt:
 
                 # search directions
                 p = self._update_direction(g, g_old, p, X)  # (n_batch, n_atom*3, 1)
+                # use BB steplength
+                if self.use_bb:
+                    g_go = g - g_old
+                    _steplength = displace.mT@displace/(displace.mT@g_go)  # BB1
+                    _steplength = th.where(
+                        (_steplength < 1.5 * self.steplength) * (_steplength > 1e-4),
+                        _steplength,
+                        self.steplength
+                    )
+                else:
+                    _steplength = self.steplength
                 # search step length -> steplength: (n_batch, 1, 1)
                 alpha = th.where(
-                    self.converge_mask[:, :1, :1],
+                    th.all(_stepsize_converge_mask, dim=1, keepdim=True),
                     0.,
-                    self._line_search(func, grad_func_, X, energies, g, p, is_grad_func_contain_y,
-                                      func_args=func_args, func_kwargs=func_kwargs, grad_func_args=grad_func_args, grad_func_kwargs=grad_func_kwargs)
+                    self._line_search(
+                        func, grad_func_, X, energies, g, p, _steplength, is_grad_func_contain_y,
+                        func_args=func_args, func_kwargs=func_kwargs, grad_func_args=grad_func_args, grad_func_kwargs=grad_func_kwargs,
+                        converge_mask=_stepsize_converge_mask.squeeze((0, -1))
+                    )
                 )
                 # update X
                 displace = alpha * p  # (n_batch, 1, 1) * (n_batch, n_atom*3, 1)
@@ -329,7 +355,7 @@ class _BaseOpt:
                             grad_func_(X, *grad_func_args, **grad_func_kwargs)
                         )
                 energies.detach_()
-                X_grad = X_grad.detach() * atom_masks
+                X_grad = X_grad.detach() * atom_masks * (~self.converge_mask)
                 X.detach_()
                 g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
                 g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
@@ -337,7 +363,7 @@ class _BaseOpt:
                 self._update_algo_param(g, g_old, p, displace)
 
                 # print steplength
-                if self.verbose > 1:
+                if self.verbose > 0:
                     self.logger.info(f" step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}\n")
                 # Check NaN
                 if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
@@ -347,10 +373,35 @@ class _BaseOpt:
         if self.verbose > 0:
             if is_main_loop_converge:
                 self.logger.info(
-                    '-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s'
+                    '-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s\n'
                 )
             else:
-                self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
+                self.logger.info(
+                    '-' * 100 + f'\nSome Structures were NOT Converged yet!\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s\n'
+                )
+
+            if self.verbose < 2:  # verbose = 1, brief mode only output last step coords.
+                # split batches if specified batch
+                if batch_indices is not None:
+                    X_np = X.numpy(force=True)
+                    X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
+                    F_np = (- X_grad).numpy(force=True)
+                    F_tup = np.split(F_np, batch_slice_indx[1:-1], axis=1)
+                else:
+                    X_tup = (X.numpy(force=True),)
+                    F_tup = (- X_grad.numpy(force=True),)
+                self.logger.info(f" Final Coordinates:\n")
+                X_str = [
+                    np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    for xi in X_tup
+                ]
+                [self.logger.info(f'{x_str}\n') for x_str in X_str]
+                self.logger.info(f" Final Forces:\n")
+                X_str = [
+                    np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    for xi in F_tup
+                ]
+                [self.logger.info(f'{x_str}\n') for x_str in X_str]
         else:
             if not is_main_loop_converge: warnings.warn('Some Structures were NOT Converged yet!',
                                                         FaildToConvergeWarning)

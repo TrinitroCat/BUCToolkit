@@ -17,10 +17,9 @@ import yaml
 from torch import nn
 from torch.nn import functional as F
 from torch.optim.lr_scheduler import StepLR, ExponentialLR, ChainedScheduler, ConstantLR, LambdaLR, LinearLR
-from torcheval.metrics.functional import r2_score
 
 from .Losses import Energy_Force_Loss, Energy_Loss
-from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE
+from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 
 from BM4Ckit.utils._CheckModules import check_module
 
@@ -51,16 +50,16 @@ class _CONFIGS(object):
     A base class of loading configs.
     """
 
-    def __init__(self, config_file: str, device: str | th.device = 'cpu') -> None:
+    def __init__(self, config_file: str) -> None:
         self.config_file = config_file
-        self.DEVICE = device
+        self.DEVICE = 'cpu'
         self._OPTIM_DICT = {'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
                             'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'custom': None}
         self._LR_SCHEDULER_DICT = {'StepLR': StepLR, 'ExponentialLR': ExponentialLR, 'ChainedScheduler': ChainedScheduler,
                                    'ConstantLR': ConstantLR, 'LambdaLR': LambdaLR, 'LinearLR': LinearLR, 'custom': None}
         self._LOSS_DICT = {'MSE': nn.MSELoss, 'MAE': nn.L1Loss, 'Hubber': nn.HuberLoss, 'CrossEntropy': nn.CrossEntropyLoss,
                            'Energy_Force_Loss': Energy_Force_Loss, 'Energy_Loss': Energy_Loss, 'custom': None}
-        self._METRICS_DICT = {'MSE': F.mse_loss, 'MAE': F.l1_loss, 'R2': r2_score, 'RMSE': _rmse,
+        self._METRICS_DICT = {'MSE': F.mse_loss, 'MAE': F.l1_loss, 'R2': _r2_score, 'RMSE': _rmse,
                               'E_MAE': E_MAE, 'E_R2': E_R2, 'F_MAE': F_MAE, 'F_MaxE': F_MaxE, 'custom': None}
         self.param = None
         self._has_load_data = False
@@ -183,10 +182,13 @@ class _CONFIGS(object):
         # global information
         self.START = self.config.get('START', 0)
         if self.START != 'from_scratch' and self.START != 0:
-            self.LOAD_CHK_FILE_PATH = self.config['LOAD_CHK_FILE_PATH']
+            self.LOAD_CHK_FILE_PATH: str = self.config['LOAD_CHK_FILE_PATH']
             if not isinstance(self.LOAD_CHK_FILE_PATH, str): raise TypeError('LOAD_CHK_FILE_PATH must be a str.')
-            self.STRICT_LOAD = self.config.get('STRICT_LOAD', True)
+            self.STRICT_LOAD: bool = self.config.get('STRICT_LOAD', True)
             if not isinstance(self.STRICT_LOAD, bool): raise TypeError(f'STRICT_LOAD must be a boolean, but got {type(self.STRICT_LOAD)}')
+        self.COMMENTS: str = self.config.get('COMMENTS', 'None.')
+        self.VERBOSE: int = int(self.config.get('VERBOSE', 1))
+        self.DEVICE: str|th.device = self.config.get('DEVICE', 'cpu')
         self.EPOCH: int = self.config.get('EPOCH', 0)
         self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', 1)
         self.VAL_PER_STEP: int = self.config.get('VAL_PER_STEP', 10)
@@ -292,9 +294,13 @@ class _CONFIGS(object):
 
         # If Structure opt.
         self.RELAXATION = self.config.get('RELAXATION', None)
+        self.TRANSITION_STATE = self.config.get('TRANSITION_STATE', None)
 
         # If Molecular Dynamics
         self.MD = self.config.get('MD', None)
+
+        # If Vibration Calc.
+        self.VIBRATION = self.config.get('VIBRATION', None)
 
 
 class _Model_Wrapper_pyg:
@@ -334,7 +340,7 @@ class _Model_Wrapper_pyg:
             return - ((self._model(graph))['forces']).unsqueeze(0)
         else:
             force = self.forces
-            del self.forces
+            self.forces = None
             return - force.unsqueeze(0)
 
 class _Model_Wrapper_pyg_only_X:
@@ -372,7 +378,7 @@ class _Model_Wrapper_pyg_only_X:
             return - ((self._model(self.graph ))['forces']).unsqueeze(0)
         else:
             force = self.forces
-            del self.forces
+            self.forces = None
             return - force.unsqueeze(0)
 
 
@@ -428,9 +434,51 @@ class _Model_Wrapper_dgl:
             return - ((self._model(graph))['forces']).unsqueeze(0)
         else:
             force = self.forces
-            del self.forces
+            self.forces = None
             return - force.unsqueeze(0)
 
+class _Model_Wrapper_regularBatch_pyg:
+    def __init__(self, model) -> None:
+        """
+        A format transformer for converting Tensor X into PygData.pos
+        Wrap the model(graph, ...) into f(X), but here the batch size of graph is only 1, and the batch size (1st dimension) of X is many.
+        This wrapper would expand batch of graph into the same as X.
 
-def _rmse(x, y, reduction='mean') -> th.Tensor:
-    return th.sqrt(F.mse_loss(x, y, reduction=reduction))
+        Args:
+            model: An instantiate nn.Module
+
+        Methods:
+            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
+            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
+
+        """
+        self._model = model
+        self.forces = None
+        _pyg = check_module('torch_geometric.data')
+        if _pyg is not None:
+            import torch_geometric.data as _pyg
+            self.pygBatch = _pyg.Batch
+        else:
+            ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+        pass
+
+    def Energy(self, X: th.Tensor, graph, return_format: Literal['sum', 'origin'] = 'origin'):
+        self.X = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
+        batch_size = X.size(0)
+        if graph.batch_size == 1:
+            graph = self.pygBatch.from_data_list([graph] * batch_size)
+        graph.pos = self.X
+        y = self._model(graph)  # (n_batch, )
+        energy = y['energy']
+        self.forces = y['forces']
+        if return_format == 'sum':
+            energy = th.sum(energy).unsqueeze(0)
+        return energy
+
+    def Grad(self, X, graph):
+        if self.forces is None:
+            self.Energy(X, graph)
+
+        force = self.forces
+        self.forces = None
+        return - force.unsqueeze(0)

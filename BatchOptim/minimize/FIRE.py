@@ -21,6 +21,7 @@ from torch import nn
 from BM4Ckit.utils._Element_info import MASS, N_MASS
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from .._utils._warnings import FaildToConvergeWarning
+from BM4Ckit.utils.scatter_reduce import scatter_reduce
 
 
 class FIRE:
@@ -162,6 +163,12 @@ class FIRE:
             for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
             n_inner_batch = len(batch_indices)
             batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
+            batch_tensor = th.tensor(batch_indices, device=self.device)
+            self.batch_scatter = th.repeat_interleave(
+                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
+                batch_tensor,
+                dim=0
+            )
             batch_indx_dict = {i: slice(_, batch_slice_indx[i + 1]) for i, _ in enumerate(batch_slice_indx[:-1])}  # dict of {batch indx: split point slice}
         else:
             n_inner_batch = 1
@@ -186,10 +193,6 @@ class FIRE:
             grad_func_ = grad_func_.to(self.device)
 
         X = X.to(self.device)
-        for _args in (func_args, func_kwargs.values(), grad_func_args, grad_func_kwargs.values()):
-            for _arg in _args:
-                if isinstance(_arg, th.Tensor):
-                    _arg.to(self.device)
         # Variables initialize
         v = th.zeros_like(X, device=self.device)
         # manage Atomic Type & Masses
@@ -240,28 +243,32 @@ class FIRE:
                 t_st = time.perf_counter()
                 # split batches if specified batch
                 if batch_indices is not None:
-                    X_tup = th.split(X, batch_indices, dim=1)
+                    X_tup = np.split(X.numpy(force=True), batch_slice_indx[1:-1], axis=1)
+                    if self.verbose > 2:
+                        F_np = F.numpy(force=True)
+                        F_tup = np.split(F_np, batch_slice_indx[1:-1], axis=1)
                     # F_tup = th.split(- X_grad, batch_indices)
                 else:
-                    X_tup = (X,)
-                    # F_tup = (- X_grad, )
+                    X_tup = (X.numpy(force=True),)
+                    F_tup = (F.numpy(force=True),)
                 # Verbose
                 E_eps = th.abs(y - y0)
                 if self.is_concat_X:
                     F_eps = th.abs(F)  # (1, n_batch*n_atom, 3)
-                    f_converge = th.cat([th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < self.F_threshold)) for i in
-                                         range(n_inner_batch)])  # Tensor[bool], length == n_inner_batch
+                    f_converge = scatter_reduce(
+                        th.all(F_eps[0] < self.F_threshold, dim=-1).to(th.int64), self.batch_scatter, 0, 'amin', 1
+                    ).bool()
+                    '''f_converge = th.cat([th.atleast_1d(th.all(F_eps[0, batch_indx_dict[i]] < self.F_threshold)) for i in
+                                         range(n_inner_batch)])  # Tensor[bool], length == n_inner_batch'''
                     converge_mask = (E_eps < self.E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
-                    converge_str = converge_mask.numpy(force=True)
-                    converge_mask = th.repeat_interleave(
-                        converge_mask.unsqueeze(0).unsqueeze(-1),
-                        th.tensor(batch_indices, device=self.device),
-                        dim=1
-                    )  # (1, n_inner_batch*n_atom, 1)
+                    converge_check = converge_mask
+                    converge_str = converge_check.numpy(force=True)
+                    converge_mask = converge_mask.unsqueeze(0).unsqueeze(-1)[:, self.batch_scatter, ...]  # (1, n_batch*n_atom, 3)
                 else:
                     F_eps = th.abs(F)  # (n_batch, n_atom, 3)
                     converge_mask = (E_eps < self.E_threshold).unsqueeze(-1).unsqueeze(-1) * th.all(F_eps < self.F_threshold, dim=(1, 2),
                                                                                                keepdim=True)  # To stop the update of converged samples.
+                    converge_check = converge_mask[:, 0, 0]
                     converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
 
                 if self.verbose > 0:
@@ -274,19 +281,26 @@ class FIRE:
                 if self.verbose > 1:
                     self.logger.info(f" Coordinates:\n")
                     X_str = [
-                        np.array2string(xi.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
                         for xi in X_tup
+                    ]
+                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
+                if self.verbose > 2:
+                    self.logger.info(f" Forces:\n")
+                    X_str = [
+                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        for xi in F_tup
                     ]
                     [self.logger.info(f'{x_str}\n') for x_str in X_str]
 
                 # Criteria
-                if th.all(converge_mask):
+                if th.all(converge_check):  # `converge_check` is shorter than `converge_mask` thus reducing complexity.
                     is_main_loop_converge = True
                     break
 
                 # Forward Euler Algo. to update X & v
                 v = v + F * t / masses  # (n_batch, n_atom, n_dim)
-                X = X + v * t  #* atom_masks
+                X = X + v * t * (~converge_mask)
                 y0 = y.detach().clone()
                 with th.enable_grad():
                     X.requires_grad_()
@@ -321,6 +335,29 @@ class FIRE:
                 self.logger.info('-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s')
             else:
                 self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
+
+            if self.verbose < 2:  # verbose = 1, brief mode only output last step coords.
+                # split batches if specified batch
+                if batch_indices is not None:
+                    X_np = X.numpy(force=True)
+                    X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
+                    F_np = F.numpy(force=True)
+                    F_tup = np.split(F_np, batch_slice_indx[1:-1], axis=1)
+                else:
+                    X_tup = (X.numpy(force=True),)
+                    F_tup = (F.numpy(force=True),)
+                self.logger.info(f" Final Coordinates:\n")
+                X_str = [
+                    np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    for xi in X_tup
+                ]
+                [self.logger.info(f'{x_str}\n') for x_str in X_str]
+                self.logger.info(f" Final Forces:\n")
+                X_str = [
+                    np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    for xi in F_tup
+                ]
+                [self.logger.info(f'{x_str}\n') for x_str in X_str]
         else:
             if not is_main_loop_converge: warnings.warn('Some Structures were NOT Converged yet!', FaildToConvergeWarning)
         # output

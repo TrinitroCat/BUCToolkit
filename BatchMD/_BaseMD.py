@@ -184,15 +184,12 @@ class _BaseMD:
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
         X = X.to(self.device)
-        for _args in (func_args, func_kwargs.values(), grad_func_args, grad_func_kwargs.values()):
-            for _arg in _args:
-                if isinstance(_arg, th.Tensor):
-                    _arg.to(self.device)
         # Generate initial Velocities
         if V_init is not None:
             if V_init.shape != X.shape:
                 raise ValueError(f'V_init and X must have the same shape, but got {V_init.shape} and {X.shape}')
             if self.verbose > 0: self.logger.info('Initial velocities was given, T_init will be ignored.')
+            V_init = V_init.to(self.device)
             V = V_init.detach() * atom_masks
             V = V.to(self.device)
         else:
@@ -273,7 +270,7 @@ class _BaseMD:
                         )
                     Energy = th.sum(_Energy, ).unsqueeze(0)
                 else:
-                    Energy = _Energy
+                    Energy = th.atleast_1d(_Energy)
                 if is_grad_func_contain_y:
                     Forces = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:

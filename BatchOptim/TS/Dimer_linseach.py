@@ -1,4 +1,7 @@
-""" Dimer Algo. for transition state searching. J. Chem. Phys. 1999, 111: 7010. """
+"""
+Dimer Algo. for transition state searching. J. Chem. Phys. 1999, 111: 7010.
+While the steplength determination was revised into line search strategy.
+"""
 
 #  Copyright (c) 2024.12.10, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
@@ -18,7 +21,7 @@ import torch as th
 from torch import nn
 from torch.nn import functional as Fn
 
-from BM4Ckit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT, FLOAT_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)
 
@@ -36,6 +39,8 @@ class Dimer:
             F_threshold: float = 0.05,
             maxiter_trans: int = 100,
             maxiter_rot: int = 10,
+            maxiter_linsearch: int = 10,
+            steplength: float|th.Tensor = 0.5,
             max_steplength: float = 0.5,
             dx: float = 1.e-2,
             device: str | th.device = 'cpu',
@@ -43,14 +48,16 @@ class Dimer:
     ):
 
         warnings.filterwarnings('always')
-        self.E_threshold = float(E_threshold)
-        self.Torque_thres = float(Torque_thres)
-        self.F_threshold = float(F_threshold)
-        self.maxiter_trans = int(maxiter_trans)
+        self.E_threshold = E_threshold
+        self.Torque_thres = Torque_thres
+        self.F_threshold = F_threshold
+        self.maxiter_trans = maxiter_trans
         assert (maxiter_rot > 1) and isinstance(maxiter_rot, int), '`maxiter_rot` must be an integer greater than 1.'
-        self.maxiter_rot = int(maxiter_rot)
-        self.max_steplength = float(max_steplength)
-        self.dx = float(dx)
+        self.maxiter_rot = maxiter_rot
+        self.steplength = steplength
+        self.maxiter_linsearch = maxiter_linsearch
+        self.max_steplength = max_steplength
+        self.dx = dx
         self.device = device
         self.verbose = verbose
 
@@ -133,6 +140,14 @@ class Dimer:
         if (not isinstance(self.maxiter_trans, int)) or (not isinstance(self.maxiter_rot, int)) \
                 or (self.maxiter_trans <= 0) or (self.maxiter_rot <= 0):
             raise ValueError(f'Invalid value of maxiter: {self.maxiter_trans}. It would be an integer greater than 0.')
+        if isinstance(self.steplength, float):
+            self.steplength = th.full((n_batch, 1, 1), self.steplength, device=self.device, dtype=X.dtype)
+        elif isinstance(self.steplength, th.Tensor):
+            if self.steplength.shape != (n_batch, 1, 1):
+                if self.steplength.shape == (n_batch, ):
+                    self.steplength = self.steplength.unsqueeze(-1).unsqueeze(-1)
+                else:
+                    raise ValueError(f'Expected self.steplength has shape of {(n_batch, 1, 1)} or {(n_batch, )}, but got {self.steplength.shape}.')
 
         # set variables device
         if isinstance(func, nn.Module):
@@ -160,9 +175,10 @@ class Dimer:
                 #plist.append(X1[:, None, :, 0].numpy(force=True))  # TEST <<<<<<<<<<<<<
                 #plist.append(X2[:, None, :, 0].numpy(force=True))
                 # Section: Rotate to minimum
-                dth = th.tensor([1e-2, ], device=self.device)
+                dth = th.tensor([1e-3, ], device=self.device)
                 is_rotate_loop_converge = False
-                if self.verbose > 1: self.logger.info('-' * 100)
+                if self.verbose > 1: print('-' * 100)
+                # section ROTATION
                 for j in range(self.maxiter_rot):
                     # original X
                     X_diff_ = X_diff.flatten(-2, -1)
@@ -185,7 +201,7 @@ class Dimer:
                             F2_ = - grad_func_(y2, X2, *grad_func_args, **grad_func_kwargs) * atom_masks
                         else:
                             F2_ = - grad_func_(X2, *grad_func_args, **grad_func_kwargs) * atom_masks
-                    ener = (y1 + y2) / 2.
+                    ener = y1 + y2 / 2.
                     del y1, y2
                     F1_ = F1_.flatten(-2, -1).detach()
                     F2_ = F2_.flatten(-2, -1).detach()
@@ -201,16 +217,14 @@ class Dimer:
                     Curv = ((F2_ - F1_).unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1) / (2 * dX_)  # curvature
                     Torque = th.linalg.norm(Fc_vert_, dim=-1)
                     if self.verbose > 1:
-                        self.logger.info(
-                            f'Iteration:   {i + 1}\n'
-                            f'Rotation:    {j + 1}\n'
-                            f'Energies:    {ener.numpy(force=True)}\n'
-                            f'Curvature:   {Curv.squeeze().numpy(force=True)}\n'
-                            f'Torque:      {Torque.numpy(force=True)}\n'
-                            f'Max Force:   {F_max.numpy(force=True)}'
-                        )
+                        print(f'Iteration:   {i + 1}\n'
+                              f'Rotation:    {j + 1}\n'
+                              f'Energies:    {ener.numpy(force=True)}\n'
+                              f'Curvature:   {Curv.squeeze().numpy(force=True)}\n'
+                              f'Torque:      {Torque.numpy(force=True)}\n'
+                              f'Max Force:   {F_max.numpy(force=True)}')
                     converge_mask = (F_max < self.F_threshold) * (Curv.flatten(-2, -1) <= 0.)
-                    if self.verbose > 1: self.logger.info(f'Converged:   {converge_mask.numpy(force=True)}\n')
+                    if self.verbose > 1: print(f'Converged:   {converge_mask.numpy(force=True)}')
                     if th.all(converge_mask):  # judge transition state
                         is_main_loop_converge = True
                         break
@@ -258,72 +272,61 @@ class Dimer:
                     #plist.append(X2[:, None, :, 0].numpy(force=True))
 
                 if is_main_loop_converge: break
-                if not is_rotate_loop_converge:
-                    self.logger.warning('WARNING: Rotation did not converge!')
-                    warnings.warn('Rotation did not converge!', RuntimeWarning)
+                if not is_rotate_loop_converge: warnings.warn('Rotation did not converge!', RuntimeWarning)
                 # Section: Transition to maximum  <<<
                 # 1D Newton Search
-                Fc_hori_ = th.where(
-                    Curv > 0.,
-                    - ((F_tol_.unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1) * NI_),
-                    F_tol_ - 2 * (F_tol_.unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1) * NI_
-                )  # (n_batch, n_atom * n_dim)
+                Fc_hori_ = th.where(Curv > 0.,
+                                    - ((F_tol_.unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1) * NI_),
+                                    (F_tol_ - 2 * (F_tol_.unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1)) * NI_)  # (n_batch, n_atom * n_dim)
                 direct_ = Fn.normalize(Fc_hori_, dim=-1)
-                # finite difference
-                dx = 1e-2
-                X1_d_ = X1_ + dx * direct_
-                X2_d_ = X2_ + dx * direct_
-                X1_d = X1_d_.reshape(n_batch, n_atom, n_dim)
-                X2_d = X2_d_.reshape(n_batch, n_atom, n_dim)
-                #Xc_d.detach_()
+                # line search
+                rho = 0.05
+                beta = 0.6
+                is_step_converge = False
+                steplength = self.steplength
                 with th.enable_grad():
-                    X1_d.requires_grad_()
-                    X2_d.requires_grad_()
-                    y1_d = func(X1_d, *func_args, **func_kwargs)
-                    y2_d = func(X2_d, *func_args, **func_kwargs)
+                    Xc0 = Xc_.reshape(n_batch, n_atom, n_dim)
+                    Xc0.requires_grad_()
+                    yc = func(Xc0, *func_args, **func_kwargs)
                     if is_grad_func_contain_y:
-                        F1_d = - grad_func_(y1_d, X1_d, *grad_func_args, **grad_func_kwargs) * atom_masks
-                        F2_d = - grad_func_(y2_d, X2_d, *grad_func_args, **grad_func_kwargs) * atom_masks
+                        Fc_tmp = - grad_func_(yc, Xc0, *grad_func_args, **grad_func_kwargs) * atom_masks
                     else:
-                        F1_d = - grad_func_(X1_d, *grad_func_args, **grad_func_kwargs) * atom_masks
-                        F2_d = - grad_func_(X2_d, *grad_func_args, **grad_func_kwargs) * atom_masks
-                del y1_d, y2_d
-                F1_d_ = F1_d.flatten(-2, -1).detach()
-                F2_d_ = F2_d.flatten(-2, -1).detach()
-                Fc_d_ = (F1_d_ + F2_d_) / 2.
-                Fc_d_hori_ = th.where(
-                    Curv > 0.,
-                    - (Fc_d_.unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1) * NI_,
-                    Fc_d_ - (2 * (Fc_d_.unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1)) * NI_
-                )  # (n_batch, n_atom * n_dim)
-                steplength = (- (((Fc_d_hori_ + Fc_hori_) / 2.).unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1)
-                              / (((Fc_d_hori_ - Fc_hori_).unsqueeze(1) @ NI_.unsqueeze(-1)).squeeze(-1) / dx) + dx / 2.)
-                #steplength = - ((Fc_d_hori_ + Fc_hori_)/2.)/((Fc_d_hori_ - Fc_hori_)/dx) + dx/2.
-                steplength = th.where(th.abs(steplength) > self.max_steplength, self.max_steplength, th.abs(steplength))  # limit the step length
-                steplength = th.where(th.abs(steplength) < 1e-2, 0.01, steplength)
-                if self.verbose > 1: self.logger.info(f'step length: {steplength.flatten().numpy(force=True)}\n')
+                        Fc_tmp = - grad_func_(Xc0, *grad_func_args, **grad_func_kwargs) * atom_masks
+                    # (n_batch, 1, n_atom * n_dim) @ (n_batch, n_atom * n_dim, 1) -> (n_batch, 1, 1)
+                    direct_grad0 = Fc_tmp.flatten(-2, -1).unsqueeze(-1).mT @ direct_.unsqueeze(-1)
+                for i_ls in range(self.maxiter_linsearch):
+                    with th.enable_grad():
+                        Xc_tmp = Xc0 + steplength * direct_.reshape(n_batch, n_atom, n_dim)
+                        Xc_tmp.requires_grad_()
+                        yc_tmp = func(Xc_tmp, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
+                        if is_grad_func_contain_y:
+                            Fc_tmp = - grad_func_(yc_tmp, Xc_tmp, *grad_func_args, **grad_func_kwargs) * atom_masks
+                        else:
+                            Fc_tmp = - grad_func_(Xc_tmp, *grad_func_args, **grad_func_kwargs) * atom_masks
+                        # (n_batch, 1, n_atom * n_dim) @ (n_batch, n_atom * n_dim, 1) -> (n_batch, 1, 1)
+                        direct_grad1 = Fc_tmp.flatten(-2, -1).unsqueeze(-1).mT @ direct_.unsqueeze(-1)
+
+                    # note: Linear Search Strategy:
+                    #   for positive curvature, i.e. the convex region, using inverse Armijo cond. to get a sufficient increase;
+                    #   for negative curvature, using curvature cond. in weak Powell-Wolfe cond. to reduce gradient.
+                    energy_rise_mask = yc_tmp >= (yc.unsqueeze(-1).unsqueeze(-1) + rho * steplength * direct_grad0)  # (n_batch, 1, 1)
+                    grad_descent_mask = direct_grad1 <= beta * direct_grad0
+                    stepl_converge_mask = th.where(
+                        Curv > 0.,
+                        energy_rise_mask,
+                        grad_descent_mask
+                    )
+                    if th.all(stepl_converge_mask):
+                        is_step_converge = True
+                        break
+                    steplength = (steplength - (steplength - 1e-4) * ((i_ls + 1) / self.maxiter_linsearch) ** 1.5)
+                if not is_step_converge:
+                    steplength = th.where(steplength > self.max_steplength, self.max_steplength, steplength)
+
+                if self.verbose > 1: print(f'step length: {steplength.flatten().numpy(force=True)}\n')
                 if th.any(th.abs(steplength)) < 1.e-5:
                     warnings.warn(RuntimeWarning('Saddle point does not met while steplength is 0 in some structures. '))
                     break
-                # OUTPUT COORD
-                if self.verbose > 1:
-                    Xc = Xc_.reshape(n_batch, n_atom, n_dim)
-                    X_tup = (Xc.numpy(force=True),)
-                    if self.verbose > 2:
-                        F_tup = (F_tol_.numpy(force=True),)
-                    self.logger.info(f" Coordinates:\n")
-                    X_str = [
-                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                        for xi in X_tup
-                    ]
-                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
-                if self.verbose > 2:
-                    self.logger.info(f" Forces:\n")
-                    X_str = [
-                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                        for xi in F_tup
-                    ]
-                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
                 # update X
                 X1_ = X1_ + steplength * direct_
                 X2_ = X2_ + steplength * direct_
@@ -334,32 +337,12 @@ class Dimer:
         Xc_ = (X1_ + X2_) / 2.
         Xc = Xc_.reshape(n_batch, n_atom, n_dim)
         energies = func(Xc, *func_args, **func_kwargs)
-        # OUTPUT COORD
-        if self.verbose > 0:
-            Xc_ = (X1_ + X2_) / 2.
-            Xc = Xc_.reshape(n_batch, n_atom, n_dim)
-            X_tup = (Xc.numpy(force=True),)
-            F_tup = (F_tol_.numpy(force=True),)
-            self.logger.info(f"Final Coordinates:\n")
-            X_str = [
-                np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                for xi in X_tup
-            ]
-            [self.logger.info(f'{x_str}\n') for x_str in X_str]
-            self.logger.info(f"Final Forces:\n")
-            X_str = [
-                np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                for xi in F_tup
-            ]
-            [self.logger.info(f'{x_str}\n') for x_str in X_str]
         if self.verbose:
             if is_main_loop_converge:
-                self.logger.info('-' * 100 + '\nAll Structures Were Converged.\nMAIN LOOP Done.')
+                print('-' * 100 + '\nAll Structures Were Converged.\nMAIN LOOP Done.')
             else:
-                self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
+                print('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
 
-        if output_grad:
-            return energies, Xc, F_tol_
-        else:
-            return energies, Xc, #plist  # TEST <<<<<<
+        return energies, Xc, #plist  # TEST <<<<<<
 
+        pass

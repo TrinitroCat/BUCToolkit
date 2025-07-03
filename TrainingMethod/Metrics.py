@@ -9,8 +9,41 @@ from typing import Literal, Dict, List, Tuple
 import warnings
 import torch as th
 import torch.nn.functional as F
-from torcheval.metrics.functional import r2_score
 
+
+def _r2_score(y_pred: th.Tensor, y_true: th.Tensor) -> th.Tensor:
+        """
+        Calculate R^2
+        """
+        # initialize
+        y1 = y_pred.float()
+        y2 = y_true.float()
+        if y1.dim() == 1:
+            y1 = y1.view(-1, 1)
+            y2 = y2.view(-1, 1)
+
+        # SS_res
+        ss_res = th.sum((y1 - y2) ** 2, dim=0)
+
+        # SS_tol
+        y1_mean = th.mean(y1, dim=0, keepdim=True)
+        ss_tot = th.sum((y1 - y1_mean) ** 2, dim=0)
+
+        # Main
+        r2 = th.where(
+            ss_tot != 0,
+            1 - (ss_res / ss_tot),
+            th.where(
+                ss_res != 0,
+                -th.inf,
+                th.ones_like(ss_res)
+            )
+        )
+
+        return r2.squeeze()
+
+def _rmse(x, y, reduction='mean') -> th.Tensor:
+    return th.sqrt(F.mse_loss(x, y, reduction=reduction))
 
 def E_MAE(pred: Dict[Literal['energy', 'forces'], th.Tensor],
           label: Dict[Literal['energy', 'forces'], th.Tensor],
@@ -25,14 +58,13 @@ def E_MAE(pred: Dict[Literal['energy', 'forces'], th.Tensor],
 
 
 def E_R2(pred: Dict[Literal['energy', 'forces'], th.Tensor],
-         label: Dict[Literal['energy', 'forces'], th.Tensor],
-         multioutput: Literal['uniform_average', 'raw_values', 'variance_weighted'] = 'uniform_average'):
+         label: Dict[Literal['energy', 'forces'], th.Tensor],):
     if len(pred['energy']) <= 2:
         r2 = th.tensor([1.], dtype=th.float32)
         warnings.warn('Input samples less than 2, r2 was set to 1.', RuntimeWarning)
     else:
         with th.no_grad():
-            r2 = r2_score(pred['energy'], label['energy'], multioutput=multioutput)
+            r2 = _r2_score(pred['energy'], label['energy'])
     return r2
 
 

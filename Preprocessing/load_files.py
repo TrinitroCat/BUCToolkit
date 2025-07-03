@@ -29,6 +29,8 @@ __all__ = [
     'ExtXyz2Feat',
     'load_from_csv',
     'Cif2Feat',
+    'load_from_structures',
+    'Output2Feat'
 
 ]
 
@@ -82,6 +84,19 @@ def load_from_csv(
         }  # a dict of {sample_id: energy}
 
     return energy_dict
+
+def load_from_structures(path: str):
+    """
+    Load BatchStructure memory-mapping files from `path` and return this BatchStructures.
+    Args:
+        path: the path of BatchStructure memory-mapping files.
+
+    Returns: BatchStructures with read data.
+
+    """
+    f = BatchStructures()
+    f.load(path)
+    return f
 
 
 class POSCARs2Feat(BatchStructures):
@@ -1218,10 +1233,6 @@ class Output2Feat(BatchStructures):
     """
     def __init__(self, path: str, verbose: int = 1) -> None:
         super().__init__()
-        ase_io = check_module('ase.io')
-        if ase_io is None:
-            raise ImportError(f'`ASETraj2Feat` requires the ase package which is not found.')
-        self.ase_io = ase_io
         self.path = path
         self.verbose = verbose
         self.Energies = list()
@@ -1290,21 +1301,40 @@ class Output2Feat(BatchStructures):
             with open(os.path.join(self.path, file_name), 'r') as _f:
                 data = _f.readlines()
             # identify tasks
+            assert len(data) > 0, f'Empty data occurred.'
             task_tag = None
+            is_task_opt = None
+            is_task_md = None
             for line in data:
-                if re.search(r'TASK: Structure Optimization <<', line) is not None:
-                    task_tag = 'opt'
-                    Id_pattern = re.compile(r'Structure names:\s\[(.+)]')
-                    Elem_tag = re.compile(r'Structure\s*[0-9]+:\s*(.*)$')
-                    Iter_pattern = re.compile(r'ITERATION\s*([0-9]+)')
-                    E_pattern = re.compile(r'\s*Energies: +\[([+\s0-9e.-]+)]')
-                    F_tag = re.compile(r'\s*Gradients (forces):')
-                    Coo_tag = re.compile(r'\s*Coordinates:')
-                    Cell_tag = re.compile(r'Cell Vectors:')
+                tmp = re.search(r'VERBOSITY LEVEL: (.*)$', line)
+                if tmp is not None:
+                    data_verbosity = int(tmp.group(1))
+                    continue
+                tmp = re.search(r'TASK: Structure Optimization <<', line)
+                if tmp is not None:
+                    is_task_opt = tmp
+                    continue
+                tmp = re.search(r'TASK: Molecular Dynamics <<', line)
+                if tmp is not None:
+                    is_task_md = tmp
+                    continue
+                EOF = re.match(r'^ENTERING MAIN', line)  # match the end of head information
+                if EOF is not None:
                     break
-                elif re.search(r'TASK: Molecular Dynamics <<', line) is not None:
-                    task_tag = 'md'
-                    raise NotImplementedError
+            if is_task_opt is not None:
+                task_tag = 'opt'
+                Id_pattern = re.compile(r'Structure names:\s\[(.+)]')
+                Elem_tag = re.compile(r'Structure\s*[0-9]+:\s*(.*)$')
+                Iter_pattern = re.compile(r'ITERATION\s*([0-9]+)')
+                E_pattern = re.compile(r'\s*Energies: +\[([+\s0-9e.-]+)]')
+                F_tag = re.compile(r'\s*Forces:')
+                Coo_tag = re.compile(r'\s*Coordinates:')
+                Cell_tag = re.compile(r'Cell Vectors:')
+                Final_Coo_tag = re.compile(r'^ Final Coordinates:')
+                Final_F_tag = re.compile(r'^ Final Forces:')
+            elif is_task_md is not None:
+                task_tag = 'md'
+                raise NotImplementedError
             if task_tag is None: raise RuntimeError(f'Unknown task type.')
 
             i_batch = -1
@@ -1312,7 +1342,7 @@ class Output2Feat(BatchStructures):
             for i, line in enumerate(data):
                 is_name = re.match(Id_pattern, line)
                 if is_name is not None:  # it is the name line
-                    name = is_name.group(1).replace('\'', '').split(',')
+                    name = re.split(', *', is_name.group(1).replace('\'', ''))
                     i_batch += 1
                     n_batch = len(name)
                     cell_temp = list()
@@ -1349,59 +1379,108 @@ class Output2Feat(BatchStructures):
                     elements_temp.append(_elem)
                     elem_numbers_temp.append(_number)
                     continue
-                # main iterations
-                is_in_iter = re.match(Iter_pattern, line)
-                if is_in_iter is not None:
-                    _samp_id = is_in_iter.group(1)
-                    for ii in range(n_batch):
-                        samp_id.append(f'{file_name}_{name[ii]}_iter{_samp_id}')
-                        cell.append(cell_temp[-n_batch + ii])
-                        elements.append(elements_temp[-n_batch + ii])
-                        elem_numbers.append(elem_numbers_temp[-n_batch + ii])
-                    continue
-                # energy
-                is_energy = re.match(E_pattern, line)
-                if is_energy is not None:
-                    _ener = is_energy.group(1).split()
-                    for _ in _ener:
-                        energies.append(float(_))
-                    continue
-                # coords
-                is_coo = re.match(Coo_tag, line)
-                if is_coo is not None:
-                    _coo = list()
-                    for _sub_line in data[i+2:]:
-                        is_empty = re.match(r'^\s*$', _sub_line)
-                        if is_empty is not None:
-                            _coo = np.asarray(_coo, dtype=np.float32)
-                            coo.append(_coo)
-                            fix.append(np.ones_like(_coo, dtype=np.int8))
-                            _coo = list()
-                            continue
-                        is_numbers = re.match(number_pattern, _sub_line)
-                        if is_numbers is not None:
-                            _numbers = is_numbers.group().split()
-                            _coo.append(_numbers)
-                        else:
-                            break  # neither empty line nor numbers, thus skipping
-                    continue
-                # forces
-                is_forc = re.match(F_tag, line)
-                if is_forc is not None:
-                    _forc = list()
-                    for _sub_line in data[i + 2:]:
-                        is_empty = re.match(r'^\s*$', _sub_line)
-                        if is_empty is not None:
-                            forces.append(np.asarray(_forc, dtype=np.float32))
-                            _forc = list()
-                            continue
-                        is_numbers = re.match(number_pattern, _sub_line)
-                        if is_numbers is not None:
-                            _numbers = is_numbers.group().split()
-                            _forc.append(_numbers)
-                        else:
-                            break  # neither empty line nor numbers, thus skipping
-                    continue
+                # Main iterations. Here each iteration would repeat the global information, e.g., cell, elements, numbers, etc.
+                if data_verbosity > 1:  # for verbosity == 1, only the last coords. will be output
+                    is_in_iter = re.match(Iter_pattern, line)
+                    if is_in_iter is not None:
+                        _samp_id = is_in_iter.group(1)
+                        for ii in range(n_batch):
+                            samp_id.append(f'{file_name}_{name[ii]}_iter{_samp_id}')
+                            cell.append(cell_temp[-n_batch + ii])
+                            elements.append(elements_temp[-n_batch + ii])
+                            elem_numbers.append(elem_numbers_temp[-n_batch + ii])
+                        continue
+                    # energy
+                    is_energy = re.match(E_pattern, line)
+                    if is_energy is not None:
+                        _ener = is_energy.group(1).split()
+                        for _ in _ener:
+                            energies.append(float(_))
+                        continue
+                    # coords
+                    is_coo = re.match(Coo_tag, line)
+                    if is_coo is not None:
+                        _coo = list()
+                        for _sub_line in data[i+2:]:
+                            is_empty = re.match(r'^\s*$', _sub_line)
+                            if is_empty is not None:
+                                if len(_coo[0]) == 0: continue  # avoid multiple empty lines are read as coordinates
+                                _coo = np.asarray(_coo, dtype=np.float32)
+                                coo.append(_coo)
+                                fix.append(np.ones_like(_coo, dtype=np.int8))
+                                _coo = list()
+                                continue
+                            is_numbers = re.match(number_pattern, _sub_line)
+                            if is_numbers is not None:
+                                _numbers = is_numbers.group().split()
+                                _coo.append(_numbers)
+                            else:
+                                break  # neither empty line nor numbers, thus skipping
+                        continue
+                    # forces
+                    is_forc = re.match(F_tag, line)
+                    if is_forc is not None:
+                        _forc = list()
+                        for _sub_line in data[i + 2:]:
+                            is_empty = re.match(r'^\s*$', _sub_line)
+                            if is_empty is not None:
+                                forces.append(np.asarray(_forc, dtype=np.float32))
+                                _forc = list()
+                                continue
+                            is_numbers = re.match(number_pattern, _sub_line)
+                            if is_numbers is not None:
+                                _numbers = is_numbers.group().split()
+                                _forc.append(_numbers)
+                            else:
+                                break  # neither empty line nor numbers, thus skipping
+                        continue
+                else:  # only got the final coords & forces
+                    # energy
+                    is_energy = re.match(E_pattern, line)
+                    if is_energy is not None:
+                        _ener = is_energy.group(1).split()
+                    is_final = re.match(Final_Coo_tag, line)
+                    if is_final is not None:
+                        for ii in range(n_batch):
+                            samp_id.append(f'{file_name}_{name[ii]}')
+                            cell.append(cell_temp[-n_batch + ii])
+                            elements.append(elements_temp[-n_batch + ii])
+                            elem_numbers.append(elem_numbers_temp[-n_batch + ii])
+                            energies.append(float(_ener[ii]))
+                        _coo = list()
+                        for _sub_line in data[i + 2:]:
+                            is_empty = re.match(r'^\s*$', _sub_line)
+                            if is_empty is not None:
+                                if len(_coo[0]) == 0: continue  # avoid multiple empty lines are read as coordinates
+                                _coo = np.asarray(_coo, dtype=np.float32)
+                                coo.append(_coo)
+                                fix.append(np.ones_like(_coo, dtype=np.int8))
+                                _coo = list()
+                                continue
+                            is_numbers = re.match(number_pattern, _sub_line)
+                            if is_numbers is not None:
+                                _numbers = is_numbers.group().split()
+                                _coo.append(_numbers)
+                            else:
+                                break  # neither empty line nor numbers, thus skipping
+                        continue
+
+                    is_forc = re.match(Final_F_tag, line)
+                    if is_forc is not None:
+                        _forc = list()
+                        for _sub_line in data[i + 2:]:
+                            is_empty = re.match(r'^\s*$', _sub_line)
+                            if is_empty is not None:
+                                forces.append(np.asarray(_forc, dtype=np.float32))
+                                _forc = list()
+                                continue
+                            is_numbers = re.match(number_pattern, _sub_line)
+                            if is_numbers is not None:
+                                _numbers = is_numbers.group().split()
+                                _forc.append(_numbers)
+                            else:
+                                break  # neither empty line nor numbers, thus skipping
+                        continue
 
             return samp_id, cell, elements, elem_numbers, energies, forces, coo, fix
 

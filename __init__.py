@@ -7,6 +7,7 @@
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures as Structures
 from BM4Ckit.utils._Element_info import TRANSITION_METALS, TRANSITION_P_METALS, NOBLE_METALS, NONRADIOACTIVE_METALS
 from BM4Ckit.Preprocessing import load_files
+from BM4Ckit.Preprocessing.load_files import load_from_structures as load
 from BM4Ckit.Preprocessing import preprocessing
 from BM4Ckit.TrainingMethod import Trainer, Predictor
 from BM4Ckit.TrainingMethod import StructureOptimization as Opt
@@ -14,6 +15,7 @@ from BM4Ckit.TrainingMethod import MolecularDynamics as MD
 
 __all__ = [
     'Structures',
+    'load',
     'load_files',
     'preprocessing',
     'Trainer',

@@ -9,7 +9,7 @@ Quasi-Newton Algorithm for optimization.
 
 from typing import Literal
 
-from BM4Ckit.BatchOptim._utils._BaseOpt import _BaseOpt
+from BM4Ckit.BatchOptim._BaseOpt import _BaseOpt
 import torch as th
 
 
@@ -27,6 +27,8 @@ class QN(_BaseOpt):
         linesearch_thres: float = 0.02,
         linesearch_factor: float = 0.6,
         steplength: float = 0.5,
+        use_bb: whether to use Barzilai-Borwein steplength (BB1 or long BB) as initial steplength instead of fixed one.
+        external_Hessian: manually input Hessian matrix as initial guess.
         device: str | th.device = 'cpu',
         verbose: int = 2
     """
@@ -41,6 +43,8 @@ class QN(_BaseOpt):
             linesearch_thres: float = 0.02,
             linesearch_factor: float = 0.6,
             steplength: float = 0.5,
+            use_bb: bool = True,
+            external_Hessian: th.Tensor|None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2
     ):
@@ -54,9 +58,11 @@ class QN(_BaseOpt):
             linesearch_thres,
             linesearch_factor,
             steplength,
+            use_bb,
             device,
             verbose
         )
+        self.external_Hessian = external_Hessian
 
     def initialize_algo_param(self):
         """
@@ -64,8 +70,24 @@ class QN(_BaseOpt):
 
         Returns: None
         """
-        # Initial quasi-inverse Hessian Matrix  (n_batch, n_atom*n_dim, n_atom*n_dim)
-        self.H_inv = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
+        if self.external_Hessian is None:
+            # Initial quasi-inverse Hessian Matrix  (n_batch, n_atom*n_dim, n_atom*n_dim)
+            self.H_inv = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
+        elif self.external_Hessian.shape == (self.n_batch, self.n_atom * self.n_dim, self.n_atom * self.n_dim):
+            # check positive definite
+            eigval, eigvec = th.linalg.eigh(self.external_Hessian)
+            if th.any(eigval < 0.):
+                self.logger.warning('Some external_Hessian are not positive definite. Their negative eigenvalues would be replaced by 1.')
+                eigval = th.where(eigval < 0., 1., eigval)
+                _external_Hessian = eigvec@th.diag_embed(eigval, 0, -2, -1)@eigvec.mH
+            else:
+                _external_Hessian = self.external_Hessian
+
+            self.H_inv = th.linalg.inv(_external_Hessian)
+        else:
+            self.logger.warning(f'Expected external Hessian has a shape of {(self.n_batch, self.n_atom * self.n_dim, self.n_atom * self.n_dim)}, '
+                                f'but got {self.external_Hessian.shape}. Thus identity matrix would use instead.')
+            self.H_inv = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
         # prepared identity matrix
         self.Ident = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
 
@@ -115,7 +137,17 @@ class QN(_BaseOpt):
         """
         # update H_inv
         g_go = g - g_old
-        gamma = 1 / (displace.mT @ g_go + 1e-20)  # (n_batch, 1, n_atom*3) @ (n_batch, n_atom*3, 1) -> (n_batch, 1, 1), 1e-20 to avoid 1/0
+        # check & ensure the positive determination of BFGS Matrix
+        ss = displace.mT @ displace
+        sy = displace.mT @ g_go
+        non_pos_deter_mask = (sy < 0.2 * ss)
+        # damped BFGS
+        if th.any(non_pos_deter_mask):
+            phi = (0.2 * ss - sy)/ss
+            phi = th.where(phi > 0., phi, 0.)
+            g_go = th.where(non_pos_deter_mask, g_go + phi * displace, g_go)
+            sy = displace.mT @ g_go
+        gamma = 1 / (sy + 1e-20)  # (n_batch, 1, n_atom*3) @ (n_batch, n_atom*3, 1) -> (n_batch, 1, 1), 1e-20 to avoid 1/0
         # BFGS Scheme:
         # (n_batch, n_atom*n_dim, n_atom*n_dim) - (n_batch, 1, 1) * (n_batch, n_atom*n_dim, 1)@(n_batch, 1, n_atom*n_dim)
         self.H_inv = th.where(

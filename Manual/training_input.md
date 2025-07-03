@@ -10,6 +10,9 @@
   3. 2: only load model parameters from `LOAD_CHK_FILE_PATH`.
   
   )
+* `DEVICE`: _str_, the device that model and data run on. It is the same as device of torch.Tensor. **Default**: 'cpu'.
+* `VERBOSE`: _int_, to control the output frequency and details. 0 for silence mode, 1 for brief mode. 
+Larger number means more detailed output information.
 * `EPOCH`: _int_, number of total epochs that model will train. **Default**: 0.
 * `BATCH_SIZE`: _int_, batch size of training samples. **Default**: 1.
 * `VAL_BATCH_SIZE`: _int_, batch size of validation samples. **Default**: the same as `BATCH_SIZE`.

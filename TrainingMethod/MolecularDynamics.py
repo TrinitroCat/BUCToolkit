@@ -51,18 +51,14 @@ class MolecularDynamics(_CONFIGS):
             self,
             config_file: str,
             data_type: Literal['pyg', 'dgl'] = 'pyg',
-            verbose: int = 0,
-            device: str | th.device = 'cpu'
     ) -> None:
-        super().__init__(config_file, device)
+        super().__init__(config_file)
 
         self.config_file = config_file
         assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
         self.data_type = data_type
-        self.verbose = verbose
-        self.DEVICE = device
         self.reload_config(config_file)
-        if self.verbose: self.logger.info('Config File Was Successfully Read.')
+        if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
         self._data_loader = None
@@ -81,7 +77,7 @@ class MolecularDynamics(_CONFIGS):
                           'T_init': self.MD.get('T_INIT', 298.15),
                           'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
                           'device': self.DEVICE,
-                          'verbose': self.verbose}
+                          'verbose': self.VERBOSE}
         if self.REDIRECT:
             self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
         if self.MD['ENSEMBLE'] == 'NVT':
@@ -124,7 +120,7 @@ class MolecularDynamics(_CONFIGS):
 
         try:
             # I/O
-            if self.verbose > 0:
+            if self.VERBOSE > 0:
                 __time = time.strftime("%Y%m%d_%H:%M:%S")
                 para_count = sum(p.numel() for p in _model.parameters() if p.requires_grad)
                 self.logger.info('*' * 60 + f'\n TIME: {__time}')
@@ -133,7 +129,9 @@ class MolecularDynamics(_CONFIGS):
                     self.logger.info(' FROM_SCRATCH <<')
                 else:
                     self.logger.info(' RESUME <<')
+                self.logger.info(f' COMMENTS: {self.COMMENTS}')
                 self.logger.info(f' I/O INFORMATION:')
+                self.logger.info(f'\tVERBOSITY LEVEL: {self.VERBOSE}')
                 if not self.REDIRECT:
                     self.logger.info('\tPREDICTION LOG OUTPUT TO SCREEN')
                 else:
@@ -144,7 +142,7 @@ class MolecularDynamics(_CONFIGS):
                 self.logger.info(f' MODEL NAME: {self.MODEL_NAME}')
                 self.logger.info(f' MODEL INFORMATION:')
                 self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
-                if self.verbose > 1:
+                if self.VERBOSE > 1:
                     for hp, hpv in self.MODEL_CONFIG.items():
                         self.logger.info(f'\t\t{hp}: {hpv}')
                 self.logger.info(f' MODEL WILL RUN ON {self.DEVICE}')
@@ -194,10 +192,10 @@ class MolecularDynamics(_CONFIGS):
                 try:
                     # to avoid get an empty batch
                     if get_batch_size(val_data) <= 0:
-                        if self.verbose: self.logger.info(f'An empty batch occurred. Skipped.')
+                        if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
                     # MD
-                    if self.verbose > 0:
+                    if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
                         self.logger.info(f'Running Batch {n_c}.')
                         self.logger.info('*' * 100)
@@ -229,24 +227,24 @@ class MolecularDynamics(_CONFIGS):
                     )
 
                     # Print info
-                    if self.verbose > 0:
+                    if self.VERBOSE > 0:
                         self.logger.info(f'Batch {n_c} done.')
                     n_c += 1
 
                 except Exception as e:
                     self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
-                    if self.verbose > 1:
+                    if self.VERBOSE > 1:
                         excp = traceback.format_exc()
                         self.logger.warning(f"Traceback:\n{excp}")
                     n_c += 1
 
-            if self.verbose: self.logger.info(f'Molecular Dynamics Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
+            if self.VERBOSE: self.logger.info(f'Molecular Dynamics Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
             if self.SAVE_PREDICTIONS:
                 t_save = time.perf_counter()
                 with _LoggingEnd(self.log_handler):
-                    if self.verbose: self.logger.info(f'SAVING RESULTS...')
+                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS...')
                 th.save(X_dict, self.PREDICTIONS_SAVE_FILE)
-                if self.verbose: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
+                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
             else:
                 return X_dict
 

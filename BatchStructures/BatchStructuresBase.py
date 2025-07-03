@@ -8,6 +8,7 @@ BatchStructure base class.
 #  Environment: Python 3.12
 
 import gc
+import math
 import re
 import logging
 import pickle
@@ -20,7 +21,7 @@ import traceback
 import warnings
 from itertools import accumulate
 import hashlib
-from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple, Any, Hashable, Iterable
+from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple, Any, Hashable, Iterable, Self
 
 import joblib as jb
 import numpy as np
@@ -135,6 +136,22 @@ class BatchStructures(object):
     @Sample_ids.setter
     def Sample_ids(self, val):
         raise ValueError('Sample_ids cannot be directly modified.')
+
+    @classmethod
+    def load_from_file(cls, path: str, data_slice: Tuple[int, int] | None = None) -> Self:
+        """
+        The class method version for loading data from saved files.
+        WARNING: It would overwrite the existing BatchStructure data. Use `self.load(..., mode='a')` to retain existing data.
+        Args:
+            path: the file path.
+            data_slice: The piece of data in files to be read. If None, all data in files would be read into memory.
+
+        Returns: Self with loaded data.
+
+        """
+        c = cls()
+        c.load(path, data_slice, 'w')
+        return c
 
     def _generate_checksum_in_mem(self, ):
         checksum = hashlib.sha256()
@@ -461,7 +478,6 @@ class BatchStructures(object):
     def load(self, path: str, data_slice: Tuple[int, int] | None = None, mode: Literal['w', 'a'] = 'w'):
         """
         Load data from saved files.
-        WARNING: It would overwrite the existing BatchStructure data. Use `append_from_file` to retain existing data.
         Args:
             path: the file path.
             data_slice: The piece of data in files to be read. If None, all data in files would be read into memory.
@@ -577,7 +593,7 @@ class BatchStructures(object):
     def write2text(
             self,
             output_path: str = './',
-            indices: int | str | Tuple[int, int] | None = None,
+            indices: int | str | List[int] | Tuple[int, int] | None = None,
             file_format: Literal['POSCAR', 'cif', 'xyz', 'xyz_forces'] = 'POSCAR',
             file_name_list: str | Sequence[str] | None = None,
             n_core: int = -1
@@ -585,7 +601,7 @@ class BatchStructures(object):
         """
         Write selected structures to text files in given format.
         Args:
-            indices: the range of selected structures.
+            indices: the selection indices of `self`. If Tuple, structures between `indices[0]` and `indices[1]` will be selected.
             file_format: the format of written files.
                 'POSCAR': vasp POSCAR format
                 'cif': crystallographic information file
@@ -620,8 +636,8 @@ class BatchStructures(object):
             os.makedirs(output_path)
 
         try:
+            file_name_list = [f'{_}' for _ in file_name_list]
             if file_format == 'POSCAR':
-                file_name_list = [f'{_}.vasp' for _ in file_name_list]
                 WritePOSCARs(
                     sub_self.Cells,
                     sub_self.Coords,
@@ -635,7 +651,6 @@ class BatchStructures(object):
                     n_core
                 )
             elif file_format == 'xyz':
-                file_name_list = [f'{_}.xyz' for _ in file_name_list]
                 write_xyz(
                     sub_self.Elements,
                     sub_self.Coords,
@@ -649,7 +664,6 @@ class BatchStructures(object):
                     n_core=n_core
                 )
             elif file_format == 'xyz_forces':
-                file_name_list = [f'{_}.xyz' for _ in file_name_list]
                 write_xyz(
                     sub_self.Elements,
                     sub_self.Coords,
@@ -663,7 +677,6 @@ class BatchStructures(object):
                     n_core=n_core
                 )
             elif file_format == 'cif':
-                file_name_list = [f'{_}.cif' for _ in file_name_list]
                 write_cif(
                     sub_self.Cells,
                     sub_self.Coords,
@@ -764,7 +777,7 @@ class BatchStructures(object):
         Parameters:
             supercell_indices: NDArray[n_supercell, 3], the indices of supercells that calculate distance.
 
-        output Format: A (n+1)*n matrix where the first_line is atomic number and the sub_matrix n*n is distance matrix.
+        self.Dist_mat Format: List[Tensor[(n_prim_cells, n_atom, n_atom)]]
         """
         self.Dist_mat = list()
         for i, atomic_coordinates in enumerate(self.Coords):
@@ -885,6 +898,121 @@ class BatchStructures(object):
         self.Coords = [self.Coords[_] for _ in indx]  # Atom coordinates
         self.Fixed = [self.Fixed[_] for _ in indx]  # fixed masks
 
+    def revise(
+            self,
+            index: int|str,
+            rev_Sample_ids: None | str = None,
+            rev_Cells: None | np.ndarray = None,
+            rev_Elements: None | List[str] = None,
+            rev_Numbers: None | List[int] = None,
+            rev_Coords_type: None | Literal['C', 'D'] = None,
+            rev_Coords: None | np.ndarray = None,
+            rev_Fixed: None | np.ndarray = None,
+            rev_Energies: None | float = None,
+            rev_Forces: None | np.ndarray = None,
+            rev_Labels: Any | None = None,
+    ) -> None:
+        """
+        Revising data of given `index`. None is for not changing.
+        Args:
+            index:
+            rev_Sample_ids:
+            rev_Cells:
+            rev_Elements:
+            rev_Numbers:
+            rev_Coords_type:
+            rev_Coords:
+            rev_Fixed:
+            rev_Energies:
+            rev_Forces:
+            rev_Labels:
+
+        """
+        assert self.Mode == 'L', f'Mode "A" does not support yet.'
+        if isinstance(index, str):
+            if self._indices is None:
+                self._update_indices()
+            _indx:int = self._indices[index]
+        elif isinstance(index, int):
+            _indx:int = index
+        else:
+            raise TypeError(f'Expected `index` to be int or str, but got {type(index)}.')
+        # check types
+        if rev_Sample_ids is not None:
+            assert isinstance(rev_Sample_ids, type(self._Sample_ids[0]))
+        else:
+            rev_Sample_ids = self._Sample_ids[_indx]
+        if rev_Cells is not None:
+            assert isinstance(rev_Cells, np.ndarray)
+            assert rev_Cells.shape == (3, 3)
+        else:
+            rev_Cells = self.Cells[_indx]
+        if rev_Elements is not None:
+            assert isinstance(rev_Elements, List)
+        else:
+            rev_Elements = self.Elements[_indx]
+        if rev_Numbers is not None:
+            assert isinstance(rev_Numbers, List)
+        else:
+            rev_Numbers = self.Numbers[_indx]
+        if rev_Coords_type is not None:
+            assert rev_Coords_type in {'C', 'D'}, f'rev_Coords_type must be either "C" or "D", but got {rev_Coords_type}.'
+        else:
+            rev_Coords_type = self.Coords_type[_indx]
+        if rev_Coords is not None:
+            assert isinstance(rev_Coords, np.ndarray)
+        else:
+            rev_Coords = self.Coords[_indx]
+        if rev_Fixed is not None:
+            assert isinstance(rev_Fixed, np.ndarray)
+            assert np.all(rev_Fixed - 2 < 0) and np.all(rev_Fixed >= 0), '`Fixed` must be either 0 or 1'
+        else:
+            rev_Fixed = self.Fixed[_indx]
+        if rev_Energies is None:
+            if self.Energies is not None: rev_Energies = self.Energies[_indx]
+        elif self.Energies is None:
+            warnings.warn('`rev_Energies` is given while `self.Energies` is None. Hence `rev_Energies` will be skipped.', RuntimeWarning)
+        if rev_Forces is None:
+            if self.Forces is not None:
+                rev_Forces = self.Forces[_indx]
+                force_shape = rev_Forces.shape
+            else:
+                force_shape = rev_Coords.shape
+        else:
+            assert isinstance(rev_Forces, np.ndarray)
+            if self.Forces is None:
+                warnings.warn('`rev_Forces` is given while `self.Forces` is None. Hence `rev_Force` will be skipped.', RuntimeWarning)
+            force_shape = rev_Forces.shape
+        if rev_Labels is None:
+            if not self.Labels is None: rev_Labels = self.Labels[_indx]
+        elif self.Labels is None:
+            warnings.warn('`rev_Labels` is given while `self.Labels` is None. Hence `rev_Labels` will be skipped.', RuntimeWarning)
+        # check numbers
+        assert (rev_Coords.shape == rev_Fixed.shape == force_shape), f'Coords, Fixed, and Forces (optional) have different shapes.'
+        assert len(rev_Elements) == len(rev_Numbers), f'Elements & Numbers have different shapes.'
+        assert sum(rev_Numbers) == len(rev_Coords), f'Number of atoms is mismatch in Numbers and Coord.'
+        # load
+        self._Sample_ids[_indx] = rev_Sample_ids
+        self.Cells[_indx] = rev_Cells.astype(np.float32)
+        self.Elements[_indx] = rev_Elements
+        self.Numbers[_indx] = rev_Numbers
+        self.Coords_type[_indx] = rev_Coords_type
+        self.Coords[_indx] = rev_Coords.astype(np.float32)
+        self.Fixed[_indx] = rev_Fixed.astype(np.int8)
+        if self.Energies is not None:
+            self.Energies[_indx] = float(rev_Energies)
+        if self.Forces is not None:
+            self.Forces[_indx] = rev_Forces.astype(np.float32)
+        if self.Labels is not None:
+            self.Labels[_indx] = rev_Labels
+        # postprocess
+        if self.Atom_list is not None:
+            self.generate_atom_list(True)
+        if self.Atomic_number_list is not None:
+            self.generate_atomic_number_list(True)
+        if self.Dist_mat is not None:
+            warnings.warn(f'Due to the data change, old Dist_mat might be incorrect. Hence Dist_mat is reset to None.', RuntimeWarning)
+            self.Dist_mat = None
 
     def sort_split_by_natoms(
             self,
@@ -1078,6 +1206,8 @@ class BatchStructures(object):
                     self.remove(_ids)
         self._raw_append(batch_structures)
         self._update_indices()
+        self._check_id()
+        self._check_len()
 
     def extend(self, batch_structures_list: Sequence, strict: bool = True):
         """
