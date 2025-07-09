@@ -3,10 +3,10 @@ Dimer Algo. for transition state searching. J. Chem. Phys. 1999, 111: 7010.
 While the steplength determination was revised into line search strategy.
 """
 
-#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
-#  File: Dimer.py
+#  Version: 0.9a
+#  File: Dimer_linseach.py
 #  Environment: Python 3.12
 
 # ruff: noqa: E701, E702, E703

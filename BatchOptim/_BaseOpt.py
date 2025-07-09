@@ -1,6 +1,6 @@
-#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
+#  Version: 0.9a
 #  File: _BaseOpt.py
 #  Environment: Python 3.12
 
@@ -115,7 +115,7 @@ class _BaseOpt:
             batch_indices: None | List[int] | Tuple[int, ...] | th.Tensor = None,
     ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
-        Run the Quasi-Newton Algorithm.
+        Run the Optimization Algorithm.
 
         Parameters:
             func: the main function of instantiated torch.nn.Module class.
@@ -147,7 +147,7 @@ class _BaseOpt:
         if isinstance(X, th.Tensor):
             n_batch, n_atom, n_dim = X.shape
         else:
-            raise TypeError(f'`X` must be torch.Tensor or List[torch.Tensor], but occurred {type(X)}.')
+            raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
         if batch_indices is not None:
             if n_batch != 1:
                 raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')

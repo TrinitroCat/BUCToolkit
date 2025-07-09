@@ -4,9 +4,9 @@ Batched Verlet Molecular Dynamics by pytorch models or functions.
 2024/7/30 PPX
 """
 
-#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
+#  Version: 0.9a
 #  File: __init__.py
 #  Environment: Python 3.12
 

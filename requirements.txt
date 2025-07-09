@@ -1,0 +1,4 @@
+joblib~=1.4.2
+numpy~=1.26.4
+PyYAML~=6.0.1
+torch~=2.4.1

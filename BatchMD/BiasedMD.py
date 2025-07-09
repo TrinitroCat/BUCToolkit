@@ -1,6 +1,6 @@
-#  Copyright (c) 2025.5.18, BM4Ckit.
+#  Copyright (c) 2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
+#  Version: 0.9a
 #  File: BiasedMD.py
 #  Environment: Python 3.12
 

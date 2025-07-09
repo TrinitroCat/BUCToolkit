@@ -1,7 +1,7 @@
 """ Calculating Normal Mode Vibration Frequencies """
-#  Copyright (c) 2025.5.19, BM4Ckit.
+#  Copyright (c) 2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
+#  Version: 0.9a
 #  File: VibrationAnalysis.py
 #  Environment: Python 3.12
 

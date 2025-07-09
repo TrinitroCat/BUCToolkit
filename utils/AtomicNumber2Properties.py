@@ -1,9 +1,9 @@
 """ Convert from atomic number to various properties, e.g., masses."""
 
-#  Copyright (c) 2025.5.19, BM4Ckit.
+#  Copyright (c) 2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
-#  File: ElemNumber2Properties.py
+#  Version: 0.9a
+#  File: AtomicNumber2Properties.py
 #  Environment: Python 3.12
 
 from typing import Sequence

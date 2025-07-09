@@ -1,7 +1,7 @@
-#  Copyright (c) 2025.6.25, BM4Ckit.
+#  Copyright (c) 2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
-#  File: MemMapTensors.py
+#  Version: 0.9a
+#  File: MemMapTensorsIO.py
 #  Environment: Python 3.12
 from typing import Dict, List, Literal
 import warnings

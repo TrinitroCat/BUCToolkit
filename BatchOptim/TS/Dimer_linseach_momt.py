@@ -4,10 +4,10 @@ While the steplength determination was revised into line search strategy,
 And the translation direction was revised into directions with momenta.
 """
 
-#  Copyright (c) 2024.12.10, BM4Ckit.
+#  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.7b
-#  File: Dimer.py
+#  Version: 0.9a
+#  File: Dimer_linseach_momt.py
 #  Environment: Python 3.12
 
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
