@@ -499,6 +499,7 @@ class OUTCAR2Feat(BatchStructures):
         self.path = path
         self.Energies = list()
         self.Forces = list()
+        self.Labels = list()
 
         self.__n_atom_partt = re.compile(r"(?<=NIONS =)\s+[0-9]+\n")
         self.__pos_force_partt = re.compile(
@@ -506,6 +507,7 @@ class OUTCAR2Feat(BatchStructures):
         self.__energy_partt = re.compile(r'FREE ENERGIE OF THE ION-ELECTRON SYSTEM.*\n.*\n.*\n.*\n.*energy\(sigma->0\) =\s*([0-9\-.]+)\n')
         self.__cell_partt = re.compile(r'VOLUME and BASIS-vectors are now.*\n.*\n.*\n.*\n.*direct lattice vectors.*\n(.*\n.*\n.*)')
         self.__is_converge_partt = re.compile(r'aborting loop .')
+        self.__voltage_partt = re.compile(r"E-fermi\s+:\s*([-|0-9.]+)\s+XC")
 
     @staticmethod
     def _get_atom_info(data: str) -> Tuple[List, List]:
@@ -669,6 +671,160 @@ class OUTCAR2Feat(BatchStructures):
         self._check_id()
         self._check_len()
         if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
+
+    def _read_single_file_add_voltage(self, file_name: str, parallel: bool = False) -> Any:
+        r"""
+        Read single file and output result has voltage.
+
+        Parameters:
+            file_name: str, the OUTCAR-like file name.
+            parallel: bool,
+        """
+        full_path = os.path.join(self.path, file_name)
+        if not os.path.isfile(full_path):
+            warnings.warn(f'No OUTCAR file in given directory {os.path.join(self.path, file_name)}')
+            return None
+        try:
+            with open(full_path, "r") as file:  #打开文件
+                data = file.read()  #读取文件
+            n_atom = re.search(self.__n_atom_partt, data)  #从OUTCAR文件搜索原子数
+            if n_atom is None:
+                warnings.warn(f'No atoms matched in {file_name}, skipped.', RuntimeWarning)
+                if parallel:
+                    return [], [], [], [], [], [], [], [], [], []
+                else:
+                    return None
+            n_atom = int(n_atom.group())  #将输出的原子个数保存为整数形式
+            position_iter = re.finditer(self.__pos_force_partt, data)  #通过re匹配的迭代器函数，找到原子坐标
+            _energies = re.findall(self.__energy_partt, data)
+            is_converged = re.findall(self.__is_converge_partt, data)
+            _voltage = re.findall(self.__voltage_partt,data)
+            # ATOM & Number
+            atoms, numbers = self._get_atom_info(data)
+            atoms = np.array(atoms, dtype='<U4')
+            numbers = np.array(numbers, dtype=np.int32)
+            # Cell Vectors
+            cells_str = re.findall(self.__cell_partt, data, )
+
+            cells = list()
+            _data = list()
+            energies = list()
+            voltage = list()
+            for i, match_for in enumerate(position_iter):  #循环的取每次迭代找到的一个结构的原子坐标与受力信息
+                # if SCF converged, content in OUTCAR would be 'aborting loop because ...' else 'aborting loop EDIFF was not reached ...'
+                if is_converged[i][-1] == 'b':
+                    _dat = re.split(r"\n+", match_for.group())  #通过换行符进行划分
+                    _dat = [re.split(r'[0-9][\n\s\t]+', dat_) for dat_ in _dat[:-2]]  #去除空字符或都是横线的行，然后循环的对每一行进行划分 <<< # TODO
+                    _data.append(_dat)  #将原子坐标的列表添加进列表中
+                    energies.append(float(_energies[i]))
+                    voltage.append([float(_voltage[i])]*len(_dat))
+                    # sometimes the cell vector would not split by \s e.g., "0.000000000-10.955671660 20.223087260"
+                    _cell_line: List[str] = cells_str[i].split()
+                    if len(_cell_line) != 3:
+                        __cell_line = list()
+                        [__cell_line.extend(_.replace('-', ' -').split()) for _ in _cell_line]
+                        _cell_line = __cell_line
+                        del __cell_line
+                    cells.append(_cell_line)
+
+            cells = np.array(cells, dtype=np.float32).reshape(-1, 3, 6)
+            cells = cells[:, :, :3]
+            _data = np.array(_data, dtype=np.float32)  # (n_step, n_atom, 3)
+            if len(_data) == 0:
+                warnings.warn(f'Occurred empty data in file {file_name}, skipped.', RuntimeWarning)
+                if parallel:
+                    return [], [], [], [], [], [], [], [], [], []
+                else:
+                    return None
+
+            # formatted
+            n_step, n_atom, _ = _data.shape
+            coords = _data[:, :, :3]
+            coords = [coo for coo in coords]
+            forces = _data[:, :, 3:]
+            forces = [forc for forc in forces]
+            atoms = atoms[None, :].repeat(n_step, axis=0)
+            numbers = numbers[None, :].repeat(n_step, axis=0)
+            fixed = np.ones_like(coords, dtype=np.int8)
+
+            _id = [file_name + f'_{i}' for i in range(n_step)]
+            # output
+            if parallel:
+                return _id, atoms, numbers, cells, coords, energies, forces, fixed, ['C',] * n_step, voltage
+            else:
+                self._Sample_ids.extend(_id)
+                self.Elements.extend(atoms.tolist())
+                self.Numbers.extend(numbers.tolist())
+                self.Cells.extend(cells)
+                self.Coords.extend(coords)
+                self.Energies.extend(energies)
+                self.Forces.extend(forces)
+                self.Fixed.extend(fixed)
+                self.Coords_type.extend(["C"] * n_step)
+                self.Labels.extend(voltage)
+        except Exception as err:
+            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
+            if parallel:
+                return [], [], [], [], [], [], [], [], [], []
+            else:
+                return None
+
+    def read_contain_voltage(self, file_list: Optional[List[str]] = None, n_core: int = -1, backend: str = 'loky'):
+        r"""
+        read the list of OUTCAR files and output every set of id, element, atoms, coordinate, forces, energy, voltage
+        Parameters:
+            file_list: List[str], the list of files to read. Default for all files under given path.
+            n_core: int, the number of CPU cores used in reading files.
+            backend: backend for parallelization in joblib. Options: 'loky', 'threading', 'multiprocessing'.
+
+        Return: None
+        Update the attribute self.data.
+        """
+        t_st = time.perf_counter()
+        if file_list is None:
+            file_list = os.listdir(self.path)
+            file_list = [f_ for f_ in file_list if os.path.isfile(os.path.join(self.path, f_))]
+        elif not isinstance(file_list, Sequence):
+            raise TypeError(f'Invalid type of files_list: {type(file_list)}')
+
+        if n_core > len(file_list):
+            warnings.warn(f'`ncore` is greater than file numbers, so `ncore` was reset to {len(file_list)}', RuntimeWarning)
+            n_core = len(file_list)
+        elif n_core == -1:
+            n_core = jb.cpu_count()
+        elif not(isinstance(n_core, int)) or n_core < -1:
+            raise ValueError(f'Invalid `n_core` number: {n_core}.')
+
+        if n_core == 1:
+            if self.verbose: print('Sequential Reading...');print('Progress: 0%', end='\r')
+            for i, fi_name in enumerate(file_list):
+                self._read_single_file(fi_name, parallel=False)
+                if self.verbose > 0:
+                    if (i + 1) % 50 == 0:
+                        prog_ = (i + 1) / len(file_list)
+                        prog = round(prog_ / 0.05)
+                        print('Progress: ' + '>' * prog + f'{prog_ * 100:>3.2f}%', end='\r')
+            if self.verbose: print('Progress: ' + '>' * 20 + f'{100:>3d}%')
+        else:
+            _para = jb.Parallel(n_jobs=n_core, backend=backend, verbose=self.verbose)
+            _dat = _para(jb.delayed(self._read_single_file_add_voltage)(fi_name, parallel=True) for fi_name in file_list)
+            for temp in _dat:
+                self._Sample_ids.extend(temp[0])
+                self.Elements.extend(temp[1])
+                self.Numbers.extend(temp[2])
+                self.Cells.extend(temp[3])
+                self.Coords.extend(temp[4])
+                self.Energies.extend(temp[5])
+                self.Forces.extend(temp[6])
+                self.Fixed.extend(temp[7])
+                self.Coords_type.extend(temp[8])
+                self.Labels.extend(temp[9])
+        if not self._Sample_ids: raise RuntimeError('All data are empty.')
+        self._update_indices()
+        self._check_id()
+        self._check_len()
+        if self.verbose > 0: print(f'Done. Total Time: {time.perf_counter() - t_st:>5.4f}')
+
 
 class Xyz2Feat(BatchStructures):
     """
