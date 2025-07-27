@@ -7,7 +7,7 @@
 import logging
 import sys
 from itertools import accumulate
-from typing import Dict, Any, Literal, Optional, Sequence, Tuple, List
+from typing import Dict, Any, Literal, Optional, Sequence, Tuple, List, Callable
 import time
 import warnings
 
@@ -16,7 +16,7 @@ import torch as th
 from torch import nn
 from BM4Ckit.BatchOptim._utils._line_search import _LineSearch
 from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
-from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
 
 
@@ -100,6 +100,38 @@ class _BaseOpt:
             log_handler.setFormatter(formatter)
             self.logger.addHandler(log_handler)
 
+    def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
+        """
+        Default update method for the input of func if the func has non-opt variables, i.e., the identical transform.
+        Args:
+            mask:
+
+        Returns:
+
+        """
+        return func_args, func_kwargs, grad_func_args, grad_func_kwargs
+
+    def set_update_batch(
+            self,
+            method: Callable[[th.Tensor, Tuple|None, Dict|None, Tuple|None, Dict|None], Tuple[Tuple, Dict, Tuple, Dict]]
+    ) -> None:
+        """
+        Set a method to update the taget function when variables change.
+        It receives a mask tensor of shape (n_batch, ) that only selects the `True` part to input to function, and receives the old
+        `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`,
+        returns the corresponding masked new `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`.
+
+        This method is used to dynamically 'remove' the samples which have been converged in a batch to avoid
+        redundant calculation of converged samples.
+
+        Default transform is identical transform (i.e., do nothing)
+        Args:
+            method: the method of updating function arguments for a mask.
+
+        Returns: None
+        """
+        self._update_batch = method
+
     def run(
             self,
             func: Any | nn.Module,
@@ -110,6 +142,7 @@ class _BaseOpt:
             grad_func_args: Sequence = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
             output_grad: bool = False,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             batch_indices: None | List[int] | Tuple[int, ...] | th.Tensor = None,
@@ -127,6 +160,7 @@ class _BaseOpt:
             grad_func_kwargs: optional, other input of grad_func.
             is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X
                 i.e., grad = grad_func(X, y, *grad_func_args, **grad_func_kwargs), else grad = grad_func(X, *grad_func_args, **grad_func_kwargs)
+            require_grad: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs) calculation.
             output_grad: bool, whether output gradient of last step.
             fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
             batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
@@ -181,6 +215,7 @@ class _BaseOpt:
         self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
         if grad_func is None:
             is_grad_func_contain_y = True
+            require_grad = False
             def grad_func_(y, x, grad_shape=None):
                 if grad_shape is None:
                     grad_shape = th.ones_like(y)
@@ -210,25 +245,31 @@ class _BaseOpt:
         X = X.to(self.device)
 
         # initialize
+        ############################## BATCHED ALGORITHM ###################################
+        # variables with '_' refer to the dynamically changed variables during iteration,
+        # and they will in-placed copy into origin variables (i.e., without '_') at the end
+        # of each iteration to update data.
+        #
+        ####################################################################################
         energies_old = th.inf
         is_main_loop_converge = False
         t_st = time.perf_counter()
         self.initialize_algo_param()
-        alpha = th.full_like(X, self.steplength)  # initial step length
-        p = 0.
+        steplength_tensor = th.full((n_batch, 1, 1), fill_value=self.steplength, device=self.device, dtype=th.bool)  # initial step length
+        p = th.zeros_like(X)
         self.converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
-        g_old = th.full((n_batch, n_atom * n_dim, 1), 1e-6, dtype=th.float32, device=self.device)  # initial old grad
-        displace = th.full_like(g_old, th.inf)
+        X_grad_old = th.full((n_batch, n_atom , n_dim), 1e-6, dtype=th.float32, device=self.device)  # initial old grad
+        displace = th.full_like(X_grad_old, 0.)
         #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
             self.logger.info('-' * 100)
             self.logger.info(f'Iteration Scheme: {self.iterform}')
         self.logger.info('-' * 100)
         # MAIN LOOP
-        with th.no_grad():
-            with th.enable_grad():
-                X.requires_grad_()
-                energies: th.Tensor = th.where(self.converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+        with (th.no_grad()):
+            with th.set_grad_enabled(require_grad):
+                X.requires_grad_(require_grad)
+                energies: th.Tensor = func(X, *func_args, **func_kwargs)
                 # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
                 if energies.shape[0] != self.n_batch:
                     assert batch_indices is not None, (f"batch indices is None "
@@ -239,44 +280,47 @@ class _BaseOpt:
                     self.is_concat_X = False
                 # calc. grad
                 if is_grad_func_contain_y:
-                    X_grad = th.where(self.converge_mask, 0., grad_func_(energies, X, *grad_func_args, **grad_func_kwargs))
+                    X_grad = grad_func_(energies, X, *grad_func_args, **grad_func_kwargs)
                 else:
-                    X_grad = th.where(self.converge_mask, 0., grad_func_(X, *grad_func_args, **grad_func_kwargs))
+                    X_grad = grad_func_(X, *grad_func_args, **grad_func_kwargs)
                 if X_grad.shape != X.shape:
                     raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
             energies.detach_()
-            X_grad = X_grad.detach() * atom_masks
+            X_grad = X_grad.detach()
+            X_grad.mul_(atom_masks)
             X = X.detach()
-            g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
-            g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
             for numit in range(maxiter):
                 # Calc. Criteria
-                E_eps = th.abs(energies - energies_old)  # (n_batch, )
+                E_diff = energies - energies_old
+                E_eps = th.abs(E_diff)  # (n_batch, )
                 energies_old = energies.detach().clone()
                 # manage the irregular tensors
                 if self.is_concat_X:
-                    F_eps = th.abs(X_grad)  # (1, n_batch*n_atom, 3)
-                    f_converge = scatter_reduce(
-                        th.all(F_eps[0] < F_threshold, dim=-1).to(th.int64), self.batch_scatter, 0, 'amin', 1
-                    ).bool()
-                    self.converge_mask = (E_eps < E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
-                    _stepsize_converge_mask = self.converge_mask.unsqueeze(0).unsqueeze(-1)
-                    converge_str = self.converge_mask.numpy(force=True)
-                    self.converge_mask = self.converge_mask.unsqueeze(0).unsqueeze(-1)[:, self.batch_scatter, ...]
+                    # (1, n_batch*n_atom, 3)
+                    F_eps = scatter_reduce(
+                        th.max(th.abs(X_grad[0]), dim=-1).values, self.batch_scatter, 0, 'amax', 0.
+                    )
+                    f_converge = F_eps < self.F_threshold
+                    converge_mask = (E_eps < self.E_threshold) * f_converge  # (n_inner_batch, ), to stop the update of converged samples.
+                    converge_check = converge_mask
+                    self.converge_mask = converge_check
+                    converge_str = converge_check.numpy(force=True)
+                    converge_mask = converge_mask.unsqueeze(0).unsqueeze(-1)[:, self.batch_scatter, ...]  # (1, n_batch*n_atom, 3)
                 else:
-                    F_eps = th.abs(X_grad)  # (n_batch, n_atom, 3)
-                    self.converge_mask = ((E_eps < E_threshold).unsqueeze(-1).unsqueeze(-1) *
-                                     th.all(F_eps < F_threshold, dim=(1, 2),keepdim=True))  # (n_batch, 1, 1), to stop the update of converged samples.
-                    _stepsize_converge_mask = self.converge_mask.transpose(-2, -1)
-                    converge_str = (self.converge_mask[:, 0, 0]).numpy(force=True)
+                    F_eps = th.amax(th.abs(X_grad), dim=(-2, -1))  # (n_batch, n_atom, 3) -> (n_batch)
+                    f_converge = (F_eps < self.F_threshold).reshape(-1, 1, 1)
+                    converge_mask = (E_eps < self.E_threshold).unsqueeze(-1).unsqueeze(-1) * f_converge  # To stop the update of converged samples.
+                    converge_check = converge_mask[:, 0, 0]
+                    self.converge_mask = converge_check
+                    converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
 
                 # Print information / Verbose
                 if self.verbose > 0:
                     self.logger.info(f"ITERATION {numit:>5d}\n "
-                                     f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"MAX_F:        {th.max(F_eps):>5.7e}\n "
+                                     f"MAD_energies: {np.array2string(E_diff.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                     f"MAX_F:        {np.array2string(F_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"Energies:     {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"Converged:    {converge_str}\n "
+                                     f"Converged:    {np.array2string(converge_str, **STRING_ARRAY_FORMAT)}\n "
                                      f"TIME:         {time.perf_counter() - t_st:>6.4f} s")
                 if self.verbose > 1:
                     # split batches if specified batch
@@ -308,61 +352,104 @@ class _BaseOpt:
                 if th.all(self.converge_mask):
                     is_main_loop_converge = True
                     break
-                t_st = time.perf_counter()
 
+                #g: th.Tensor = th.flatten(X_grad, 1, 2).unsqueeze(-1).contiguous()  # (n_batch, n_atom*3, 1)
+                # update batch
+                func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
+                    converge_check,
+                    func_args,
+                    func_kwargs,
+                    grad_func_args,
+                    grad_func_kwargs
+                )
+                if self.is_concat_X:
+                    select_mask = ~(converge_mask[0, :, 0])
+                    select_mask_short = ~converge_check
+                    energies_ = energies[select_mask_short]
+                    X_grad_ = X_grad[:, select_mask, :]
+                    X_grad_old_ = X_grad_old[:, select_mask, :]
+                    p_ = p[:, select_mask, :]
+                    X_ = X[:, select_mask, :]
+                    displace_ = displace[:, select_mask, :]
+                    atom_masks_ = atom_masks[:, select_mask, :]
+                    steplength_ = steplength_tensor
+                else:
+                    select_mask = ~converge_check
+                    energies_ = energies[select_mask]
+                    X_grad_ = X_grad[select_mask, ...]
+                    X_grad_old_ = X_grad_old[select_mask, ...]
+                    p_ = p[select_mask, ...]
+                    X_ = X[select_mask, ...]
+                    atom_masks_ = atom_masks[select_mask, ...]
+                    displace_ = displace[select_mask, ...]
+                    steplength_ = steplength_tensor[select_mask, ...]
+
+                # update algo. parameters.
+                self._update_algo_param(select_mask, X_grad_, X_grad_old_, X_grad_, displace_)
+                self.select_mask = select_mask
+
+                t_st = time.perf_counter()
                 # search directions
-                p = self._update_direction(g, g_old, p, X)  # (n_batch, n_atom*3, 1)
-                # use BB steplength
+                p_ = self._update_direction(X_grad_, X_grad_old_, p_, X_)  # (n_batch, n_atom, n_dim)
+                # use BB steplength_tensor
                 if self.use_bb:
-                    g_go = g - g_old
-                    _steplength = displace.mT@displace/(displace.mT@g_go)  # BB1
-                    _steplength = th.where(
-                        (_steplength < 1.5 * self.steplength) * (_steplength > 1e-4),
-                        _steplength,
-                        self.steplength
+                    g_go = X_grad_ - X_grad_old_  # (n_batch, n_atom, n_dim)
+                    # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) =
+                    _steplength_ = th.sum(displace_ * displace_, dim=(-2, -1), keepdim=True) / th.sum(displace_ * g_go, dim=(-2, -1), keepdim=True)  # BB1
+                    _steplength_ = th.where(
+                        (_steplength_ < 1.5 * self.steplength) * (_steplength_ > 1e-4),
+                        _steplength_,
+                        steplength_
                     )
                 else:
-                    _steplength = self.steplength
-                # search step length -> steplength: (n_batch, 1, 1)
-                alpha = th.where(
-                    th.all(_stepsize_converge_mask, dim=1, keepdim=True),
-                    0.,
-                    self._line_search(
-                        func, grad_func_, X, energies, g, p, _steplength, is_grad_func_contain_y,
-                        func_args=func_args, func_kwargs=func_kwargs, grad_func_args=grad_func_args, grad_func_kwargs=grad_func_kwargs,
-                        converge_mask=_stepsize_converge_mask.squeeze((0, -1))
+                    _steplength_ = steplength_
+                # search step length -> steplength_tensor: (n_batch, 1, 1)
+                alpha =self._line_search(
+                        func, grad_func_, X_, energies_, X_grad_, p_, _steplength_, is_grad_func_contain_y,
+                        func_args=func_args_, func_kwargs=func_kwargs_, grad_func_args=grad_func_args_, grad_func_kwargs=grad_func_kwargs_,
                     )
-                )
                 # update X
-                displace = alpha * p  # (n_batch, 1, 1) * (n_batch, n_atom*3, 1)
-                X = X + displace.view(n_batch, n_atom, n_dim)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
+                displace_ = alpha * p_  # (n_batch, 1, 1) * (n_batch, n_atom, n_dim)
+                X_.add_(displace_)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
                 # update old grad
-                g_old = g.detach().clone()  # (n_batch, n_atom*3, 1)
+                X_grad_old_ = X_grad_.detach()  # (n_batch, n_atom, n_dim)
                 # calc. new energy & grad.
-                with th.enable_grad():
-                    X.requires_grad_()
-                    energies: th.Tensor = th.where(self.converge_mask[:, 0, 0], energies_old, func(X, *func_args, **func_kwargs))
+                with th.set_grad_enabled(require_grad):
+                    X_.requires_grad_(require_grad)
+                    energies_: th.Tensor = func(X_, *func_args_, **func_kwargs_)
                     if is_grad_func_contain_y:
-                        X_grad = th.where(
-                            self.converge_mask,
-                            F_eps,
-                            grad_func_(energies, X, *grad_func_args, **grad_func_kwargs)
-                        )
+                        X_grad_ = grad_func_(energies_, X_, *grad_func_args_, **grad_func_kwargs_)
                     else:
-                        X_grad = th.where(
-                            self.converge_mask,
-                            F_eps,
-                            grad_func_(X, *grad_func_args, **grad_func_kwargs)
-                        )
-                energies.detach_()
-                X_grad = X_grad.detach() * atom_masks * (~self.converge_mask)
-                X.detach_()
-                g: th.Tensor = th.flatten(X_grad, 1, 2)  # (n_batch, n_atom*3)
-                g.unsqueeze_(-1)  # grad: (n_batch, n_atom*3, 1)
-                # update algo. parameters.
-                self._update_algo_param(g, g_old, p, displace)
+                        X_grad_ = grad_func_(X_, *grad_func_args_, **grad_func_kwargs_)
+                energies_.detach_()
+                X_grad_ = X_grad_.detach() * atom_masks_
+                X_.detach_()
 
-                # print steplength
+                # update origin variables
+                if self.is_concat_X:
+                    select_indices = th.where(select_mask)[0]
+                    select_indices_short = th.where(select_mask_short)[0]
+                    energies.index_copy_(0, select_indices_short, energies_)
+                    X_grad.index_copy_(1, select_indices, X_grad_)
+                    X_grad_old.index_copy_(1, select_indices, X_grad_old_)
+                    p.index_copy_(1, select_indices, p_)
+                    X.index_copy_(1, select_indices, X_)
+                    displace.index_copy_(1, select_indices, displace_)
+                    atom_masks.index_copy_(1, select_indices, atom_masks_)
+                    steplength_tensor = steplength_
+
+                else:
+                    select_indices = th.where(select_mask)[0]
+                    energies.index_copy_(0, select_indices, energies_)
+                    X_grad.index_copy_(0, select_indices, X_grad_)
+                    X_grad_old.index_copy_(0, select_indices, X_grad_old_)
+                    p.index_copy_(0, select_indices, p_)
+                    X.index_copy_(0, select_indices, X_)
+                    displace.index_copy_(0, select_indices, displace_)
+                    atom_masks.index_copy_(0, select_indices, atom_masks_)
+                    steplength_tensor.index_copy_(0, select_indices, steplength_)
+
+                # print steplength_tensor
                 if self.verbose > 0:
                     self.logger.info(f" step length: {alpha[:, 0, 0].squeeze().numpy(force=True)}\n")
                 # Check NaN
@@ -433,24 +520,25 @@ class _BaseOpt:
         """
         Override this method to implement X update algorithm.
         Args:
-            g: (n_batch, n_atom*3, 1), the gradient of X at this step
-            g_old: (n_batch, n_atom*3, 1), the gradient of X at last step
-            p: (n_batch, n_atom*3, 1), the update direction of X at last step
-            X: (n_batch, n_atom, 3), the independent vars X.
+            g: (n_batch, n_atom, n_dim), the gradient of X at this step
+            g_old: (n_batch, n_atom, n_dim), the gradient of X at last step
+            p: (n_batch, n_atom, n_dim), the update direction of X at last step
+            X: (n_batch, n_atom, n_dim), the independent vars X.
 
         Returns:
             p: th.Tensor, the new update direction of X.
         """
         raise NotImplementedError
 
-    def _update_algo_param(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
+    def _update_algo_param(self, select_mask: th.Tensor, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
         """
         Override this method to update the parameters of X update algorithm i.e., self.iterform.
         Args:
-            g: (n_batch, n_atom*3, 1), the gradient of X at this step
-            g_old: (n_batch, n_atom*3, 1), the gradient of X at last step
-            p: (n_batch, n_atom*3, 1), the update direction of X at last step
-            displace: (n_batch, n_atom*3, 1), the displacement of X at this step. displace = step-length * p
+            select_mask: (n_batch, ), the mask of batch that converged. Only the position of `True` would be selected to calculate.
+            g: (n_batch, n_atom, n_dim), the gradient of X at this step
+            g_old: (n_batch, n_atom, n_dim), the gradient of X at last step
+            p: (n_batch, n_atom, n_dim), the update direction of X at last step
+            displace: (n_batch, n_atom, n_dim), the displacement of X at this step. displace = step-length * p
 
         Returns: None
         """

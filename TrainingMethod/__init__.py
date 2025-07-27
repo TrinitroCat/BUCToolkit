@@ -13,4 +13,13 @@ from . import Losses
 from . import DataLoaders
 from . import Metrics
 
-__all__ = (Trainer, Predictor, StructureOptimization, MolecularDynamics, VibrationAnalysis, Losses, DataLoaders, Metrics)
+__all__ = [
+    'Trainer',
+    'Predictor',
+    'StructureOptimization',
+    'MolecularDynamics',
+    'VibrationAnalysis',
+    'Losses',
+    'DataLoaders',
+    'Metrics',
+]

@@ -33,8 +33,6 @@ class VibrationAnalysis(_CONFIGS):
     Args:
         config_file: the path of input file.
         data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph.
-        verbose: control the verboseness of output.
-        device: the device that models run on.
 
     Input file parameters:
         BLOCK_SIZE: int, the batch size of points (i.e., one structure image of finite difference) for parallel computing at one time. Default: 1.

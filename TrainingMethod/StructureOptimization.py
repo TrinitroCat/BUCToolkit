@@ -19,6 +19,7 @@ from BM4Ckit.BatchOptim.TS.Dimer_linseach_momt import DimerLinsMomt
 from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
+from BM4Ckit.utils._CheckModules import check_module
 
 
 class StructureOptimization(_CONFIGS):
@@ -29,10 +30,10 @@ class StructureOptimization(_CONFIGS):
     Args:
         config_file: the path of input file.
         data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph.
-        VERBOSE: control the verboseness of output.
-        device: the device that models run on.
 
     Input file parameters:
+        # General settings:
+          REQUIRE_GRAD: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs). Default: False.
         # For relaxation tasks:
         RELAXATION:
           ALGO: Literal[CG, BFGS, FIRE], the optimization algo.
@@ -86,6 +87,10 @@ class StructureOptimization(_CONFIGS):
 
         self.config_file = config_file
         assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
+        if data_type == 'pyg':
+            self.pygData = check_module('torch_geometric.data.batch')
+        else:
+            self.pygData = None
         self.data_type = data_type
         self.reload_config(config_file)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
@@ -113,6 +118,7 @@ class StructureOptimization(_CONFIGS):
                 iterschem = 'iter_scheme'
             self.Stru_Opt = __relax_dict[self.RELAXATION['ALGO']]
             # judge whether ALGO is minimization algo.
+            self.require_grad = self.RELAXATION.get('REQUIRE_GRAD', False)
             if self.RELAXATION['ALGO'] not in {'CG', 'BFGS', 'FIRE'}:
                 self.logger.error(f'{self.RELAXATION['ALGO']} is NOT RELAXATION ALGORITHM!!!')
                 raise ValueError(f'{self.RELAXATION['ALGO']} is NOT RELAXATION ALGORITHM!!!')
@@ -143,6 +149,7 @@ class StructureOptimization(_CONFIGS):
                                         'verbose': self.VERBOSE}
         elif self.TRANSITION_STATE is not None:
             self.Stru_Opt = __relax_dict[self.TRANSITION_STATE['ALGO']]
+            self.require_grad = self.TRANSITION_STATE.get('REQUIRE_GRAD', False)
             self.X_diff = self.TRANSITION_STATE.get('X_DIFF', None)
             self.Stru_Opt_config = {'E_threshold': self.TRANSITION_STATE.get('E_THRES', 1.e-4),
                                     'Torque_thres': self.TRANSITION_STATE.get('TORQ_THRES', 1e-2),
@@ -264,6 +271,30 @@ class StructureOptimization(_CONFIGS):
                 def get_fixed_mask(data):
                     return data.fixed.unsqueeze(0)
 
+                self.__check_old: th.Tensor|None = None
+                def update_batch(
+                        converge_check: th.Tensor,
+                        func_args,
+                        func_kwargs,
+                        grad_func_args,
+                        grad_func_kwargs
+                ):
+                    # adding a buffer
+                    if self.__check_old is None:
+                        self.__check_old = converge_check
+                        self.__g_old = func_args[0]
+                        return func_args, func_kwargs, grad_func_args, grad_func_kwargs
+                    elif th.all(self.__check_old == converge_check):
+                        return (self.__g_old, ), func_kwargs, (self.__g_old, ), grad_func_kwargs
+                    else:
+                        # main
+                        g = func_args[0]
+                        g_list = g.index_select(~converge_check)
+                        g_new = self.pygData.Batch.from_data_list(g_list)
+                        self.__check_old = converge_check
+                        self.__g_old = g_new
+                        return (g_new, ), func_kwargs, (g_new, ), grad_func_kwargs
+
             else:
                 model_wrap = _Model_Wrapper_dgl(_model)
 
@@ -283,7 +314,18 @@ class StructureOptimization(_CONFIGS):
                 def get_fixed_mask(data):
                     return data.nodes['atom'].data.get('fix', None)
 
+                def update_batch(
+                        converge_check,
+                        func_args,
+                        func_kwargs,
+                        grad_func_args,
+                        grad_func_kwargs
+                ):
+                    # TODO <<<<<<<<<
+                    pass
+
             optimizer = self.Stru_Opt(**self.Stru_Opt_config)
+            optimizer.set_update_batch(update_batch)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
@@ -362,6 +404,7 @@ class StructureOptimization(_CONFIGS):
                         self.logger.info('*' * 100)
                     # relax
                     with th.no_grad():
+                        self.__check_old: th.Tensor | None = None
                         min_ener, min_x, min_force = optimizer.run(
                             model_wrap.Energy,
                             X_init,
@@ -370,6 +413,7 @@ class StructureOptimization(_CONFIGS):
                             grad_func_args=(val_data,),
                             is_grad_func_contain_y=False,
                             output_grad=True,
+                            require_grad = self.require_grad,
                             batch_indices=batch_indx,
                             fixed_atom_tensor=fixed_mask,
                         )
@@ -629,7 +673,7 @@ class StructureOptimization(_CONFIGS):
                         for i, ee in enumerate(elem_list):
                             self.logger.info(f'Structure {i:>5d}: {ee}')
                         self.logger.info('*' * 100)
-                    # relax
+                    # search
                     with th.no_grad():
                         min_ener, min_x, min_force = optimizer.run(
                             model_wrap.Energy,

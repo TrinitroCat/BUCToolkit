@@ -2,16 +2,15 @@
 Linear interpolate of 2 structures
 """
 
-#  Copyright (c) 2024-2025.7.4, BM4Ckit.
+#  Copyright (c) 2024-2025.7.9, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
-#  File: LinearInterpolate.py
+#  File: coords_linear_interp.py
 #  Environment: Python 3.12
 
 from typing import List
 import numpy as np
 
-from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
 
 def linear_interpolation(
         coords1: np.ndarray | List,
@@ -20,7 +19,7 @@ def linear_interpolation(
 
 ):
     """
-
+    Linear interpolation between `coords1` and `coords2` to generate a series of coordinates, usually used for NEB-like methods.
     Args:
         coords1: the coordinate of 1st structure.
         coords2: the coordinate of 2nd structure.

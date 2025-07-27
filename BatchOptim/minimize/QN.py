@@ -73,6 +73,7 @@ class QN(_BaseOpt):
         if self.external_Hessian is None:
             # Initial quasi-inverse Hessian Matrix  (n_batch, n_atom*n_dim, n_atom*n_dim)
             self.H_inv = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
+            self.H_inv = self.H_inv.reshape(self.n_batch, self.n_atom, self.n_dim, self.n_atom, self.n_dim).contiguous()
         elif self.external_Hessian.shape == (self.n_batch, self.n_atom * self.n_dim, self.n_atom * self.n_dim):
             # check positive definite
             eigval, eigvec = th.linalg.eigh(self.external_Hessian)
@@ -83,13 +84,15 @@ class QN(_BaseOpt):
             else:
                 _external_Hessian = self.external_Hessian
 
-            self.H_inv = th.linalg.inv(_external_Hessian)
+            self.H_inv = th.linalg.inv(_external_Hessian).reshape(self.n_batch, self.n_atom, self.n_dim, self.n_atom, self.n_dim).contiguous()
         else:
             self.logger.warning(f'Expected external Hessian has a shape of {(self.n_batch, self.n_atom * self.n_dim, self.n_atom * self.n_dim)}, '
                                 f'but got {self.external_Hessian.shape}. Thus identity matrix would use instead.')
             self.H_inv = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
+            self.H_inv = self.H_inv.reshape(self.n_batch, self.n_atom, self.n_dim, self.n_atom, self.n_dim).contiguous()
         # prepared identity matrix
         self.Ident = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
+        self.Ident = self.Ident.reshape(self.n_batch, self.n_atom, self.n_dim, self.n_atom, self.n_dim).contiguous()
 
     def _update_direction(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, X: th.Tensor) -> th.Tensor:
         """
@@ -102,9 +105,11 @@ class QN(_BaseOpt):
         Returns:
             p: th.Tensor, the new update direction of X.
         """
+        _shape = g.shape
+        H_inv_now = self.H_inv[:, self.select_mask][..., self.select_mask, :]
         # QN scheme
         if self.iterform == 'BFGS':
-            p = - self.H_inv @ g  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
+            p = - th.einsum('ijklm, ilm -> ijk', H_inv_now, g)  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
             return p
 
         elif self.iterform == 'Newton':
@@ -123,36 +128,63 @@ class QN(_BaseOpt):
             del H_line
             H = H.detach()
             g = g.detach()
-            p = - th.where(self.converge_mask[:, :1, :1], 0., th.linalg.solve(H, g))
-            return p
+            p = - th.linalg.solve(H, g)
+            return p.reshape(_shape).contiguous()
 
         else:
             raise NotImplementedError
 
-    def _update_algo_param(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
+    def _update_algo_param(self, select_mask: th.Tensor, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
         """
         Override this method to update the parameters of X update algorithm i.e., self.iterform.
 
         Returns: None
         """
+        #g = g.flatten(-2, -1).unsqueeze(-1).contiguous()
+        #g_old = g_old.flatten(-2, -1).unsqueeze(-1).contiguous()
+        #displace = displace.flatten(-2, -1).unsqueeze(-1).contiguous()
+
+        if self.is_concat_X:
+            H_inv_now = self.H_inv[:, select_mask][..., select_mask, :]
+            Ident_now = self.Ident[:, select_mask][..., select_mask, :]
+        else:
+            H_inv_now = self.H_inv[select_mask]
+            Ident_now = self.Ident[select_mask]
+
         # update H_inv
         g_go = g - g_old
         # check & ensure the positive determination of BFGS Matrix
-        ss = displace.mT @ displace
-        sy = displace.mT @ g_go
+        ss = th.sum(displace**2, dim=(-2, -1), keepdim=True)
+        sy = th.sum(displace * g_go, dim=(-2, -1), keepdim=True)
         non_pos_deter_mask = (sy < 0.2 * ss)
         # damped BFGS
         if th.any(non_pos_deter_mask):
             phi = (0.2 * ss - sy)/ss
             phi = th.where(phi > 0., phi, 0.)
             g_go = th.where(non_pos_deter_mask, g_go + phi * displace, g_go)
-            sy = displace.mT @ g_go
-        gamma = 1 / (sy + 1e-20)  # (n_batch, 1, n_atom*3) @ (n_batch, n_atom*3, 1) -> (n_batch, 1, 1), 1e-20 to avoid 1/0
+            sy = th.sum(displace * g_go, dim=(-2, -1), keepdim=True)
+        gamma = 1 / (sy + 1e-20)  # (n_batch, n_atom, 3) * (n_batch, n_atom, 3) -sum-> (n_batch, 1, 1), 1e-20 to avoid 1/0
+        gamma = gamma.reshape(-1, 1, 1, 1, 1)
         # BFGS Scheme:
-        # (n_batch, n_atom*n_dim, n_atom*n_dim) - (n_batch, 1, 1) * (n_batch, n_atom*n_dim, 1)@(n_batch, 1, n_atom*n_dim)
-        self.H_inv = th.where(
-            self.converge_mask[:, :1, :1],
-            0.,
-            (self.Ident - gamma * displace @ g_go.mT) @ self.H_inv @ (self.Ident - gamma * g_go @ displace.mT) + gamma * displace @ displace.mT
-        )
+        # ((n_batch, n_atom*n_dim, n_atom*n_dim) - (n_batch, 1, 1) * (n_batch, n_atom*n_dim, 1)@(n_batch, 1, n_atom*n_dim)) -> (B, AD, AD)
+        # (B, AD, AD) @ (B, AD, AD)
+        # ((B, A, D, A, D) - (B, 1, 1, 1, 1) * (B, A, D, A, D)) @ (B, A, D, A, D) -(-2, -1)-> (B, A, D)
+
+        '''self.H_inv = (
+                (self.Ident - gamma * displace @ g_go.mT) @ H_inv_now @ (self.Ident - gamma * g_go @ displace.mT) + gamma * displace @ displace.mT
+        )'''
+        H_inv_now = th.einsum(
+            'mijkl, mklqr -> mijqr',
+            th.einsum(
+                'mijkl, mklqr -> mijqr',
+                (Ident_now - gamma * th.einsum('ijk, ilm-> ijklm', displace, g_go)),
+                H_inv_now
+            ),
+            (Ident_now - gamma * th.einsum('ijk, ilm-> ijklm', g_go, displace))
+        ) + gamma * th.einsum('ijk, ilm-> ijklm', displace, displace)
+
+        self.H_inv[:, select_mask][..., select_mask, :] = H_inv_now
+
+        pass
+
 

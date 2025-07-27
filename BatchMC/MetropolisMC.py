@@ -32,17 +32,22 @@ class MMC(_BaseMC):
 
         Args:
             iter_scheme: Algorithm for stochastic X update.
-                "Gaussian": perturbating X by Gaussian distribution.
-                "Cauchy": perturbating X by Cauchy distribution.
-                "Uniform": perturbating X by uniform distribution.
+                * `Gaussian`: perturbating X by Gaussian distribution.
+                * `Cauchy`: perturbating X by Cauchy distribution.
+                * `Uniform`: perturbating X by uniform distribution.
             maxiter: max iteration steps.
             temperature_init: initial temperature.
-            temperature_scheme: scheme of temperature update from
+            temperature_scheme: temperature update scheme.
+                * `constant` for a fixed temperature during the whole simulation.
+                * `linear` for a linearly changed temperature from `TEMPERATURE_INIT` to `TEMPERATURE_SCHEME_PARAM` during MAXITER steps.
+                * `exponential` for temperature (T) changing by T^(i + 1) = `TEMPERATURE_SCHEME_PARAM` * T^(i).
+                * `log` for temperature (T) changing by T^(i) = `TEMPERATURE_INIT`/(1. + log(1. + `TEMPERATURE_SCHEME_PARAM` * i)), `i` is the step number.
+                * `fast` for temperature (T) changing by T^(i) = `TEMPERATURE_INIT`/(1. + `TEMPERATURE_SCHEME_PARAM` * i), `i` is the step number.
+            temperature_scheme_param: to control the temperature scheme. see args `temperature_scheme`.
             temperature_update_freq: update temperature per `temperature_update_freq` step.
-            temperature_scheme_param
-            coordinate_update_param
-            device:
-            verbose:
+            coordinate_update_param: float, the scale parameter for coordinates update. variation for Gaussian/range for Uniform/scale for Cauchy.
+            device: the device that the program runs on.
+            verbose: verbosity of output.
         """
         super().__init__(
             iter_scheme,
@@ -149,6 +154,7 @@ class MMC(_BaseMC):
             delta_E,
             0.
         )
+        self.is_accept = _x_mask
         if self.batch_scatter is not None:
             X_new = th.where(
                 _x_mask[self.batch_scatter],

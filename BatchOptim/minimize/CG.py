@@ -81,70 +81,76 @@ class CG(_BaseOpt):
         else:
             return self.__SD
 
+    @staticmethod
+    def __check_restart(gg, ggo, g, p, beta):
+        ortho_check = th.abs(ggo) / gg < 0.2
+        descent_check = gg <= beta * th.sum(g * p, dim=(-2, -1), keepdim=True)
+        return ortho_check + descent_check
+
     def __PRP(self , g: th.Tensor, g_old: th.Tensor, p: th.Tensor, X: th.Tensor) -> th.Tensor:
         """
 
         """
-        gogo = g_old.mT @ g_old + 1e-16  # to avoid divide 0
-        ggo = g.mT @ g_old  # (n_batch, 1, 1)
-        gg = g.mT @ g  # (n_batch, 1, 1)
+        gogo = th.sum(g_old * g_old, dim=(-2, -1), keepdim=True) + 1e-16  # to avoid divide 0
+        ggo = th.sum(g * g_old, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+        gg = th.sum(g * g, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
         beta = (gg - ggo) / gogo  # (n_batch, 1, 1)
         beta = th.where(beta < 0.0, 0.0, beta)
         # Restart
-        is_restart = (ggo >= 0) * (gg > ggo) * (gogo >= gg)
+        is_restart = self.__check_restart(gg, ggo, g, p, beta)  # (ggo >= 0) * (gg > ggo) * (gogo >= gg)
         beta = th.where(is_restart, 0.0, beta)
         if self.verbose > 0:
-            self.logger.info(f"Restart: {is_restart.flatten().cpu().numpy()}")
+            self.logger.info(f" Restart: {is_restart.flatten().cpu().numpy()}")
         # update directions
-        p = -g + beta * p  # (n_batch, n_atom*3, 1)
+        p = -g + beta * p  # (n_batch, n_atom, n_dim)
 
         return p
 
     def __PR(self , g: th.Tensor, g_old: th.Tensor, p: th.Tensor, X: th.Tensor) -> th.Tensor:
         """ """
-        gogo = g_old.mT @ g_old + 1e-16  # to avoid divide 0
-        ggo = g.mT @ g_old  # (n_batch, 1, 1)
-        gg = g.mT @ g  # (n_batch, 1, 1)
+        gogo = th.sum(g_old * g_old, dim=(-2, -1), keepdim=True) + 1e-16  # to avoid divide 0
+        ggo = th.sum(g * g_old, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+        gg = th.sum(g * g, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
         beta = (gg - ggo) / gogo  # (n_batch, 1, 1)
         # Restart
-        is_restart = (ggo >= 0) * (gg > ggo) * (gogo >= gg)
+        is_restart = self.__check_restart(gg, ggo, g, p, beta)  # (ggo >= 0) * (gg > ggo) * (gogo >= gg)
         beta = th.where(is_restart, 0.0, beta)
         if self.verbose > 0:
-            self.logger.info(f"Restart: {is_restart.flatten().cpu().numpy()}")
+            self.logger.info(f" Restart: {is_restart.flatten().cpu().numpy()}")
         # update directions
-        p = -g + beta * p  # (n_batch, n_atom*3, 1)
+        p = -g + beta * p  # (n_batch, n_atom, n_dim)
 
         return p
 
     def __FR(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, X: th.Tensor) -> th.Tensor:
         """ """
-        gogo = g_old.mT @ g_old + 1e-16  # to avoid divide 0
-        ggo = g.mT @ g_old  # (n_batch, 1, 1)
-        gg = g.mT @ g  # (n_batch, 1, 1)
+        gogo = th.sum(g_old * g_old, dim=(-2, -1), keepdim=True) + 1e-16  # to avoid divide 0
+        ggo = th.sum(g * g_old, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+        gg = th.sum(g * g, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
         beta = gg / gogo
         # Restart
-        is_restart = (ggo >= 0) * (gg > ggo) * (gogo >= gg)
+        is_restart = self.__check_restart(gg, ggo, g, p, beta)  # (ggo >= 0) * (gg > ggo) * (gogo >= gg)
         beta = th.where(is_restart, 0.0, beta)
         if self.verbose > 0:
-            self.logger.info(f"Restart: {is_restart.flatten().cpu().numpy()}")
+            self.logger.info(f" Restart: {is_restart.flatten().cpu().numpy()}")
         # update directions
-        p = -g + beta * p  # (n_batch, n_atom*3, 1)
+        p = -g + beta * p  # (n_batch, n_atom, n_dim)
 
         return p
 
     def __WYL(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, X: th.Tensor) -> th.Tensor:
         """ """
-        gogo = g_old.mT @ g_old + 1e-16  # to avoid divide 0
-        ggo = g.mT @ g_old  # (n_batch, 1, 1)
-        gg = g.mT @ g  # (n_batch, 1, 1)
+        gogo = th.sum(g_old * g_old, dim=(-2, -1), keepdim=True) + 1e-16  # to avoid divide 0
+        ggo = th.sum(g * g_old, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+        gg = th.sum(g * g, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
         beta = (gg - th.sqrt(gg / gogo) * ggo) / gogo
         # Restart
-        is_restart = (ggo >= 0) * (gg > ggo) * (gogo >= gg)
+        is_restart = self.__check_restart(gg, ggo, g, p, beta)  # (ggo >= 0) * (gg > ggo) * (gogo >= gg)
         beta = th.where(is_restart, 0.0, beta)
         if self.verbose > 0:
             self.logger.info(f"Restart: {is_restart.flatten().cpu().numpy()}")
         # update directions
-        p = -g + beta * p  # (n_batch, n_atom*3, 1)
+        p = -g + beta * p  # (n_batch, n_atom, n_dim)
 
         return p
 
@@ -165,9 +171,10 @@ class CG(_BaseOpt):
         """
         Override this method to implement X update algorithm.
         Args:
-            g: (n_batch, n_atom*3, 1), the gradient of X at this step
-            g_old: (n_batch, n_atom*3, 1), the gradient of X at last step
-            p: (n_batch, n_atom*3, 1), the update direction of X at last step
+            g: (n_batch, n_atom, n_dim), the gradient of X at this step
+            g_old: (n_batch, n_atom, n_dim), the gradient of X at last step
+            p: (n_batch, n_atom, n_dim), the update direction of X at last step
+            X: (n_batch, n_atom, n_dim), the independent vars X.
 
         Returns:
             p: th.Tensor, the new update direction of X.
@@ -176,7 +183,7 @@ class CG(_BaseOpt):
 
         return p
 
-    def _update_algo_param(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
+    def _update_algo_param(self, select_mask: th.Tensor, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
         """
         Override this method to update the parameters of X update algorithm i.e., self.iterform.
 

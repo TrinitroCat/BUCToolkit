@@ -12,12 +12,13 @@ import re
 import time
 from math import ceil
 from typing import Dict, Tuple, Literal, List, Any
+import traceback
 
 import numpy as np
 import torch as th
 from torch import nn
 
-from ._io import _CONFIGS, _LoggingEnd
+from ._io import _CONFIGS, _LoggingEnd, ExpMovingAverage
 
 
 class Trainer(_CONFIGS):
@@ -27,8 +28,6 @@ class Trainer(_CONFIGS):
 
     Args:
         config_file: the path of input file
-        verbose: control the verboseness of output
-        device: the device that models run on
 
     Methods:
         train(model: torch.nn.Module), run model training.
@@ -149,6 +148,11 @@ class Trainer(_CONFIGS):
         else:
             scheduler = None
 
+        if self.EMA:
+            ema = ExpMovingAverage(_model, self.EMA_DECAY)
+        else:
+            ema = None
+
         # preprocessing data # TODO
         if self._data_loader is None:
             self.logger.exception('ERROR: Please Set the DataLoader.')
@@ -252,6 +256,14 @@ class Trainer(_CONFIGS):
                     if len(self.GRAD_CLIP_CONFIG) > 0: self.logger.info(f'\tGRAD_CLIP_CONFIG: {self.GRAD_CLIP_CONFIG}')
                 else:
                     self.logger.info(f'\tGRAD_CLIP: False')
+                if self.EMA:
+                    self.logger.info(f'\tEXPONENTIAL MOVING AVERAGE (EMA): True')
+                    self.logger.info(f'\tEMA_DECAY: {self.EMA_DECAY:<.5f}')
+                    self.logger.info(
+                        f'\tNOTE: `best_checkpoint` will save with EMA parameters, while `checkpoint` and `stop_checkpoint` will not.'
+                    )
+                else:
+                    self.logger.info(f'\tEXPONENTIAL MOVING AVERAGE (EMA): False')
                 self.logger.info(f' ITERATION INFORMATION:')
                 self.logger.info(f'\tEPOCH: {self.EPOCH}\n\tBATCH SIZE: {self.BATCH_SIZE}\n\tVALID BATCH SIZE: {self.VAL_BATCH_SIZE}' +
                                  f'\n\tGRADIENT ACCUMULATION STEPS: {self.ACCUMULATE_STEP}\n\tEVAL PER {self.VAL_PER_STEP} STEPS\n' +
@@ -350,6 +362,8 @@ class Trainer(_CONFIGS):
                         OPTIMIZER.step()
                         OPTIMIZER.zero_grad()
                         if scheduler is not None: scheduler.step()
+                        if self.EMA: ema.step()
+
                         # metrics
                         with th.no_grad():
                             if len(self.METRICS) > 0:
@@ -383,6 +397,7 @@ class Trainer(_CONFIGS):
                         with _LoggingEnd(self.log_handler):
                             if self.VERBOSE: self.logger.info('VALIDATION...')
                         with th.no_grad():
+                            if self.EMA: ema.apply()
                             _val_loss, _metr_list = self._val(_model, LOSS)
                             # print val results
                             if _val_loss is not None:
@@ -411,6 +426,7 @@ class Trainer(_CONFIGS):
                                         if self.VERBOSE: self.logger.info('Done.')
                                     else:
                                         if self.VERBOSE: self.logger.info(f'Validation loss NOT descent. Minimum loss: {val_loss_old:< 4.4e}.')
+                            if self.EMA: ema.restore()
                         _can_valid = False
 
                     time_gp = time.perf_counter()
@@ -436,10 +452,11 @@ class Trainer(_CONFIGS):
                 if self.VERBOSE: self.logger.info('Done.')
 
         except Exception as e:
-            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n')
+            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:{traceback.format_exc()}\n')
 
         finally:
             # If the program stopped, recording checkpoints.
+            if self.EMA: ema.restore()
             if i != self.EPOCH - 1:
                 self.logger.info('*' * 100)
                 self.logger.info(f'*** STOPPED AT {time.strftime("%Y%m%d_%H:%M:%S")} ***')
@@ -454,7 +471,9 @@ class Trainer(_CONFIGS):
                         states['val_loss'] = history['val_loss'][-1],
                     if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
                     th.save(states, os.path.join(self.CHK_SAVE_PATH, f'stop_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
-                    self.logger.info(f'*** Checkpoint file was saved in {os.path.join(self.CHK_SAVE_PATH, f"stop_checkpoint{self.CHK_SAVE_POSTFIX}.pt")}')
+                    self.logger.info(
+                        f'*** Checkpoint file was saved in {os.path.join(self.CHK_SAVE_PATH, f"stop_checkpoint{self.CHK_SAVE_POSTFIX}.pt")}'
+                    )
 
     def _val(self, model, LOSS) -> Tuple[float, Dict]:
         """

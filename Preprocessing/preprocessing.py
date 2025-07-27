@@ -576,7 +576,7 @@ class CreatePygData:
             natoms = len(atomic_numbers)
             tags = th.ones_like(atomic_numbers, dtype=th.float32)
             fixed = th.from_numpy(_fix)  #.unsqueeze(0)  # fixme
-            pbc = th.tensor([True, True, True])
+            pbc = th.tensor([[True, True, True]])
             # put the minimum data in th geometric data object
             _data = pygData(
                 cell=cell,

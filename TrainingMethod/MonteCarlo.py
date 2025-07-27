@@ -18,31 +18,30 @@ from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 
 
-class MolecularDynamics(_CONFIGS):
+class MonteCarlo(_CONFIGS):
     """
-    Class of molecular dynamics simulation.
+    Class of monte carlo algorithms, including NVT g monte carlo & simulated annealing (temperature varied MC).
     Users need to set the dataset and dataloader manually.
 
     Args:
         config_file: path to input file.
         data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph.
 
-    Input file parameters: (Under the section `MD` in input files)
-        ENSEMBLE: Literal[NVE, NVT], the ensemble for MD.
-        THERMOSTAT: Literal[Langevin, VR, CSVR, Nose-Hoover], the thermostat type. only used for ENSEMBLE=NVT.
-                    'VR' is Velocity Rescaling and 'CSVR' is Canonical Sampling Velocity Rescaling by Bussi et al. [1].
-        THERMOSTAT_CONFIG: Dict, the configs of thermostat.
-                           * For 'Langevin', option key 'damping_coeff' (fs^-1) is to control the damping coefficient. Large damping_coeff lead to a strong coupling. Default: 0.01
-                           * For 'CSVR', option key 'time_const' (fs) is to control the characteristic timescale. Large time_const leads to a weak coupling. Default: 10*TIME_STEP
-        TIME_STEP: float, the time step (fs) for MD. Default: 1
-        MAX_STEP: int, total time (fs) = TIME_STEP * MAX_STEP
-        T_INIT: float, initial Temperature (K). Default: 298.15
-                * For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist if V_init was not given.
-                * For ENSEMBLE=NVT, T_INIT is the target temperature of thermostat.
+    Input file parameters: (Under the section `MC` in input files.)
+        ITER_SCHEME: Literal['Gaussian', 'Cauchy', 'Uniform'], the scheme of atoms moving. Default: Gaussian.
+        COORDINATE_UPDATE_PARAM: float, the scale parameter for coordinates update. variation for Gaussian/range for Uniform/scale for Cauchy.
+        MAXITER: int, the maximum iteration numbers. Default: 300.
+        TEMPERATURE_INIT: initial temperature.
+        TEMPERATURE_SCHEME: Literal['constant', 'linear', 'exponential', 'log', 'fast'], temperature update scheme.
+            * `constant` for a fixed temperature during the whole simulation.
+            * `linear` for a linearly changed temperature from `TEMPERATURE_INIT` to `TEMPERATURE_SCHEME_PARAM` during MAXITER steps.
+            * `exponential` for temperature (T) changing by T^(i + 1) = `TEMPERATURE_SCHEME_PARAM` * T^(i).
+            * `log` for temperature (T) changing by T^(i) = `TEMPERATURE_INIT`/(1. + log(1. + `TEMPERATURE_SCHEME_PARAM` * i)), `i` is the step number.
+            * `fast` for temperature (T) changing by T^(i) = `TEMPERATURE_INIT`/(1. + `TEMPERATURE_SCHEME_PARAM` * i), `i` is the step number.
+        TEMPERATURE_SCHEME_PARAM: float, to control the temperature scheme. See args `TEMPERATURE_SCHEME`.
+        TEMPERATURE_UPDATE_FREQ: update temperature per `TEMPERATURE_UPDATE_FREQ` step.
         OUTPUT_COORDS_PER_STEP: int, to control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted. Default: 1
 
-    References:
-        [1] J. Chem. Phys., 2007, 126, 014101.
     """
 
     def __init__(
@@ -50,6 +49,8 @@ class MolecularDynamics(_CONFIGS):
             config_file: str,
             data_type: Literal['pyg', 'dgl'] = 'pyg',
     ) -> None:
+        # TODO
+        raise NotImplementedError
         super().__init__(config_file)
 
         self.config_file = config_file

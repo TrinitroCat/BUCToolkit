@@ -9,6 +9,7 @@ Methods of reading and transform various files
 
 import re
 import sys
+import traceback
 from typing import Any, Dict, List, Sequence, Set, Tuple, Optional, Literal
 import time
 import os
@@ -1486,4 +1487,6 @@ class Output2Feat(BatchStructures):
 
         except Exception as err:
             warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
+            excp = traceback.format_exc()
+            warnings.warn(f"Traceback:\n{excp}")
             return None

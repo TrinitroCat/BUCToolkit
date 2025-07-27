@@ -280,13 +280,13 @@ class Frequency:
 def vibrational_thermo(frequencies: th.Tensor, T: float = 298.15):
     r"""
     Thermodynamic quantities calculation for condensed states, i.e., U = H, F = G, and \delta(PV) = 0.
-    输入:
+    Args:
         frequencies: (N,), frequencies tensor, unit: cm^-1. Negative values mean imaginary frequencies.
         T: Temperature. unit: K.
-    输出:
-        S_vib: Entropy (kJ/mol·K)
+    Returns:
+        S_vib: Entropy (eV·K)
         H_vib: Enthalpy (eV)
-        C_vib: Thermo-capacity (kJ/mol·K)
+        C_vib: Thermo-capacity (eV·K)
         F_vib: Free-energy (eV)
     """
     # CONSTANTS
@@ -351,9 +351,10 @@ def extract_freq(path: str) -> List[np.ndarray]:
     """
     Extract frequency from Vibration calc. output files.
     Args:
-        path:
+        path: path of Frequency calculation output file
 
     Returns:
+        List of frequencies.
 
     """
     with open(path, 'r') as f:

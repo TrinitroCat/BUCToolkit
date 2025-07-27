@@ -170,11 +170,12 @@ class _CONFIGS(object):
         else:
             self.VALID_DATA = {'data': list(), 'label': list()}
 
-    def reload_config(self, config_file_path: str) -> None:
+    def reload_config(self, config_file_path: str| None = None) -> None:
         """
         Reload the yaml configs file.
         """
         # load config file
+        config_file_path = self.config_file if config_file_path is None else config_file_path
         with open(config_file_path, 'r') as f:
             config: Dict[str, Any] = yaml.safe_load(f)
         self.config = config
@@ -222,6 +223,9 @@ class _CONFIGS(object):
         self.LR_SCHEDULER = self.config.get('LR_SCHEDULER', None)
         self.LR_SCHEDULER_CONFIG = self.config.get('LR_SCHEDULER_CONFIG', dict())
         if not isinstance(self.LR_SCHEDULER_CONFIG, Dict): raise TypeError('LR_SCHEDULER_CONFIG must be a dict.')
+
+        self.EMA = self.config.get('EMA', False)  # exponential moving average strategy. best_checkpoint saves using ema param, and others do not.
+        self.EMA_DECAY = float(self.config.get('EMA_DECAY', 0.999))
 
         # loss & criterion info
         self.loss_name = self.config.get('LOSS', None)
@@ -323,14 +327,12 @@ class _Model_Wrapper_pyg:
             ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
 
-    def Energy(self, X, graph, return_format: Literal['sum', 'origin'] = 'origin'):
+    def Energy(self, X, graph):
         self.X = X
         graph.pos = self.X.squeeze(0)
         y = self._model(graph)
         energy = y['energy']
         self.forces = y['forces']
-        if return_format == 'sum':
-            energy = th.sum(energy).unsqueeze(0)
         return energy
 
     def Grad(self, X, graph):
@@ -482,3 +484,57 @@ class _Model_Wrapper_regularBatch_pyg:
         force = self.forces
         self.forces = None
         return - force.unsqueeze(0)
+
+class ExpMovingAverage:
+    """
+    Applying exponential moving average for training models.
+    """
+    def __init__(self, model:nn.Module, decay:float=0.999):
+        """
+
+        Args:
+            model: The torch model of nn.Module
+            decay: The decay coefficient.
+        """
+        self.model = model
+        self.decay = decay
+        self.shadow: Dict[str, th.Tensor] = dict()
+        self.backup = dict()
+        # initialize
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.detach().clone()
+
+    def step(self):
+        """
+        Applying ema 1 time.
+        """
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.shadow[name].mul_(self.decay).add_(param.data.detach(), alpha=1-self.decay)
+
+    def apply(self):
+        """
+        Applying ema shadow parameters to the trained model, and the original parameters of trained model will be stored in `self.backup`.
+        """
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.backup[name] = param.data.detach().clone()
+                param.copy_(self.shadow[name])
+
+    def restore(self):
+        """
+        Restore backup of original parameters of model from `self.backup` to continue training.
+        """
+        try:
+            if len(self.backup) != 0:
+                for name, param in self.model.named_parameters():
+                    if param.requires_grad:
+                        assert name in self.backup, f'Parameter {name} is not in backup!'
+                        param.copy_(self.backup[name])
+            else:
+                pass
+        finally:
+            self.backup = dict()

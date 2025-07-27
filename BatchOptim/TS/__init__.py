@@ -3,4 +3,8 @@
 #  Version: 0.9a
 #  File: __init__.py
 #  Environment: Python 3.12
+from .Dimer import Dimer
 
+__all__ = [
+    'Dimer'
+]

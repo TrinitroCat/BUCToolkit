@@ -151,7 +151,7 @@ class _BaseMC:
         # initialize
         t_st = time.perf_counter()
         self.initialize_algo_param()
-        ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
             self.logger.info('-' * 100)
             self.logger.info(f'Iteration Scheme: {self.iterform}')
@@ -205,7 +205,7 @@ class _BaseMC:
                 # Check NaN
                 if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
 
-                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
         if self.verbose > 0:
             self.logger.info(
@@ -225,7 +225,7 @@ class _BaseMC:
                 ]
                 [self.logger.info(f'{x_str}\n') for x_str in X_str]
         # output
-        return energies, X  , ptlist  # test <<<
+        return energies, X  #, ptlist  # test <<<
 
     def initialize_algo_param(self):
         """

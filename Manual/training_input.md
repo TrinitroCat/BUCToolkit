@@ -57,14 +57,14 @@ The log file name will be f"`time.strftime("%Y%m%d_%H_%M_%S")`_`OUTPUT_POSTFIX`.
   2. for `LOSS` == "Energy_Loss":
      * loss_E: _Literal["MAE", "MSE", "SmoothMAE", "Hubber"]_, the loss function of energies.
        
-* `METRICS`: Tuple of [E_MAE, F_MAE, F_MaxE, E_R2, MSE, MAE, R2, RMSE], the metrics function of training and validation results.
+* `METRICS`: _Literal["E_MAE", "F_MAE", "F_MaxE", "E_R2", "MSE", "MAE", "R2", "RMSE"]_, the metrics function of training and validation results.
 
 ## model configs
-* `MODEL_NAME`: str, the model name.
-* `MODEL_CONFIG`: Dict, the hyperparameters of model.
+* `MODEL_NAME`: _str_, the model name.
+* `MODEL_CONFIG`: _Dict_, the hyperparameters of model.
 
 ## optimizer configs
-* `OPTIM`: Literal["Adam", "SGD", "AdamW", "Adadelta", "Adagrad", "ASGD", "Adamax", "custom"], the model optimizer.
+* `OPTIM`: _Literal["Adam", "SGD", "AdamW", "Adadelta", "Adagrad", "ASGD", "Adamax", "custom"]_, the model optimizer.
 
 (
   1. 'Adam': th.optim.Adam, 
@@ -74,10 +74,30 @@ The log file name will be f"`time.strftime("%Y%m%d_%H_%M_%S")`_`OUTPUT_POSTFIX`.
   5. 'Adagrad': th.optim.Adagrad, 
   6. 'ASGD': th.optim.ASGD, 
   7. 'Adamax': th.optim.Adamax, 
-  8. 'custom': Any, need to set custom optimizer manually by `Trainer.set_optimizer(self, optimizer, optim_config: Optional[Dict])`
+  8. 'custom': Any, need to set custom optimizer manually
+by `Trainer.set_optimizer(self, optimizer, optim_config: Optional[Dict])`
 
 )
 * `OPTIM_CONFIG`: _Dict_, the kwargs of model optimizer.
 * `GRAD_CLIP`: _bool_, whether to use gradient clip. **Default**: false.
 * `GRAD_CLIP_MAX_NORM`: _float_, only for `GRAD_CLIP` == True. The max norm of gradient to clip. **Default**: 100.
+* `LR_SCHEDULER`: _Literal[{'StepLR', 'ExponentialLR', 'ChainedScheduler',
+'ConstantLR', 'LambdaLR', 'LinearLR', 'custom'}]_, the learning rate scheduler.
+
+(
+  1. 'StepLR': torch.optim.lr_scheduler.StepLR, 
+  2. 'ExponentialLR': torch.optim.lr_scheduler.ExponentialLR, 
+  3. 'ChainedScheduler': torch.optim.lr_scheduler.ChainedScheduler, 
+  4. 'ConstantLR': torch.optim.lr_scheduler.ConstantLR,
+  5. 'LambdaLR': torch.optim.lr_scheduler.LambdaLR, 
+  6. 'LinearLR': torch.optim.lr_scheduler.LinearLR, 
+  7. 'custom': Any, need to set custom lr_scheduler manually 
+by `Trainer.set_lr_scheduler(self, lr_scheduler, lr_scheduler_config)`
+
+)
+* `LR_SCHEDULER_CONFIG`: _Dict_, the kwargs of lr scheduler. **Default**: dict().
+* `EMA`: _bool_, whether to apply the exponential moving average strategy for training.
+Note that the best_checkpoint will save with EMA parameters, while checkpoint and stop_checkpoint will not.
+**Default**: False.
+* `EMA_DECAY`: _float_, the decay coefficient of EMA. **Default**: 0.999.
 

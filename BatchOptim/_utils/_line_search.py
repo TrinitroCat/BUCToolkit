@@ -9,7 +9,6 @@ Line Search for optimizations.
 #  Environment: Python 3.12
 
 import warnings
-# ruff: noqa: E701, E702, E703, F401
 from typing import Any, Literal, Sequence, Tuple
 
 import torch as th
@@ -23,12 +22,14 @@ class _LineSearch:
             maxiter: int = 10,
             thres: float = 0.02,
             factor: float = 1.5,
+            require_grad: bool = False
     ) -> None:
         self.method = method
         self.maxiter = maxiter
         self.linesearch_thres = thres
         self.factor = factor
         self.factor2 = 0.9/maxiter  # relaxation factor that might be used in backtracking algo.
+        self.require_grad = require_grad
         pass
 
     def _Armijo_cond(
@@ -46,10 +47,10 @@ class _LineSearch:
         if func_kwargs is None:
             func_kwargs = dict()
         with th.no_grad():
-            y1 = func(X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
-            if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
-        a: th.Tensor = (y1 <= (
-                y0 + rho * steplength * (grad.mT @ p)))  # Tensor[bool]: (n_batch, ) = (n_batch, ) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
+            y1 = func(X0 + steplength * p, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
+            if self.is_concat_X: y1 = th.sum(y1, dim=(0, -1), keepdim=True)
+        # Tensor[bool]: (n_batch, ) = (n_batch, ) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
+        a: th.Tensor = (y1 <= (y0 + rho * steplength * th.sum(grad * p, dim=(-2, -1), keepdim=True)))
         return a  # (n_batch, 1, 1)
 
     def _inv_Armijo_cond(
@@ -68,7 +69,7 @@ class _LineSearch:
             func_kwargs = dict()
         with th.no_grad():
             y1 = func(X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
-            if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
+            if self.is_concat_X: y1 = th.sum(y1, dim=(0, -1), keepdim=True)
         # Tensor[bool]: (n_batch, 1, 1) = (n_batch, 1, 1) + (n_batch, 1, 1) * (n_batch, ) * (n_batch, )
         a: th.Tensor = (y1 >= (y0 + rho * steplength * (grad.mT @ p)))
         return a  # (n_batch, 1, 1)
@@ -112,11 +113,11 @@ class _LineSearch:
         """
         if func_kwargs is None:
             func_kwargs = dict()
-        Xn = X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
-        with th.enable_grad():
-            Xn.requires_grad_()
+        Xn = X0 + steplength * p  # (n_batch, n_atom, n_dim)
+        with th.set_grad_enabled(self.require_grad):
+            Xn.requires_grad_(self.require_grad)
             y1 = (func(Xn, *func_args, **func_kwargs)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
-            if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
+            if self.is_concat_X: y1 = th.sum(y1, dim=(0, -1), keepdim=True)
             if is_grad_func_contain_y:
                 dy1 = grad_func(y1, Xn, *grad_func_args, **grad_func_kwargs)
             else:
@@ -125,9 +126,8 @@ class _LineSearch:
         dy1 = dy1.detach()
         y1 = y1.detach()
         Xn = Xn.detach()
-        dy1 = dy1.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
         with th.no_grad():
-            direct_grad1 = dy1.mT @ p
+            direct_grad1 = th.sum(dy1 * p, dim=(-2, -1), keepdim=True)
             a: th.Tensor = (y1 <= (y0 + rho * steplength * direct_grad0))  # descent cond
             b = (direct_grad1 > beta * direct_grad0)  # curve cond
 
@@ -139,7 +139,7 @@ class _LineSearch:
             grad_func: Any | nn.Module,
             X0: th.Tensor,
             y0: th.Tensor,
-            grad: th.Tensor,
+            direct_grad0: th.Tensor,
             p: th.Tensor,
             steplength: th.Tensor,
             is_grad_func_contain_y: bool,
@@ -149,14 +149,14 @@ class _LineSearch:
             func_kwargs=None,
             grad_func_args: Sequence = tuple(),
             grad_func_kwargs=None,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """
         Weak Wolfe-Powell condition with numeric gradient.
         Args:
             func:
             X0:
             y0:
-            grad:
+            direct_grad0:
             p:
             steplength:
             rho:
@@ -172,20 +172,19 @@ class _LineSearch:
         ds = 1e-2  # finite difference steplength
         if func_kwargs is None:
             func_kwargs = dict()
-        Xn = X0 + steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
+        Xn = X0 + steplength * p  # (n_batch, n_atom, n_dim)
         y1 = (func(Xn, *func_args, **func_kwargs)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
-        if self.is_concat_X: y1 = th.sum(y1 * self.had_converge_mask, dim=(0, -1), keepdim=True)
+        if self.is_concat_X: y1 = th.sum(y1, dim=(0, -1), keepdim=True)
         # detach grad graph
-        direct_grad0 = grad.mT @ p  # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) -> (n_batch, 1, 1)
-        Xn_a = Xn + ds * p.view(self.n_batch, self.n_atom, self.n_dim)
-        Xn_b = Xn - ds * p.view(self.n_batch, self.n_atom, self.n_dim)
+        Xn_a = Xn + ds * p
+        Xn_b = Xn - ds * p
         direct_grad1 = ((func(Xn_a, *func_args, **func_kwargs) - func(Xn_b, *func_args, **func_kwargs)) /
                         (2 * ds)).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
-        if self.is_concat_X: direct_grad1 = th.sum(direct_grad1 * self.had_converge_mask, keepdim=True)
-        a: th.Tensor = (y1 <= (y0 + rho * steplength * (grad.mT @ p)))  # descent cond
+        if self.is_concat_X: direct_grad1 = th.sum(direct_grad1, dim=(0, -1), keepdim=True)
+        a: th.Tensor = (y1 <= (y0 + rho * steplength * direct_grad0))  # descent cond
         b = (direct_grad1 > beta * direct_grad0)  # curve cond
 
-        return a, b, y1, direct_grad0, direct_grad1
+        return a, b, y1, direct_grad1
 
     def _backtrack_update(self, steplength_in, i_: int):
         # applied shrinking
@@ -209,18 +208,17 @@ class _LineSearch:
             grad_func_kwargs=None,
             converge_mask: th.Tensor|None = None  # the mask of the batch that has been converged has the same shape as y0
     ) -> th.Tensor:
-        self.had_converge_mask = ~converge_mask if converge_mask is not None else th.ones_like(y0)
         self.steplength = steplength
         if func_kwargs is None:
             func_kwargs = dict()
         if grad_func_kwargs is None:
             grad_func_kwargs = dict()
         self.n_batch, self.n_atom, self.n_dim = X0.shape
-        y0 = y0.unsqueeze(-1).unsqueeze(-1)
+        y0 = y0.unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
         # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
         if self.n_batch != y0.shape[0]:
             if self.n_batch == 1:
-                y0 = th.sum(y0 * self.had_converge_mask, dim=(0, -1), keepdim=True)
+                y0 = th.sum(y0, dim=(0, -1), keepdim=True)
                 self.is_concat_X = True
             else:
                 raise RuntimeError(f'Batch size of X ({self.n_batch}) and y ({y0.shape[0]}) do not match.')
@@ -267,7 +265,7 @@ class _LineSearch:
 
         elif (self.method == 'Wolfe') or (self.method == 'NWolfe'):  # 2-points interpolation algo.
             a1 = th.zeros_like(_steplength)  # init min step length
-            direct_grad0 = grad.mT @ p
+            direct_grad0 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
             self.factor = max(self.factor, 0.2)
             if self.method == 'Wolfe':
                 wolfCond = self._Wolfe_cond
@@ -342,13 +340,13 @@ class _LineSearch:
         elif self.method == '2PT_':
             a1 = th.zeros_like(_steplength)  # init min step length
             a2 = 2. * _steplength  # init max step length
-            dy1 = grad.mT @ p  # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) -> (n_batch, 1, 1)
-            Xn = X0 + _steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
+            dy1 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+            Xn = X0 + _steplength * p  # (n_batch, n_atom, n_dim)
             y1 = func(Xn, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
             a = -dy1 * _steplength - y0 + y1
             a_mask = a > 0.
             if self.is_concat_X:
-                y1 = th.sum(y1, keepdim=True)
+                y1 = th.sum(y1, dim=(0, -1), keepdim=True)
             if th.all(a_mask):
                 # if all coeff. of quadratic term > 0, interpolations
                 _steplength = (- dy1 * _steplength ** 2) / (2 * a)
@@ -356,7 +354,7 @@ class _LineSearch:
                 # else extrapolations for points with quadratic term < 0.
                 # forward finite difference to calc. dev of x2, 3 points in fact.
                 ds = 1e-4
-                Xn_a = Xn + ds * p.view(self.n_batch, self.n_atom, self.n_dim)
+                Xn_a = Xn + ds * p
                 dy2 = ((func(Xn_a, *func_args, **func_kwargs) - y1) / ds).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
                 _steplength = th.where(
                     a > 0.,
@@ -367,15 +365,12 @@ class _LineSearch:
             return th.where(_steplength > 2 * steplength, 0.05, _steplength)  # (n_batch, 1, 1)
 
         elif self.method == '2PT':
-            a1 = th.zeros_like(_steplength)  # init min step length
-            a2 = 2. * _steplength  # init max step length
-            dy1 = grad.mT @ p  # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) -> (n_batch, 1, 1)
+            dy1 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
             Xn = X0 + _steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
             y1 = func(Xn, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
-            a = -dy1 * _steplength - y0 + y1
-            a_mask = a > 0.
             if self.is_concat_X:
-                y1 = th.sum(y1, keepdim=True)
+                y1 = th.sum(y1, dim=(0, -1), keepdim=True)
+            a = -dy1 * _steplength - y0 + y1
             _steplength = (- dy1 * _steplength ** 2) / (2 * a)
             _steplength = th.where(
                 (_steplength < 1e-6) * (_steplength > 2 * steplength),
@@ -388,14 +383,14 @@ class _LineSearch:
         elif self.method == '3PT':
             # cubic interpolation search. points: 0, dy0, mid_step, step
             step_mid = 0.5 * _steplength
-            dy1 = grad.mT @ p  # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) -> (n_batch, 1, 1)
-            Xn_mid = X0 + step_mid * p.view(self.n_batch, self.n_atom, self.n_dim)
+            dy1 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+            Xn_mid = X0 + step_mid * p
             y_mid = func(Xn_mid, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)  # (n_batch, )
             Xn = X0 + _steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
             y1 = func(Xn, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
             if self.is_concat_X:
-                y_mid = th.sum(y_mid, keepdim=True)
-                y1 = th.sum(y1, keepdim=True)
+                y_mid = th.sum(y_mid, dim=(0, -1), keepdim=True)
+                y1 = th.sum(y1, dim=(0, -1), keepdim=True)
             # Coefficients
             a = (dy1 * step_mid ** 2 * _steplength - dy1 * step_mid * _steplength ** 2 + step_mid ** 2 * y0
                  - _steplength ** 2 * y0 + _steplength ** 2 * y_mid - step_mid ** 2 * y1) / (
@@ -439,8 +434,7 @@ class _LineSearch:
                 f1 = y0
                 # Search Interval
                 for _ in range(self.maxiter):
-                    f2 = func(Xn + _steplength2 * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(
-                        -1)  # (n_batch, )
+                    f2 = func(Xn + _steplength2 * p, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)  # (n_batch, )
                     mask_interval = (f2 > f1)
                     if th.all(mask_interval):
                         is_get_inteval = True
@@ -450,8 +444,8 @@ class _LineSearch:
                 if is_get_inteval:  # if Not get a suitable interval, steplength would keep the input value.
                     _steplength_m1 = _steplength1 + (_steplength2 - _steplength1) * (1. - GOLDEN_SEC)  # *0.382
                     _steplength_m2 = _steplength1 + (_steplength2 - _steplength1) * GOLDEN_SEC  # *0.618
-                    f1 = func(Xn + _steplength_m1 * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs)
-                    f2 = func(Xn + _steplength_m2 * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs)
+                    f1 = func(Xn + _steplength_m1 * p, *func_args, **func_kwargs)
+                    f2 = func(Xn + _steplength_m2 * p, *func_args, **func_kwargs)
                     for _ in range(self.maxiter):
                         if th.max(th.abs(_steplength1 - _steplength2)) < self.linesearch_thres:
                             is_converge = True
@@ -483,9 +477,9 @@ class _LineSearch:
                 Xn = X0
                 _steplength = steplength
                 for _ in range(self.maxiter):
-                    f0 = func(Xn + _steplength * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs)
-                    fpd = func(Xn + (_steplength + 2 * dx) * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs)
-                    fsd = func(Xn + (_steplength - 2 * dx) * p.view(self.n_batch, self.n_atom, self.n_dim), *func_args, **func_kwargs)
+                    f0 = func(Xn + _steplength * p, *func_args, **func_kwargs)
+                    fpd = func(Xn + (_steplength + 2 * dx) * p, *func_args, **func_kwargs)
+                    fsd = func(Xn + (_steplength - 2 * dx) * p, *func_args, **func_kwargs)
                     dev1 = (fpd - fsd) / (4 * dx)  # f'
                     dev2 = (fpd + fsd - 2 * f0)  # f"
                     newtn = - ((fpd - fsd) * dx) / dev2

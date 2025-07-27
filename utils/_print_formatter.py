@@ -12,7 +12,7 @@ e.g., numpy.array2string(Array, **FLOAT_ARRAY_FORMAT)
 import numpy as np
 
 FLOAT_ARRAY_FORMAT = {
-    'max_line_width': 256,
+    'max_line_width': 1024,
     'precision': 8,
     'separator': '  ',
     'sign': ' ',
@@ -22,7 +22,7 @@ FLOAT_ARRAY_FORMAT = {
 }
 
 INT_ARRAY_FORMAT = {
-    'max_line_width': 120,
+    'max_line_width': 1024,
     'separator': '  ',
     'sign': ' ',
     'threshold': 21_4748_3647,
@@ -30,7 +30,7 @@ INT_ARRAY_FORMAT = {
 }
 
 STRING_ARRAY_FORMAT = {
-    'max_line_width': 120,
+    'max_line_width': 1024,
     'separator': '  ',
     'sign': ' ',
     'threshold': 21_4748_3647,
@@ -38,7 +38,7 @@ STRING_ARRAY_FORMAT = {
 }
 
 SCIENTIFIC_ARRAY_FORMAT = {
-    'max_line_width': 256,
+    'max_line_width': 1024,
     'precision': 8,
     'separator': '  ',
     'sign': ' ',

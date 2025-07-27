@@ -23,8 +23,6 @@ class Predictor(_CONFIGS):
 
     Args:
         config_file: the path of input file
-        verbose: control the verboseness of output
-        device: the device that models run on
     """
 
     def __init__(self, config_file: str) -> None:

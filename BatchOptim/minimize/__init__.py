@@ -14,4 +14,4 @@ from .CG import CG
 from .QN import QN
 from .FIRE import FIRE
 
-__all__ = [CG, QN, FIRE]
+__all__ = ['CG', 'QN', 'FIRE']
