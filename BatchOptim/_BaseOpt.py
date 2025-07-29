@@ -255,7 +255,7 @@ class _BaseOpt:
         is_main_loop_converge = False
         t_st = time.perf_counter()
         self.initialize_algo_param()
-        steplength_tensor = th.full((n_batch, 1, 1), fill_value=self.steplength, device=self.device, dtype=th.bool)  # initial step length
+        steplength_tensor = th.full((n_batch, 1, 1), fill_value=self.steplength, device=self.device, dtype=th.float32)  # initial step length
         p = th.zeros_like(X)
         self.converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
         X_grad_old = th.full((n_batch, n_atom , n_dim), 1e-6, dtype=th.float32, device=self.device)  # initial old grad

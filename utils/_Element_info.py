@@ -1,4 +1,23 @@
-"""Atomic masses & number information"""
+"""
+Atomic masses & number information
+
+Constants:
+    MASS: Dict[element symbol : atomic mass]
+
+    N_MASS: Dict[atomic number: atomic mass]
+
+    ATOMIC_NUMBER: Dict[atomic number : element symbol]
+
+    ATOMIC_SYMBOL: Dict[element symbol : atomic number]
+
+    NONRADIOACTIVE_METALS: The set of non-radioactive metals
+
+    TRANSITION_METALS: The set of transition metals
+
+    TRANSITION_P_METALS: The set of transition metals & p-zone metals
+
+    NOBLE_METALS: The set of noble metals
+"""
 
 #  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin

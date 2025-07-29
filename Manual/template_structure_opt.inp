@@ -22,6 +22,7 @@ RELAXATION:
   F_THRES: 0.1  # threshold of max Force
   MAXITER: 300
   STEPLENGTH: 0.5
+  USE_BB: true
   LINESEARCH: 'Wolfe'  # 'Backtrack' with Armijo's cond., 'Golden' for exact line search by golden section algo., 'Wolfe' for advance & retreat algo. with weak Wolfe cond.
   LINESEARCH_MAXITER: 20  # max iterations of linear search.
   LINESEARCH_THRES: 0.02  # only for LINESEARCH = 'Golden', threshold of exact line search.

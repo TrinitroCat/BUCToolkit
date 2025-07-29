@@ -106,7 +106,10 @@ class QN(_BaseOpt):
             p: th.Tensor, the new update direction of X.
         """
         _shape = g.shape
-        H_inv_now = self.H_inv[:, self.select_mask][..., self.select_mask, :]
+        if self.is_concat_X:
+            H_inv_now = self.H_inv[:, self.select_mask][..., self.select_mask, :]
+        else:
+            H_inv_now = self.H_inv[self.select_mask]
         # QN scheme
         if self.iterform == 'BFGS':
             p = - th.einsum('ijklm, ilm -> ijk', H_inv_now, g)  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
@@ -183,7 +186,10 @@ class QN(_BaseOpt):
             (Ident_now - gamma * th.einsum('ijk, ilm-> ijklm', g_go, displace))
         ) + gamma * th.einsum('ijk, ilm-> ijklm', displace, displace)
 
-        self.H_inv[:, select_mask][..., select_mask, :] = H_inv_now
+        if self.is_concat_X:
+            self.H_inv[:, select_mask][..., select_mask, :] = H_inv_now
+        else:
+            self.H_inv[select_mask] = H_inv_now
 
         pass
 

@@ -20,6 +20,8 @@ from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
 from BM4Ckit.utils._CheckModules import check_module
+from BM4Ckit.utils.ElemListReduce import elem_list_reduce
+from BM4Ckit import Structures
 
 
 class StructureOptimization(_CONFIGS):
@@ -42,6 +44,7 @@ class StructureOptimization(_CONFIGS):
           F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
           MAXITER: int, the maximum iteration numbers. Default: 300.
           STEPLENGTH: float, the initial step length for line search. Default: 0.5.
+          USE_BB: bool, if True, use Barzilai-Borwein steplength (i.e., BB1 or long BB) as initial steplength instead of fixed `STEPLENGTH`.
 
           LINESEARCH: Literal[Backtrack, Golden, Wolfe], only used for ALGO=CG, BFGS or MIX.
             'Backtrack' with Armijo's cond., 'Golden' for exact line search by golden sec. Algo., 'Wolfe' for advance & retreat algo. With weak Wolfe cond.
@@ -131,6 +134,7 @@ class StructureOptimization(_CONFIGS):
                                         'linesearch_maxiter': int(self.RELAXATION.get('LINESEARCH_MAXITER', 10)),
                                         'linesearch_thres': float(self.RELAXATION.get('LINESEARCH_THRES', 0.05)),
                                         'linesearch_factor': float(self.RELAXATION.get('LINESEARCH_FACTOR', 0.6)),
+                                        'use_bb': bool(self.RELAXATION.get('USE_BB', True)),
                                         'steplength': float(self.RELAXATION.get('STEPLENGTH', 0.5)),
                                         'device': self.DEVICE,
                                         'verbose': self.VERBOSE}
@@ -262,7 +266,7 @@ class StructureOptimization(_CONFIGS):
                     return data.cell.numpy(force=True)
 
                 def get_atomic_number(data):
-                    return data.atomic_numbers.unsqueeze(0).tolist()
+                    return data.atomic_numbers.unsqueeze(0)
 
                 def get_indx(data):
                     _indx: Dict = getattr(data, 'idx', None)
@@ -305,7 +309,7 @@ class StructureOptimization(_CONFIGS):
                     return data.nodes['cell'].data['cell'].numpy(force=True)
 
                 def get_atomic_number(data):
-                    return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
+                    return data.nodes['atom'].data['Z'].unsqueeze(0)
 
                 def get_indx(data):
                     _indx: Dict = data.nodes['atom'].data
@@ -329,11 +333,11 @@ class StructureOptimization(_CONFIGS):
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
+            idx = list()
             # To record the minimized X, Force, and Energies.
-            X_dict = dict()
-            F_dict = dict()
-            E_dict = dict()
+            total_structures_list = list()
             for val_data, val_label in val_set:
+                _structures = Structures()
                 try:  # Catch error in each loop & continue, instead of directly exit.
                     # to avoid get an empty batch
                     if get_batch_size(val_data) <= 0:
@@ -358,6 +362,8 @@ class StructureOptimization(_CONFIGS):
                     idx = get_indx(val_data)
                     idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
                     n_s += len(batch_indx)
+                    element_tensor = get_atomic_number(val_data)
+                    element_list = element_tensor.tolist()
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
                         self.logger.info(f'Relaxation Batch {n_c}.')
@@ -367,7 +373,6 @@ class StructureOptimization(_CONFIGS):
                         self.logger.info(f'Structure names: {idx}\n')
                         self.logger.info(f'Cell Vectors:\n{cell_str}\n')
                         # print Atoms Information
-                        element_list = get_atomic_number(val_data)
                         elem_list = list()
                         _element_list = list()
                         if batch_indx is not None:
@@ -420,18 +425,41 @@ class StructureOptimization(_CONFIGS):
                         min_ener.detach_()
                         min_x.detach_()
                         min_force.detach_()
-
+                        # Postprocessing & save TODO: reformat it in future to apply to all functions.
                         min_x = min_x.cpu().squeeze(0)
                         min_force = min_force.cpu().squeeze(0)
                         min_ener = min_ener.cpu()
+                        cell_list = [_ for _ in CELL]
+                        elem_list = th.split(element_tensor[0], batch_indx)
+                        elem_list = [_.tolist() for _ in elem_list]
                         x_list = th.split(min_x, batch_indx)
+                        x_list = [_.numpy() for _ in x_list]
                         f_list = th.split(min_force, batch_indx)
-                        X_dict.update({_id: x_list[i] for i, _id in enumerate(idx)})
-                        F_dict.update({_id: f_list[i] for i, _id in enumerate(idx)})
-                        E_dict.update({_id: min_ener[i] for i, _id in enumerate(idx)})
+                        f_list = [_.numpy() for _ in f_list]
+                        fix_list = th.split(fixed_mask[0], batch_indx)
+                        fix_list = [_.numpy(force=True) for _ in fix_list]
+                        elem_comp_list = list()
+                        numb_comp_list = list()
+                        for _element_list in elem_list:
+                            _elem_comp_list, _, _number_list = elem_list_reduce(_element_list)
+                            elem_comp_list.append(_elem_comp_list)
+                            numb_comp_list.append(_number_list)
+
+                        _structures.append_from_lists(
+                            idx,
+                            cell_list,
+                            elem_comp_list,
+                            numb_comp_list,
+                            ['C'] * len(idx),
+                            x_list,
+                            fix_list,
+                            min_ener.tolist(),
+                            f_list
+                        )
                     # Print info
                     if self.VERBOSE > 0:
                         self.logger.info('-' * 100)
+                    total_structures_list.append(_structures)
                     n_c += 1
 
                 except Exception as e:
@@ -442,14 +470,17 @@ class StructureOptimization(_CONFIGS):
                     n_c += 1
 
             if self.VERBOSE: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
+            total_structures = Structures()
+            total_structures.extend(total_structures_list)
             if self.SAVE_PREDICTIONS:
                 t_save = time.perf_counter()
                 with _LoggingEnd(self.log_handler):
-                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS...')
-                th.save({'Coordinates': X_dict, 'Forces': F_dict, 'Energies': E_dict}, self.PREDICTIONS_SAVE_FILE)
+                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
+                #th.save({'ID': idx, 'Coordinates': x_list, 'Forces': f_list, 'Energies': min_ener.tolist()}, self.PREDICTIONS_SAVE_FILE)
+                th.save(total_structures, self.PREDICTIONS_SAVE_FILE)
                 if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
             else:
-                return X_dict
+                return total_structures
 
         except Exception as e:
             th.cuda.synchronize()

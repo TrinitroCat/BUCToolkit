@@ -1014,6 +1014,201 @@ class BatchStructures(object):
             warnings.warn(f'Due to the data change, old Dist_mat might be incorrect. Hence Dist_mat is reset to None.', RuntimeWarning)
             self.Dist_mat = None
 
+    def append_from_lists(
+            self,
+            add_Sample_ids: List,
+            add_Cells: List[np.ndarray],
+            add_Elements: List[List[int]],
+            add_Numbers: List[List[int]],
+            add_Coords_type: List[Literal['C', 'D']],
+            add_Coords: List[np.ndarray],
+            add_Fixed: List[np.ndarray],
+            add_Energies: None | List[float] = None,
+            add_Forces: None | List[np.ndarray] = None,
+            add_Labels: List[Any] | None = None,
+    ) -> None:
+        """
+        Appending data from given Lists of ids, cells, elements, numbers, and coords.
+        Args:
+            add_Sample_ids: the data in List to be appended.
+            add_Cells: the data in List to be appended.
+            add_Elements: the data in List to be appended.
+            add_Numbers: the data in List to be appended.
+            add_Coords_type: the data in List to be appended.
+            add_Coords: the data in List to be appended.
+            add_Fixed: the data in List to be appended.
+            add_Energies: the data in List to be appended.
+            add_Forces: the data in List to be appended.
+            add_Labels: the data in List to be appended.
+
+        """
+        assert self.Mode == 'L', f'Mode "A" does not support yet.'
+        # check types
+        if not isinstance(add_Sample_ids, list):
+            raise TypeError(f'`add_Sample_ids` must be a list, but got {type(add_Sample_ids)}.')
+        n_samp = len(add_Sample_ids)
+
+        if not isinstance(add_Cells, list):
+            raise TypeError(f'`add_Cells` must be a list, but got {type(add_Cells)}.')
+        else:
+            _chk = [type(_) for _ in add_Cells if not isinstance(_, np.ndarray)]
+            if len(_chk) > 0:
+                raise TypeError(f'`add_Cells` must contain only np.ndarray elements, but got {_chk}.')
+        n_cells = len(add_Cells)
+
+        if not isinstance(add_Elements, list):
+            raise TypeError(f'`add_Elements` must be a list, but got {type(add_Elements)}.')
+        else:
+            _chk = [_ for _ in add_Elements if (not isinstance(_, List)) or ({type(__) for __ in _} != {str})]
+            if len(_chk) > 0:
+                raise TypeError(f'`add_Elements` must contain only List[str] elements, but got {_chk}.')
+        n_elems = len(add_Elements)
+
+        if not isinstance(add_Numbers, list):
+            raise TypeError(f'`add_Numbers` must be a list, but got {type(add_Numbers)}.')
+        else:
+            _chk = [_ for _ in add_Numbers if (not isinstance(_, List)) or ({type(__) for __ in _} != {int})]
+            if len(_chk) > 0:
+                raise TypeError(f'`add_Numbers` must contain only List[int] elements, but got {_chk}.')
+        n_nums = len(add_Numbers)
+
+        if not isinstance(add_Coords_type, list):
+            raise TypeError(f'`add_Coords_type` must be a list, but got {type(add_Coords_type)}.')
+        else:
+            _chk = [_ for _ in add_Coords_type if _ not in {'C', 'D'}]
+            if len(_chk) > 0:
+                raise ValueError(f'`add_Coords_type` must contain only "C" or "D" as elements, but got {_chk}.')
+        n_coords_type = len(add_Coords_type)
+
+        if not isinstance(add_Coords, list):
+            raise TypeError(f'`add_Coords` must be a list, but got {type(add_Coords)}.')
+        else:
+            _chk = [_ for _ in add_Coords if not isinstance(_, np.ndarray)]
+            if len(_chk) > 0:
+                raise TypeError(f'`add_Coords` must contain only np.ndarray elements, but got {_chk}.')
+        n_coords = len(add_Coords)
+
+        if not isinstance(add_Fixed, list):
+            raise TypeError(f'`add_Fixed` must be a list, but got {type(add_Fixed)}.')
+        else:
+            _chk = [_ for _ in add_Fixed if not isinstance(_, np.ndarray)]
+            if len(_chk) > 0:
+                raise TypeError(f'`add_Fixed` must contain only np.ndarray elements, but got {_chk}.')
+        n_fixed = len(add_Fixed)
+
+        if add_Energies is None:
+            if self.Energies is not None:
+                raise ValueError(f"Other structures have energy but here given `add_Energies` is None, which is not allowed.")
+            n_energies = n_samp
+        elif not isinstance(add_Energies, List):
+            raise TypeError(f'Expected `add_Energies` of list, but got {type(add_Energies)}.')
+        else:
+            _chk = [_ for _ in add_Energies if not isinstance(_, float)]
+            if len(_chk) > 0:
+                raise TypeError(f'`add_Energies` must contain only float elements, but got {type(_chk)}.')
+            n_energies = len(add_Energies)
+            if self.Energies is None:  # adding data into None
+                if len(self) == 0:
+                    self.Energies = list()
+                else:
+                    raise ValueError(f'Other structures do not have energy, but here some energies is adding.')
+
+        if add_Forces is None:
+            if self.Forces is not None:
+                raise ValueError(f"Other structures have forces but here given `add_Forces` is None, which is not allowed.")
+            n_forces = n_samp
+        elif not isinstance(add_Forces, List):
+            raise TypeError(f'Expected `add_Forces` of list, but got {type(add_Forces)}.')
+        else:
+            _chk = [_ for _ in add_Forces if not isinstance(_, np.ndarray)]
+            if len(_chk) > 0:
+                raise TypeError(f'`add_Forces` must contain only np.ndarray elements, but got {type(_chk)}.')
+            n_forces = len(add_Forces)
+            if self.Forces is None:  # adding data into None
+                if len(self) == 0:
+                    self.Forces = list()
+                else:
+                    raise ValueError(f'Other structures do not have forces, but here some forces is adding.')
+
+        if add_Labels is None:
+            if self.Labels is not None:
+                raise ValueError(f"Other structures have labels but here given `add_Labels` is None, which is not allowed.")
+            n_labels = n_samp
+        elif not isinstance(add_Labels, List):
+            raise TypeError(f'Expected `add_Labels` of list, but got {type(add_Labels)}.')
+        else:
+            n_labels = len(add_Labels)
+            if self.Labels is None:  # adding data into None
+                if len(self) == 0:
+                    self.Forces = list()
+                else:
+                    raise ValueError(f'Other structures do not have forces, but here some forces is adding.')
+
+        samp_number_set = {n_samp, n_cells, n_elems, n_nums, n_coords_type, n_coords, n_fixed, n_energies, n_forces, n_labels}
+        if len(samp_number_set) > 1:
+            # i.e., some sample numbers are not equal
+            raise ValueError(
+                f'Sample numbers must be the same, '
+                f'but [n_samp, n_cells, n_elems, n_nums, n_coords_type, n_coords, n_fixed, n_energies, n_forces, n_labels] '
+                f'have sample numbers of {n_samp, n_cells, n_elems, n_nums, n_coords_type, n_coords, n_fixed, n_energies, n_forces, n_labels}.'
+            )
+
+        # load
+        _new_attr = [
+            add_Sample_ids,    # self.Sample_ids,
+            add_Cells,    # self.Cells,
+            add_Elements,    # self.Elements,
+            add_Numbers,    # self.Numbers,
+            add_Coords_type,    # self.Coords_type,
+            add_Coords,    # self.Coords,
+            add_Fixed,    # self.Fixed,
+            add_Energies,    # self.Energies,
+            add_Forces,    # self.Forces,
+            add_Labels,    # self.Labels
+        ]
+        _new_attr_type = [
+            None,
+            np.float32,
+            None,
+            None,
+            None,
+            np.float32,
+            np.int8,
+            None,
+            np.float32,
+            None,
+        ]
+        for _i, _attr in enumerate([
+            self.Sample_ids,
+            self.Cells,
+            self.Elements,
+            self.Numbers,
+            self.Coords_type,
+            self.Coords,
+            self.Fixed,
+            self.Energies,
+            self.Forces,
+            self.Labels
+        ]):
+            if _new_attr_type[_i] is not None:
+                _at = [_.astype(_new_attr_type[_i]) for _ in _new_attr[_i]]
+            else:
+                _at = _new_attr[_i]
+
+            if _attr is not None:
+                _attr.extend(_at)
+        # postprocess
+        if self.Atom_list is not None:
+            self.generate_atom_list(True)
+        if self.Atomic_number_list is not None:
+            self.generate_atomic_number_list(True)
+        if self.Dist_mat is not None:
+            warnings.warn(f'Due to the data change, old Dist_mat might be incorrect. Hence Dist_mat is reset to None.', RuntimeWarning)
+            self.Dist_mat = None
+        # check
+        self._check_id()
+        self._check_len()
+
     def sort_split_by_natoms(
             self,
             labels: Optional[Dict | List] = None,
