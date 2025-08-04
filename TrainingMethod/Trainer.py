@@ -7,6 +7,7 @@
 #  Environment: Python 3.12
 
 import copy
+import logging
 import os
 import re
 import time
@@ -57,6 +58,8 @@ class Trainer(_CONFIGS):
 
         Herein the input model must be an `uninstantiated` nn.Module class.
         """
+        # check logger
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START != 'from_scratch' and self.START != 0:
@@ -474,6 +477,10 @@ class Trainer(_CONFIGS):
                     self.logger.info(
                         f'*** Checkpoint file was saved in {os.path.join(self.CHK_SAVE_PATH, f"stop_checkpoint{self.CHK_SAVE_POSTFIX}.pt")}'
                     )
+            # close handler
+            self.logger.removeHandler(self.log_handler)
+            if isinstance(self.log_handler, logging.FileHandler):
+                self.log_handler.close()
 
     def _val(self, model, LOSS) -> Tuple[float, Dict]:
         """

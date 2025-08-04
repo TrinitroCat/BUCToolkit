@@ -1,4 +1,5 @@
 """ Calculating Normal Mode Vibration Frequencies """
+import logging
 #  Copyright (c) 2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -69,6 +70,8 @@ class VibrationAnalysis(_CONFIGS):
         Parameters:
             model: the input model which is `uninstantiated` nn.Module class.
         """
+        # check logger
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1:
@@ -338,4 +341,7 @@ class VibrationAnalysis(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
+            self.logger.removeHandler(self.log_handler)
+            if isinstance(self.log_handler, logging.FileHandler):
+                self.log_handler.close()
             pass

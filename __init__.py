@@ -5,6 +5,7 @@
 #  Environment: Python 3.12
 
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures as Structures
+from BM4Ckit import utils
 from BM4Ckit.utils._Element_info import TRANSITION_METALS, TRANSITION_P_METALS, NOBLE_METALS, NONRADIOACTIVE_METALS
 from BM4Ckit.Preprocessing import load_files
 from BM4Ckit.Preprocessing.load_files import load_from_structures as load
@@ -26,6 +27,7 @@ __all__ = [
     'TRANSITION_P_METALS',
     'NOBLE_METALS',
     'NONRADIOACTIVE_METALS',
+    'utils'
 
 ]
 

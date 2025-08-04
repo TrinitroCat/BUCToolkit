@@ -3,7 +3,7 @@
 #  Version: 0.9a
 #  File: Predictor.py
 #  Environment: Python 3.12
-
+import logging
 import os
 import time
 import warnings
@@ -46,6 +46,8 @@ class Predictor(_CONFIGS):
             None, if `SAVE_PREDICTIONS` in config_file is true.
             np.NdArray, if `SAVE_PREDICTIONS` in config_file is false.
         """
+        # check logger
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1:
@@ -189,4 +191,7 @@ class Predictor(_CONFIGS):
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n')
 
         finally:
+            self.logger.removeHandler(self.log_handler)
+            if isinstance(self.log_handler, logging.FileHandler):
+                self.log_handler.close()
             pass

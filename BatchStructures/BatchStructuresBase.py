@@ -283,6 +283,29 @@ class BatchStructures(object):
 
         self.Mode = 'A'
 
+    def change_mode(self, mode: Literal['A', 'L'], release_mem: bool = True):
+        """
+        Change BatchStructure mode.
+        Args:
+            mode: 'A' is 'array mode' that all data are stored as concatenated np.ndarray,
+             and two ptr arrays of split each structure's atom number are accordingly stored. Some methods in this mode are unavailable.
+             'L' is 'list mode' that all data are stored as Lists of np.ndarray/List with (different) shapes of atom numbers.
+            release_mem: if True, the data of other mode will be released after change.
+
+        Returns: None
+
+        """
+        if mode == 'A':
+            if self.Mode == 'L':
+                self._list2np(release_mem=release_mem)
+                self.Mode = 'A'
+        elif mode == 'L':
+            if self.Mode == 'A':
+                self._np2list(release_mem=release_mem)
+                self.Mode = 'L'
+        else:
+            raise ValueError(f"'mode' must be 'A' or 'L', but got '{mode}'.")
+
     def _update_indices(self, ):
         if self.Mode == 'L':
             self._indices = {_: ii for ii, _ in enumerate(self._Sample_ids)}
@@ -785,6 +808,9 @@ class BatchStructures(object):
             # calculate cross-cell dist.; cell_diff = supercell_indices @ cell_vec; <<<
             # shape: (n_prim_cells, 1, 3)@(1, 3, 3) -> (n_prim_cells, 1, 3)
             cell_diff = (supercell_indices[:, None, :]) @ (cell_vectors[None, :, :])
+            # convert direct to cartesian
+            if self.Coords_type[i] == 'D':
+                atomic_coordinates = atomic_coordinates @ cell_vectors
             # calculate the atom coords across cells (x_j + R_k) <<<
             # shape: (1, n_atom, 3) + (n_prim_cells, 1, 3)
             #     -> (n_prim_cells, n_atom, 3)

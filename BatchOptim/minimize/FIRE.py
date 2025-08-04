@@ -9,6 +9,7 @@ import copy
 #  Environment: Python 3.12
 
 import logging
+import os
 import sys
 import time
 import warnings
@@ -156,7 +157,7 @@ class FIRE:
             output_grad: bool, whether output gradient of last step.
             fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
             batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
-                the format of batch_indices is same as `split_size_or_sections` in torch.split:
+                the format of batch_indices is the same as `split_size_or_sections` in torch.split:
                 batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
             elements: Optional[Sequence[Sequence[str | int]]], the Element of each given atom in X.
 
@@ -165,7 +166,7 @@ class FIRE:
             argmin func: Tensor(X.shape), the X corresponds to min func.
             grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
         """
-
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         t_main = time.perf_counter()
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
@@ -295,7 +296,8 @@ class FIRE:
                         X_tup = (X.numpy(force=True),)
                         F_tup = (F.numpy(force=True),)
                 # judge
-                E_eps = th.abs(y - y0)
+                E_diff = y - y0
+                E_eps = th.abs(E_diff)
                 if self.is_concat_X:
                     # (1, n_batch*n_atom, 3)
                     F_eps = scatter_reduce(
@@ -315,7 +317,7 @@ class FIRE:
                 # verbose
                 if self.verbose > 0:
                     self.logger.info(f"ITERATION {numit:>5d}\n "
-                                     f"MAD_energies: {np.array2string(E_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                                     f"MAD_energies: {np.array2string(E_diff.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"MAX_F: {np.array2string(F_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"Energies: {np.array2string(y.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                                      f"Converged: {np.array2string(converge_str, **STRING_ARRAY_FORMAT)}\n "
@@ -459,6 +461,6 @@ class FIRE:
             if not is_main_loop_converge: warnings.warn('Some Structures were NOT Converged yet!', FaildToConvergeWarning)
         # output
         if output_grad:
-            return y, X, F
+            return y, X, - F
         else:
             return y, X  #, ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<

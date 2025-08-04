@@ -3,7 +3,7 @@
 #  Version: 0.9a
 #  File: MolecularDynamics.py
 #  Environment: Python 3.12
-
+import logging
 import os
 import time
 import traceback
@@ -87,6 +87,8 @@ class MolecularDynamics(_CONFIGS):
         Parameters:
             model: the input model which is non-instantiated nn.Module class.
         """
+        # check logger
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1:
@@ -253,4 +255,7 @@ class MolecularDynamics(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
+            self.logger.removeHandler(self.log_handler)
+            if isinstance(self.log_handler, logging.FileHandler):
+                self.log_handler.close()
             pass

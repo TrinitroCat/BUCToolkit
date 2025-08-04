@@ -3,7 +3,7 @@
 #  Version: 0.9a
 #  File: StructureOptimization.py
 #  Environment: Python 3.12
-
+import logging
 import os
 import time
 import traceback
@@ -34,11 +34,10 @@ class StructureOptimization(_CONFIGS):
         data_type: graph data type. 'pyg' for torch-geometric BatchData, 'dgl' for dgl DGLGraph.
 
     Input file parameters:
-        # General settings:
-          REQUIRE_GRAD: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs). Default: False.
         # For relaxation tasks:
         RELAXATION:
           ALGO: Literal[CG, BFGS, FIRE], the optimization algo.
+          REQUIRE_GRAD: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs). Default: False.
           ITER_SCHEME: Literal['PR+', 'FR', 'PR', 'WYL'], only use for ALGO=CG, the iteration scheme of CG. Default: PR+.
           E_THRES: float, threshold of Energy difference (eV). Default: 1e-4.
           F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
@@ -183,6 +182,8 @@ class StructureOptimization(_CONFIGS):
         Parameters:
             model: the input model which is `uninstantiated` nn.Module class.
         """
+        # check logger
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
@@ -191,12 +192,10 @@ class StructureOptimization(_CONFIGS):
                 _model.load_state_dict(chk_data['model_state_dict'], strict=self.STRICT_LOAD)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
                 '** WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING! **'
             )
-            epoch_now = 0
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
         else:
@@ -489,13 +488,17 @@ class StructureOptimization(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
-            pass
+            self.logger.removeHandler(self.log_handler)
+            if isinstance(self.log_handler, logging.FileHandler):
+                self.log_handler.close()
 
     def transition_state(self, model):
         """
         Parameters:
             model: the input model which is `uninstantiated` nn.Module class.
         """
+        # check logger
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1:
@@ -750,6 +753,9 @@ class StructureOptimization(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
+            self.logger.removeHandler(self.log_handler)
+            if isinstance(self.log_handler, logging.FileHandler):
+                self.log_handler.close()
             pass
 
     def ts(self, model):
