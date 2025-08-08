@@ -187,7 +187,6 @@ class MolecularDynamics(_CONFIGS):
             mole_dynam = self.MDType(**self.MD_config)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # running batch now
-            X_dict = dict()
             for val_data, val_label in val_set:
                 try:
                     # to avoid get an empty batch
@@ -233,20 +232,12 @@ class MolecularDynamics(_CONFIGS):
 
                 except Exception as e:
                     self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
-                    if self.VERBOSE > 1:
+                    if self.VERBOSE > 0:
                         excp = traceback.format_exc()
                         self.logger.warning(f"Traceback:\n{excp}")
                     n_c += 1
 
             if self.VERBOSE: self.logger.info(f'Molecular Dynamics Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
-            if self.SAVE_PREDICTIONS:
-                t_save = time.perf_counter()
-                with _LoggingEnd(self.log_handler):
-                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS...')
-                th.save(X_dict, self.PREDICTIONS_SAVE_FILE)
-                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
-            else:
-                return X_dict
 
         except Exception as e:
             th.cuda.synchronize()

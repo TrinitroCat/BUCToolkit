@@ -110,28 +110,25 @@ class NVT(_BaseMD):
             damp_coeff = self.thermostat_config.get('damping_coeff', 0.01)  # Unit: fs^-1
             alpha = th.e ** (- damp_coeff * self.time_step)
             # half-step
-            V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
-            X = X + 0.5 * V * self.time_step
+            V.add_(Force / (2. * masses), alpha = self.time_step * 9.64853329045427e-3)
+            X.add_(V, alpha = 0.5 * self.time_step)
             # stochastic update velocity
-            V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
+            V.mul_(alpha)
+            V.add_(th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V))
+            #V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
             # the rest half-step
-            X = X + 0.5 * V * self.time_step
-            V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            X.add_(V, alpha = 0.5 * self.time_step)
+            V.add_(Force / (2. * masses), alpha = self.time_step * 9.64853329045427e-3)
             # update energy & forces
-            with th.enable_grad():
-                # Update V
-                X.requires_grad_()
-                _Energy = func(X, *func_args, **func_kwargs)
-                if batch_indices is not None:
-                    Energy = th.sum(_Energy, ).unsqueeze(0)
-                else:
-                    Energy = _Energy
+            with th.set_grad_enabled(self.require_grad):
+                X.requires_grad_(self.require_grad)
+                Energy = func(X, *func_args, **func_kwargs)
                 if is_grad_func_contain_y:
                     Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
                     Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
-        return X, V, _Energy, Force
+        return X, V, Energy, Force
 
     def __VR(
             self,
@@ -154,14 +151,9 @@ class NVT(_BaseMD):
         with th.no_grad():
             X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            with th.enable_grad():
-                # Update V
-                X.requires_grad_()
-                _Energy = func(X, *func_args, **func_kwargs)
-                if batch_indices is not None:
-                    Energy = th.sum(_Energy, ).unsqueeze(0)
-                else:
-                    Energy = _Energy
+            with th.set_grad_enabled(self.require_grad):
+                X.requires_grad_(self.require_grad)
+                Energy = func(X, *func_args, **func_kwargs)
                 if is_grad_func_contain_y:
                     Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
@@ -177,7 +169,7 @@ class NVT(_BaseMD):
                 alpha = th.sqrt(self.EK_TARGET / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
                 V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
 
-        return X, V, _Energy, Force
+        return X, V, Energy, Force
 
     def __CSVR(
             self,
@@ -199,24 +191,23 @@ class NVT(_BaseMD):
         # read thermostat configs
         time_const = self.thermostat_config.get('time_const', 10 * self.time_step)  # Unit: fs^-1
         # NVE Step
-        X = X.detach()
+        X: th.Tensor = X.detach()
         with th.no_grad():
-            X += V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
-            V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            with th.enable_grad():
-                # Update V
-                X.requires_grad_()
-                _Energy = func(X, *func_args, **func_kwargs)
-                if batch_indices is not None:
-                    Energy = th.sum(_Energy, ).unsqueeze(0)
-                else:
-                    Energy = _Energy
+            #X += V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
+            X.add_(V, alpha=self.time_step)
+            X.add_(Force / (2. * masses), alpha=self.time_step ** 2 * 9.64853329045427e-3)
+            #V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
+            V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
+            with th.set_grad_enabled(self.require_grad):
+                X.requires_grad_(self.require_grad)
+                Energy = func(X, *func_args, **func_kwargs)
                 if is_grad_func_contain_y:
                     Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
                     Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
-            V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            #V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
 
             # Kinetic Energy Redistribution, Rescale Velocities
             # sigma = th.sqrt((2. * masses * self.T_init / (self.time_step * time_const)) * (0.138064853 / (6.022140857 * 1.602176634 ** 2)))
@@ -241,7 +232,7 @@ class NVT(_BaseMD):
                 alpha = th.sqrt(self.Ekt_vir / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
                 V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
 
-        return X, V, _Energy, Force
+        return X, V, Energy, Force
 
     def __NoseHoover(
             self,
@@ -283,9 +274,9 @@ class NVT(_BaseMD):
                 _iota = self.p_iota
             V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3 - 0.5 * _iota * V * self.time_step
             X += V * self.time_step
-            with th.enable_grad():
-                # Update V
-                X.requires_grad_()
+
+            with th.set_grad_enabled(self.require_grad):
+                X.requires_grad_(self.require_grad)
                 _Energy = func(X, *func_args, **func_kwargs)
                 if batch_indices is not None:
                     Energy = th.sum(_Energy, ).unsqueeze(0)

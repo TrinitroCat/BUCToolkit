@@ -1,3 +1,0 @@
-1. To implement a device-mapping BatchStructures (instead of in-memory)
-2. To write BatchStructures to POSCARS in parallel / to XDATCAR / to compressed file
--3. To add Selective Dynamics to BatchStructures-

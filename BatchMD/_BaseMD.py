@@ -16,7 +16,8 @@ from torch import nn
 import numpy as np
 
 from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER
-from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.utils.scatter_reduce import scatter_reduce
 
 
 class _BaseMD:
@@ -74,6 +75,29 @@ class _BaseMD:
                 log_handler.setFormatter(formatter)
             self.logger.addHandler(log_handler)
 
+    def _reduce_Ek_T(self, batch_indices, masses, V, n_atom, n_dim):
+        if batch_indices is not None:
+            Ek = th.sum(
+                0.5 * scatter_reduce(
+                    masses * V ** 2,
+                    self.batch_scatter,
+                    1
+                ) * 103.642696562621738,
+                dim=-1
+            )  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
+
+            temperature = (2 * Ek) / (n_dim * (self.batch_tensor - 1 + 1e-20) * 8.617333262145e-5)
+        else:
+            Ek = 0.5 * th.sum(
+                masses * V ** 2,
+                dim=(-2, -1)
+            ) * 103.642696562621738  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
+            temperature = (2 * Ek) / (
+                    n_dim * (n_atom - 1 + 1e-20) * 8.617333262145e-5
+            )  # Boltzmann constant kB = 8.617333262145e-5 eV/K
+
+        return Ek, temperature
+
     def run(
             self,
             func: Any | nn.Module,
@@ -86,6 +110,7 @@ class _BaseMD:
             grad_func_args: Sequence = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
@@ -103,6 +128,7 @@ class _BaseMD:
             grad_func_args: optional, other input of grad_func.
             grad_func_kwargs: optional, other input of grad_func.
             is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X i.e., grad = grad_func(X, y, ...), else grad = grad_func(X, ...)
+            require_grad: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs) calculation.
             batch_indices: the split points for given X, Element_list & V_init, must be 1D integer array_like.
                 the format of batch_indices is the same as `split_size_or_sections` in torch.split:
                 batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
@@ -133,12 +159,12 @@ class _BaseMD:
                 raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
                                 f'It must be List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None')
             for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)
+            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)  # the tensor version of batch_indices which is a List.
             self.batch_scatter = th.repeat_interleave(
                 th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
                 self.batch_tensor,
                 dim=0
-            )
+            )  # scatter mask of the int tensor with the same shape as X.shape[1], which the data in one batch have one index.
 
         # Manage Atomic Type & Masses
         masses = list()
@@ -213,13 +239,17 @@ class _BaseMD:
             masses_sum = th.sum(masses, dim=1, keepdim=True)  # (n_batch, 1, n_dim)
 
         # initialize thermostat parameters
+        # (n_batch, ), eV/atom. The initial virtual Ek_t for CSVR.
         self.Ekt_vir = th.cat(
             [0.5 * th.sum(_m * V_tup[_] ** 2, dim=(-2, -1)) * 103.642696562621738 for _, _m in enumerate(masses_tup)]
-        )  # (n_batch, ), eV/atom. The initial virtual Ek_t for CSVR.
+        )
+        # The initial iota for Nose-Hoover
         if batch_indices is not None:
             self.p_iota = th.zeros(1, len(batch_indices), device=self.device, dtype=th.float32)
         else:
             self.p_iota = 0.
+        # whether grad needs autograd
+        self.require_grad = require_grad
 
         # print Atoms Information
         if self.verbose > 0:
@@ -260,23 +290,21 @@ class _BaseMD:
         # MAIN Loop
         with th.no_grad():
             t_in = time.perf_counter()
-            with th.enable_grad():
-                X.requires_grad_()
-                _Energy = func(X, *func_args, **func_kwargs)  # Note: func must return th.Tensor(n_batch, )
+            with th.set_grad_enabled(require_grad):
+                X.requires_grad_(require_grad)
+                Energy = func(X, *func_args, **func_kwargs)  # Note: func must return th.Tensor(n_batch, )
                 if batch_indices is not None:
-                    if len(_Energy) != len(batch_indices):  # check batch number of output
+                    if len(Energy) != len(batch_indices):  # check batch number of output
                         raise RuntimeError(
-                            f'batch number of `func` output ({len(_Energy)}) does not match the input `batch_indices` ({len(batch_indices)}'
+                            f'batch number of `func` output ({len(Energy)}) does not match the input `batch_indices` ({len(batch_indices)}'
                         )
-                    Energy = th.sum(_Energy, ).unsqueeze(0)
-                else:
-                    Energy = th.atleast_1d(_Energy)
+
                 if is_grad_func_contain_y:
                     Forces = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
                     Forces = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-            temperature = th.empty(len(V_tup), len(Energy), device=self.device, dtype=Energy.dtype)
-            Ek = th.empty(len(V_tup), len(Energy), device=self.device, dtype=th.float32)
+            temperature_ = th.empty(len(V_tup), 1, device=self.device, dtype=Energy.dtype)
+            Ek_ = th.empty(len(V_tup), 1, device=self.device, dtype=th.float32)
 
             #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
             for i in range(self.max_step):
@@ -291,13 +319,14 @@ class _BaseMD:
                     V_tup = (V,)
                 # update Ek and temperature  TODO: optimize by scatter ops.
                 for _i, __x in enumerate(V_tup):
-                    Ek[_i] = 0.5 * th.sum(
+                    Ek_[_i] = 0.5 * th.sum(
                         masses_tup[_i] * __x ** 2,
                         dim=(-2, -1)
                     ) * 103.642696562621738  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
-                    temperature[_i] = (2 * Ek[_i]) / (
+                    temperature_[_i] = (2 * Ek_[_i]) / (
                             n_dim * (__x.shape[1] - 1 + 1e-20) * 8.617333262145e-5
                     )  # Boltzmann constant kB = 8.617333262145e-5 eV/K
+                Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V, n_atom, n_dim)
                 self.Ek = Ek.squeeze()  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
                 # if self.verbose > 0:
                 if i % self.output_structures_per_step == 0:
@@ -327,24 +356,24 @@ class _BaseMD:
                     if self.verbose > 0:
                         np.set_printoptions(
                             precision = 8,
-                            linewidth = 120,
+                            linewidth = 1024,
                             floatmode = 'fixed',
                             suppress = True,
-                            formatter = {'float': '{:> .8e}'.format},
+                            formatter = {'float': '{:> .2f}'.format},
                             threshold = 2000
                         )
                         self.logger.info(
                             f'Step: {i:>12d}\n\t'
                             f'T     = {temperature.squeeze().numpy(force=True)}\n\t'
-                            f'E_tol = {(Ek.squeeze() + _Energy.squeeze()).numpy(force=True)}\n\t'
-                            f'Ek    = {Ek.squeeze().numpy(force=True)}\n\t'
-                            f'Ep    = {_Energy.squeeze().numpy(force=True)}\n\t'
+                            f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Ek    = {np.array2string(Ek.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Ep    = {np.array2string(Energy.squeeze().squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
                             f'Time: {time.perf_counter() - t_in:>5.4f}'
                         )
                         t_in = time.perf_counter()
 
                 # Update X, V
-                X, V, _Energy, Forces = self._updateXV(
+                X, V, Energy, Forces = self._updateXV(
                     X, V, Forces,
                     func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
                     masses, atom_masks, is_grad_func_contain_y, batch_indices
@@ -398,21 +427,14 @@ class _BaseMD:
                         del V_str
                     self.logger.info('_' * 100)
                 th.cuda.synchronize()
-                for _i, __x in enumerate(V_tup):
-                    Ek[_i] = 0.5 * th.sum(
-                        masses_tup[_i] * __x ** 2,
-                        dim=(-2, -1)
-                    ) * 103.642696562621738  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
-                    temperature[_i] = (
-                            (2 * Ek[_i]) / (n_dim * (__x.shape[1] - 1 + 1e-20) * 8.617333262145e-5)
-                    )  # Boltzmann constant kB = 8.617333262145e-5 eV/K
+                Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V, n_atom, n_dim)
                 self.Ek = Ek #th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
                 self.logger.info(
-                    f'Finale Step:\n\t'
-                    f'T     = {temperature.squeeze().numpy(force=True)}\n\t'
-                    f'E_tol = {(Ek.squeeze() + _Energy.squeeze()).numpy(force=True)}\n\t'
-                    f'Ek    = {Ek.squeeze().numpy(force=True)}\n\t'
-                    f'Ep    = {_Energy.squeeze().numpy(force=True)}\n\t'
+                    f'Step: {i:>12d}\n\t'
+                    f'T     = {temperature.numpy(force=True)}\n\t'
+                    f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                    f'Ek    = {np.array2string(Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                    f'Ep    = {np.array2string(Energy.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
                     f'Time: {time.perf_counter() - t_in:>5.4f}'
                 )
                 self.logger.info('_' * 100 + '\n' + f'Main Loop Done. Total Time: {time.perf_counter() - t_main:>.4f}')
