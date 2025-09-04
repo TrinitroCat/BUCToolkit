@@ -500,7 +500,6 @@ class OUTCAR2Feat(BatchStructures):
         self.path = path
         self.Energies = list()
         self.Forces = list()
-        self.Labels = list()
 
         self.__n_atom_partt = re.compile(r"(?<=NIONS =)\s+[0-9]+\n")
         self.__pos_force_partt = re.compile(
@@ -782,6 +781,7 @@ class OUTCAR2Feat(BatchStructures):
         Update the attribute self.data.
         """
         t_st = time.perf_counter()
+        self.Labels = list()
         if file_list is None:
             file_list = os.listdir(self.path)
             file_list = [f_ for f_ in file_list if os.path.isfile(os.path.join(self.path, f_))]
