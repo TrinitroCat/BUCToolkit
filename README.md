@@ -4,7 +4,7 @@
 A Python-based package containing various tools for machine learning applied in catalytic chemistry, 
 including reading, writing, filtering, modifying, and format conversion of batched structure files, training ML models, model predictions, ML-potential-based batched structure optimization and molecular dynamics, etc.
 
-Manuals would be completed soon. You can find the current manuals in [Manual](Manual/).
+Manuals would be completed soon. You can find the current manuals in [Manual](Manual/), and the Wiki: [Wiki](https://hectopasca1.github.io/BM4Ckit_wiki/).
 
 The project is still in an early version and may change significantly in the future.
 
