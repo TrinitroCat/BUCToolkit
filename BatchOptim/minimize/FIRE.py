@@ -280,7 +280,7 @@ class FIRE:
             self.logger.info('Iteration Scheme: FIRE')
             self.logger.info('-' * 100)
         # MAIN LOOP
-        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         with th.no_grad():
             for numit in range(self.maxiter):  # Simple Euler
                 t_st = time.perf_counter()
@@ -361,6 +361,7 @@ class FIRE:
                     atom_masks_ = atom_masks[:, select_mask, :]
                     t_ = t
                     a_ = a
+                    n_count_ = n_count
                 else:
                     select_mask = ~converge_check
                     y_ = y[select_mask]
@@ -371,6 +372,7 @@ class FIRE:
                     atom_masks_ = atom_masks[select_mask, ...]
                     t_ = t[select_mask, ...]
                     a_ = a[select_mask, ...]
+                    n_count_ = n_count[select_mask, ...]
 
                 # Forward Euler Algo. to update X & v
                 v_.add_(F_ * t_ / masses_)  # (n_batch, n_atom, n_dim)
@@ -389,13 +391,13 @@ class FIRE:
                 X_ = X_.detach()
                 F_hat = F_ / th.linalg.norm(F_, dim=(-2, -1), keepdim=True)
                 # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
-                p = th.sum(F_ * v_, dim=(-1, -2))
+                p = th.sum(F_ * v_, dim=(-1, -2), keepdim=True)
                 # update velocity
                 v_.mul_((1 - a_))
                 v_.add_(a_ * th.linalg.norm(v_, dim=(-2, -1), keepdim=True) * F_hat)
                 # if P > 0.
-                n_count += th.where(p > 0., 1, -n_count)
-                is_ncount_gt_Nmin = n_count >= self.N_min
+                n_count_ += th.where(p > 0., 1, -n_count_)
+                is_ncount_gt_Nmin = n_count_ >= self.N_min
                 new_t_ = th.where(t_ * self.fac_inc < 10 * self.steplength, t_ * self.fac_inc, 10 * self.steplength)
                 t_ = th.where(is_ncount_gt_Nmin, new_t_, t_)
                 a_ = th.where(is_ncount_gt_Nmin, a_ * self.alpha_fac, a_)
@@ -417,6 +419,7 @@ class FIRE:
                     masses.index_copy_(1, select_indices, masses_)
                     t = t_
                     a = a_
+                    n_count = n_count_
                 else:
                     select_indices = th.where(select_mask)[0]
                     y.index_copy_(0, select_indices, y_)
@@ -426,8 +429,9 @@ class FIRE:
                     masses.index_copy_(0, select_indices, masses_)
                     t.index_copy_(0, select_indices, t_)
                     a.index_copy_(0, select_indices, a_)
+                    n_count.index_copy_(0, select_indices, n_count_)
 
-                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
@@ -463,4 +467,4 @@ class FIRE:
         if output_grad:
             return y, X, - F
         else:
-            return y, X  #, ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            return y, X  , ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<

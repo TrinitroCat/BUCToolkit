@@ -406,7 +406,16 @@ class BatchStructures(object):
             self.Labels_
         ]
         if mode == 'w':
-            # head file: containing the tag which attr. is None, the batch number, the shape of each attr., and the type of attr.
+            #############################################################################################################################
+            # head file: A pickle file containing the tag which attr. is None, the batch number, the shape of each attr., and the type of attr.
+            # head_info: Dict, {
+            #   "which_None": Set[str], {_attr_names1, _attr_names2, ...},
+            #   "n_batch": int, the number of samples,
+            #   `_attr1`(str): Tuple[str, Tuple[int, ...]], (_dtype, _shape),
+            #   `_attr2`(str): Tuple[str, Tuple[int, ...]], (_dtype, _shape),
+            #   ...
+            # }
+            #############################################################################################################################
             head_info = {'which_None': set(), 'n_batch': len(self)}
             for i, filename in enumerate(self._ATTR_NAMES):
                 if _temp_attr_list[i] is not None:
@@ -427,6 +436,7 @@ class BatchStructures(object):
                 head_info = pickle.dumps(head_info)
                 head.write(head_info)
             del _temp_attr_list
+
         else:  # mode == 'a', append
             # Read head file
             with open(os.path.join(path, 'head'), 'rb') as head:
@@ -941,17 +951,16 @@ class BatchStructures(object):
         """
         Revising data of given `index`. None is for not changing.
         Args:
-            index:
-            rev_Sample_ids:
-            rev_Cells:
-            rev_Elements:
-            rev_Numbers:
-            rev_Coords_type:
-            rev_Coords:
-            rev_Fixed:
-            rev_Energies:
-            rev_Forces:
-            rev_Labels:
+            index: the index of structure to revise.
+            rev_Sample_ids: Sample ids of structure to revise.
+            rev_Cells: Cell ids of structure to revise.
+            rev_Elements: Elements ids of structure to revise.
+            rev_Numbers: Numbers of structure to revise.
+            rev_Coords_type: Coords of structure to revise.
+            rev_Coords: Coords of structure to revise.
+            rev_Energies: Energies of structure to revise.
+            rev_Forces: Forces of structure to revise.
+            rev_Labels: Labels of structure to revise.
 
         """
         assert self.Mode == 'L', f'Mode "A" does not support yet.'
@@ -1406,7 +1415,7 @@ class BatchStructures(object):
         """
         Append information of another BatchStructures to self.
         If original data do not have some properties but appending data do,
-         these properties of original data would be padded with `None`, and vice versa.
+        these properties of original data would be padded with `None`, and vice versa.
         Args:
             batch_structures: the BatchStructures to append
             strict: If True, `batch_structures` contains any id which is already in `self` would raise an Error;

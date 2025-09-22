@@ -117,7 +117,7 @@ class _BaseOpt:
     ) -> None:
         """
         Set a method to update the taget function when variables change.
-        It receives a mask tensor of shape (n_batch, ) that only selects the `True` part to input to function, and receives the old
+        It receives a mask tensor of shape (n_batch, ) that only selects the `True` part to input to the function, and receives the old
         `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`,
         returns the corresponding masked new `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`.
 
@@ -126,7 +126,8 @@ class _BaseOpt:
 
         Default transform is identical transform (i.e., do nothing)
         Args:
-            method: the method of updating function arguments for a mask.
+            method: Callable(mask: Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict) -> Tuple[Tuple, Dict, Tuple, Dict],
+the method of updating function arguments for a mask.
 
         Returns: None
         """
@@ -164,7 +165,7 @@ class _BaseOpt:
             output_grad: bool, whether output gradient of last step.
             fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
             batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
-                the format of batch_indices is same as `split_size_or_sections` in torch.split:
+                the format of batch_indices is the same as `split_size_or_sections` in torch.split:
                 batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
 
         Return:
@@ -208,14 +209,12 @@ class _BaseOpt:
             batch_indx_dict = dict()
             batch_tensor = None
         # initialize vars
-        E_threshold = self.E_threshold
-        F_threshold = self.F_threshold
         maxiter = self.maxiter
         n_batch, n_atom, n_dim = X.shape
         self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
         if grad_func is None:
             is_grad_func_contain_y = True
-            require_grad = False
+            require_grad = True
             def grad_func_(y, x, grad_shape=None):
                 if grad_shape is None:
                     grad_shape = th.ones_like(y)
@@ -223,6 +222,7 @@ class _BaseOpt:
                 return _g[0]
         else:
             grad_func_ = grad_func
+        self._line_search.require_grad = require_grad  # set linear search
         # Selective dyamics
         if fixed_atom_tensor is None:
             atom_masks = th.ones_like(X, device=self.device)
@@ -242,6 +242,7 @@ class _BaseOpt:
             func.zero_grad()
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
+        X = X.detach()
         X = X.to(self.device)
 
         # initialize
@@ -260,7 +261,7 @@ class _BaseOpt:
         self.converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
         X_grad_old = th.full((n_batch, n_atom , n_dim), 1e-6, dtype=th.float32, device=self.device)  # initial old grad
         displace = th.full_like(X_grad_old, 0.)
-        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
+        ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
             self.logger.info('-' * 100)
             self.logger.info(f'Iteration Scheme: {self.iterform}')
@@ -285,7 +286,7 @@ class _BaseOpt:
                     X_grad = grad_func_(X, *grad_func_args, **grad_func_kwargs)
                 if X_grad.shape != X.shape:
                     raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
-            energies.detach_()
+            energies = energies.detach()
             X_grad = X_grad.detach()
             X_grad.mul_(atom_masks)
             X = X.detach()
@@ -421,7 +422,7 @@ class _BaseOpt:
                         X_grad_ = grad_func_(energies_, X_, *grad_func_args_, **grad_func_kwargs_)
                     else:
                         X_grad_ = grad_func_(X_, *grad_func_args_, **grad_func_kwargs_)
-                energies_.detach_()
+                energies_ = energies_.detach()
                 X_grad_ = X_grad_.detach() * atom_masks_
                 X_.detach_()
 
@@ -455,7 +456,7 @@ class _BaseOpt:
                 # Check NaN
                 if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
 
-                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
@@ -498,7 +499,7 @@ class _BaseOpt:
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X  #, ptlist  # test <<<
+            return energies, X  , ptlist  # test <<<
 
     def initialize_algo_param(self):
         """
