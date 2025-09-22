@@ -31,6 +31,10 @@ class QN(_BaseOpt):
         external_Hessian: manually input Hessian matrix as initial guess.
         device: str | th.device = 'cpu',
         verbose: int = 2
+
+    Methods:
+        run: launch the optimization.
+        set_update_batch: setting the method to update the taget function when variables change.
     """
     def __init__(
             self,

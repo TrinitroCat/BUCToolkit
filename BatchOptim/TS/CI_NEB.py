@@ -49,7 +49,7 @@ class CI_NEB:
             E_threshold = E_threshold,
             F_threshold = F_threshold,
             maxiter = maxiter,
-            linesearch = 'None',
+            linesearch = linesearch,
             linesearch_maxiter = 10,
             linesearch_thres = 0.02,
             linesearch_factor = 0.6,
@@ -81,52 +81,57 @@ class CI_NEB:
 
     class __NebWrapper:
         """ function wrapper for NEB, Adding the elastic potential """
-        def __init__(self, f: Callable, gf: Callable, k: float, is_grad_contain_y: bool):
+        def __init__(self, f: Callable, gf: Callable, k: float, require_grad: bool, is_grad_contain_y: bool):
             self.ener = None
+            self.F_ori = None
             self.f = f
             self.gf = gf
             self.k = k
             self.is_grad_contain_y = is_grad_contain_y
+            self.require_grad = require_grad
 
         def energy(self, X, *args, **kwargs):
-            with th.enable_grad():
+            with th.set_grad_enabled(self.require_grad):
+                X.requires_grad_(self.require_grad)
                 y = self.f(X, *args, **kwargs)
                 self.ener = y
-            return y
+                if self.is_grad_contain_y:  # here `X` is actually `y`
+                    F_ori = self.gf(y, X, *args, **kwargs)  # (n_i, n_atom, 3)
+                else:
+                    F_ori = self.gf(X, *args, **kwargs)  # (n_i, n_atom, 3)
+                self.F_ori = F_ori
+            return th.einsum('bij, bij -> b', F_ori, F_ori)
 
         def grad(self, X, *args, **kwargs):
             assert self.ener is not None, 'Energy is None now, please calculate energy first.'
-            with th.enable_grad():
-                X.requires_grad_()
-                if self.is_grad_contain_y:  # here `X` is actually `y`
-                    F_ori = self.gf(X, args[0], *(args[1:]), **kwargs)  # (n_i, n_atom, 3)
-                    X = args[0]
-                else:
-                    F_ori = self.gf(X, *args, **kwargs)  # (n_i, n_atom, 3)
-                n_i, n_atom, n_dim = X.shape
+            F_ori = self.F_ori  # (n_i, n_atom, 3)
+            X = args[0]
+            n_i, n_atom, n_dim = X.shape
 
             with th.no_grad():
                 # projected direction
                 _tau = th.diff(X, dim=0)  # (n_i - 1, n_atom, 3)
-                ediff = th.diff(self.ener)  # (n_i, )
-                ediff_back = ediff[:-1].unsqueeze(-1).unsqueeze(-1)  # (n_i - 2, ), E_(n) - E_(n-1)
-                tau_back = _tau[:-1]
-                ediff_front  = ediff[1:].unsqueeze(-1).unsqueeze(-1)   # (n_i - 2, ), E_(n+1) - E_(n)
-                tau_front = _tau[1:]
-                #tau_shift = th.cat((th.zeros((1, n_atom, n_dim)), tau), dim=0)  # (n_i, n_atom, 3)
-                delta_Emax = th.where(th.abs(ediff_front) - th.abs(ediff_back) > 0, th.abs(ediff_front), th.abs(ediff_back))
-                delta_Emin = th.where(th.abs(ediff_front) - th.abs(ediff_back) < 0, th.abs(ediff_front), th.abs(ediff_back))
+                ediff = th.diff(self.ener)  # (n_i - 1, )
+                # *_back = E[i] - E[i - 1]
+                ediff_back = ediff[:-1].unsqueeze(-1).unsqueeze(-1)  # (n_i - 2, 1, 1), E_(n) - E_(n-1), keep the same dim as `_tau`
+                tau_back = _tau[:-1]  # set of image[0 : n_i - 1], X[i] - X[i - 1]
+                # *_front  = E[i + 1] - E[i]
+                ediff_front  = ediff[1:].unsqueeze(-1).unsqueeze(-1)   # (n_i - 2, 1, 1), E_(n+1) - E_(n)
+                tau_front = _tau[1:]  # set of image[1 : n_i], X[i + 1] - X[i]
+                # *_front - *_back: image[i + 1] - image[i] & deltaE[i + 1] - deltaE[i] for each i \in [0, n_i - 1]
+                delta_Emax = th.where(th.abs(ediff_front) > th.abs(ediff_back), th.abs(ediff_front), th.abs(ediff_back))
+                delta_Emin = th.where(th.abs(ediff_front) < th.abs(ediff_back), th.abs(ediff_front), th.abs(ediff_back))
                 tau_extreme = th.where(
                     ediff_front + ediff_back > 0,  # (E_(n+1) > E_(n-1))
-                    tau_front * delta_Emax + tau_back * delta_Emin,
-                    tau_front * delta_Emin + tau_back * delta_Emax
+                    tau_front * delta_Emax - tau_front * delta_Emin,
+                    tau_front * delta_Emin - tau_front * delta_Emax
                 )
                 tau = th.where(
                     (ediff_front > 0) * (ediff_back > 0),
                     tau_front,
                     th.where(
                         (ediff_front <= 0) * (ediff_back <= 0),
-                        tau_back,
+                        - tau_front,
                         tau_extreme
                     )
                 )# (n_i - 2, n_atom, n_dim)
@@ -136,15 +141,15 @@ class CI_NEB:
                 F_ori[-1] = 0.
                 F_image = F_ori[1: -1].flatten(-2, -1)  # (n_i - 2, n_atom*n_dim)
                 # climbing
-                #max_indx = th.argmax(self.ener[1:-1])
-                #maxF = F_image[max_indx]
-                #maxF = maxF - 2 * ((maxF.unsqueeze(0) @ tau[max_indx].unsqueeze(-1)).squeeze()) * tau[max_indx]
+                max_indx = th.argmax(self.ener[1:-1])
+                maxF = F_image[max_indx]
+                maxF -= 2 * ((maxF.unsqueeze(0) @ tau[max_indx].unsqueeze(-1)).squeeze()) * tau[max_indx]
                 # other NEB
                 F_vert = F_image - ((F_image.unsqueeze(1) @ tau.unsqueeze(-1)).squeeze(-1)) * tau
                 F_hori = self.k * (th.linalg.norm(tau_front, dim=(-2, -1)) - th.linalg.norm(tau_back, dim=(-2, -1))).unsqueeze(-1) * tau
                 F_ori[1: -1] = (F_vert + F_hori).reshape(n_i-2, n_atom, n_dim)
                 print(f'NEB forces: {F_ori.tolist()}')
-                #F_ori[max_indx + 1] = maxF.reshape(n_atom, n_dim)
+                F_ori[max_indx + 1] = maxF.reshape(n_atom, n_dim)
 
             return - F_ori
 
@@ -154,11 +159,12 @@ class CI_NEB:
             X_init: th.Tensor,
             X_fin: th.Tensor,
             grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
+            func_args: Tuple = tuple(),
             func_kwargs=None,
-            grad_func_args: Sequence = tuple(),
+            grad_func_args: Tuple = tuple(),
             grad_func_kwargs=None,
             is_grad_func_contain_y: bool = True,
+            require_grad = False,
             output_grad: bool = False,
             fixed_atom_tensor: Optional[th.Tensor] = None,
     ):
@@ -174,6 +180,7 @@ class CI_NEB:
             grad_func_args: gradient function args
             grad_func_kwargs: gradient function kwargs
             is_grad_func_contain_y: whether gradient function contains dependant various y
+            require_grad: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs) calculation.
             output_grad: whether output gradient
             fixed_atom_tensor: mask of fixed atoms
 
@@ -190,7 +197,7 @@ class CI_NEB:
         n_batch, n_atom, n_dim = X_init.shape
         if grad_func is None:
             is_grad_func_contain_y = True
-
+            require_grad = True
             def grad_func_(y, x, grad_shape=None):
                 if grad_shape is None:
                     grad_shape = th.ones_like(y)
@@ -230,9 +237,10 @@ class CI_NEB:
         X_pnts = th.cat(X_pnts, dim=0)
         plist = list()  # TEST <<<<
         is_main_loop_converge = False
+
         # Main Loop
         X_pnts_ = X_pnts.flatten(-2, -1)  # (N_img, n_atom * n_dim). NOTE: '_' means the flatten variables.
-        f = self.__NebWrapper(func, grad_func_, self.spring_const, is_grad_func_contain_y)
+        f = self.__NebWrapper(func, grad_func_, self.spring_const, require_grad, is_grad_func_contain_y)
         self.Optimizer: CG
         with th.no_grad():
             _energy, _X, plist = self.Optimizer.run(
@@ -244,6 +252,7 @@ class CI_NEB:
                 grad_func_args,
                 grad_func_kwargs,
                 is_grad_func_contain_y,
+                require_grad,
                 False,
                 fixed_atom_tensor
             )

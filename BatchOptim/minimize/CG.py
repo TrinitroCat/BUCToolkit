@@ -29,6 +29,10 @@ class CG(_BaseOpt):
         use_bb: whether to use Barzilai-Borwein steplength (BB1 or long BB) as initial steplength instead of fixed one.
         device: str | th.device = 'cpu',
         verbose: int = 2
+
+    Methods:
+        run: launch the optimization.
+        set_update_batch: setting the method to update the taget function when variables change.
     """
     def __init__(
             self,

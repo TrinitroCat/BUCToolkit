@@ -4,6 +4,7 @@
 #  File: MolecularDynamics.py
 #  Environment: Python 3.12
 import logging
+import math
 import os
 import time
 import traceback
@@ -116,7 +117,7 @@ class MolecularDynamics(_CONFIGS):
 
         # initialize
         self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
-        self.n_batch = self.n_samp // self.BATCH_SIZE + 1  # total batch number per epoch
+        self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
         try:
             # I/O
