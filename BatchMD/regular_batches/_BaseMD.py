@@ -88,6 +88,81 @@ class _rBaseMD:
         )  # Boltzmann constant kB = 8.617333262145e-5 eV/K
         return Ek, temperature
 
+    def _elems2masses(self, Element_list, X):
+        """
+        convert element list to their masses tensor
+        Args:
+            Element_list:
+
+        Returns:
+
+        """
+        # Manage Atomic Type & Masses
+        masses = list()
+        for _Elem in Element_list:
+            masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
+        masses = th.tensor(masses, dtype=th.float32, device=self.device)
+        masses = masses.unsqueeze(-1).expand_as(X)  # (n_batch, n_atom, n_dim)
+        return masses
+
+    def _print_elems_info(self, Element_list):
+        # print Atoms Information
+        if self.verbose > 0:
+            elem_list = list()
+            _element_list = Element_list
+            for elements in _element_list:
+                __element_now = ''
+                __elem = ''
+                elem_info = ''
+                __elem_count = ''
+                for i, elem in enumerate(elements, 1):
+                    # get element symbol
+                    if isinstance(elem, int):
+                        __elem = ATOMIC_NUMBER[elem]
+                    else:
+                        __elem = elem
+                    # count element number
+                    if __elem == __element_now:
+                        __elem_count += 1
+                    else:
+                        elem_info = elem_info + str(__elem_count) + '  '
+                        elem_info = elem_info + __elem + ': '
+                        __elem_count = 1
+                        __element_now = __elem
+                elem_info = elem_info + str(__elem_count)
+                elem_list.append(elem_info)
+            # log out
+            for i, ee in enumerate(elem_list):
+                self.logger.info(f'Structure {i:>5d}: {ee}')
+
+    def initialize(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            Element_list: List[List[str]] | List[List[int]],
+            masses: th.Tensor,
+            V_init: th.Tensor | None = None,
+            grad_func: Any | nn.Module = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            grad_func_args: Sequence = tuple(),
+            grad_func_kwargs: Dict | None = None,
+            is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
+            fixed_atom_tensor: Optional[th.Tensor] = None,
+            is_fix_mass_center: bool = False
+    ):
+        """
+        Initialization method.
+        ONE CAN OVERRIDE THIS METHOD TO IMPLEMENT CUSTOM INITIALIZATION.
+        Args is the same as input of `self.run`, appending an arg of `masses`.
+
+        Returns:
+
+        """
+        # now do nothing
+        pass
+
     def run(
             self,
             func: Any | nn.Module,
@@ -135,11 +210,7 @@ class _rBaseMD:
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
         # Manage Atomic Type & Masses
-        masses = list()
-        for _Elem in Element_list:
-            masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
-        masses = th.tensor(masses, dtype=th.float32, device=self.device)
-        masses = masses.unsqueeze(-1).expand_as(X)  # (n_batch, n_atom, n_dim)
+        masses = self._elems2masses(Element_list, X)  # (n_batch, n_atom, n_dim)
         # grad_func
         if grad_func is None:
             is_grad_func_contain_y = True
@@ -200,35 +271,27 @@ class _rBaseMD:
         self.p_iota = 0.
         # whether grad needs autograd
         self.require_grad = require_grad
+        # custom initialization
+        self.initialize(
+            func,
+            X,
+            Element_list,
+            masses,
+            V_init,
+            grad_func,
+            func_args,
+            func_kwargs,
+            grad_func_args,
+            grad_func_kwargs,
+            is_grad_func_contain_y,
+            require_grad,
+            fixed_atom_tensor,
+            is_fix_mass_center
+        )
 
         # print Atoms Information
         if self.verbose > 0:
-            elem_list = list()
-            _element_list = Element_list
-            for elements in _element_list:
-                __element_now = ''
-                __elem = ''
-                elem_info = ''
-                __elem_count = ''
-                for i, elem in enumerate(elements, 1):
-                    # get element symbol
-                    if isinstance(elem, int):
-                        __elem = ATOMIC_NUMBER[elem]
-                    else:
-                        __elem = elem
-                    # count element number
-                    if __elem == __element_now:
-                        __elem_count += 1
-                    else:
-                        elem_info = elem_info + str(__elem_count) + '  '
-                        elem_info = elem_info + __elem + ': '
-                        __elem_count = 1
-                        __element_now = __elem
-                elem_info = elem_info + str(__elem_count)
-                elem_list.append(elem_info)
-            # log out
-            for i, ee in enumerate(elem_list):
-                self.logger.info(f'Structure {i:>5d}: {ee}')
+            self._print_elems_info(Element_list)
 
         # MAIN Loop
         with th.no_grad():
@@ -241,7 +304,7 @@ class _rBaseMD:
                 else:
                     Forces = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
 
-            #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
             for i in range(self.max_step):
                 # update Ek and temperature
                 Ek, temperature = self._reduce_Ek_T(masses, V, n_atom, n_dim)
@@ -267,7 +330,7 @@ class _rBaseMD:
                             self.logger.info(f'{V_str}\n')
                             del V_str
                         self.logger.info('_' * 100)
-                    #ptlist.append(X.numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                    ptlist.append(X.numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                     # Calc. Kinetic Energy, Temperature, etc.
                     if self.verbose > 0:
                         np.set_printoptions(
@@ -294,7 +357,7 @@ class _rBaseMD:
                     func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
                     masses, atom_masks, is_grad_func_contain_y
                 )
-                # Correct barycentric transition  TODO: solve the batch_indices problem
+                # Correct barycentric transition  TODO: solve the batch_indices problem; FIXME !!
                 if is_fix_mass_center:
                     X = X - th.sum(masses * X, dim=1, keepdim=True)/masses_sum  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
                     V = V - th.sum(masses * V, dim=1, keepdim=True)/masses_sum
@@ -330,7 +393,7 @@ class _rBaseMD:
                 self.logger.info('_' * 100 + '\n' + f'Main Loop Done. Total Time: {time.perf_counter() - t_main:>.4f}')
 
         del self.Ekt_vir
-        #return ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        return ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     # OVERRIDE THIS METHOD TO IMPLEMENT BatchMD UNDER VARIOUS ENSEMBLES.
     def _updateXV(
