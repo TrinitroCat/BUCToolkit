@@ -76,9 +76,6 @@ class ConstrNVE(_rConstrBase):
         jac = self._jacobian(X)
         self._do_qr(masses, jac)
 
-    def _update_constr(self):
-
-
     def _updateXV(
             self, X, V, Force,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,

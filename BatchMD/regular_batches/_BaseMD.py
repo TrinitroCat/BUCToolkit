@@ -44,6 +44,7 @@ class _rBaseMD:
         """
         self.time_step = time_step
         assert (max_step > 0) and isinstance(max_step, int), f'max_step must be a positive integer, but occurred {max_step}.'
+        self.time_now = 0.  # the accumulated time
         self.max_step = max_step
         self.T_init = T_init
         self.require_grad = None
@@ -361,6 +362,8 @@ class _rBaseMD:
                 if is_fix_mass_center:
                     X = X - th.sum(masses * X, dim=1, keepdim=True)/masses_sum  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
                     V = V - th.sum(masses * V, dim=1, keepdim=True)/masses_sum
+
+                self.time_now += self.time_step
 
             # Finale step
             if self.verbose > 0:
