@@ -38,6 +38,7 @@ class ConstrNVE(_rConstrBase):
             max_step: int,
             T_init: float = 298.15,
             constr_func: Callable[[th.Tensor], th.Tensor] = None,
+            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None,
             output_file: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
@@ -48,6 +49,7 @@ class ConstrNVE(_rConstrBase):
             max_step,
             T_init,
             constr_func,
+            constr_val,
             output_file,
             output_structures_per_step,
             device,
@@ -74,7 +76,7 @@ class ConstrNVE(_rConstrBase):
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
         jac = self._jacobian(X)
-        self._do_qr(masses, jac)
+        self._do_qr(jac)
 
     def _updateXV(
             self, X, V, Force,
@@ -87,9 +89,10 @@ class ConstrNVE(_rConstrBase):
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             ProjF = self._projected(Force)
             V.add_(ProjF / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
-            # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
-            ProjV = self._projected(V)
-            X.add_(ProjV, alpha=self.time_step)
+            # X = X + P(V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3)
+            #ProjV = self._projected(V)
+            X.add_(V, alpha=self.time_step)
+            X = self._projected(X)
             # Update F
             with th.set_grad_enabled(self.require_grad):
                 X.requires_grad_(self.require_grad)
@@ -101,7 +104,7 @@ class ConstrNVE(_rConstrBase):
 
             # update projector
             jac = self._jacobian(X)
-            self._do_qr(masses, jac)
+            self._do_qr(jac)
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             ProjF = self._projected(Force)
             V.add_(ProjF / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)

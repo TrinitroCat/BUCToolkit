@@ -60,7 +60,7 @@ class _rConstrBase(_rBaseMD):
             max_step: int,
             T_init: float = 298.15,
             constr_func: Callable | None = None,
-            constr_val: Callable[[th.Tensor], th.Tensor] | th.Tensor = None,
+            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None,
             output_file: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
@@ -80,32 +80,51 @@ class _rConstrBase(_rBaseMD):
             constr_func = lambda X: 0.
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
-            self.constr_val = None
+            self.constr_val_raw = None
             self.constr_val_now = constr_val.to(self.device)
-        elif isinstance(constr_val, Callable):
+        elif not isinstance(constr_val, Callable):
             raise TypeError(f'Expected `constr_val` is Callable or torch.Tensor, but got {type(constr_val)}')
         else:
             self.is_const_constr = False
-            self.constr_val = constr_val
+            self.constr_val_raw = constr_val
             self.constr_val_now = constr_val(self.time_now_tens)
 
         if not isinstance(constr_func, Callable):
             raise TypeError(f"`constr_func` must consist of callable, but got {type(constr_func)}")
         self.constr_func = constr_func
-        self.Q = None  # Q(n_batch, n_atoms * n_dim, n_constr)
-        self.q = th.zeros_like()
+        self.Q = th.tensor([], device=self.device, dtype=th.float32)  # Q(n_batch, n_atoms * n_dim, n_constr)
+        self.q = th.tensor([], device=self.device, dtype=th.float32)  # (n_constr, ), solution of `R^T q = d/dt constr_val(t)`
         self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = None  # M^-1/2
 
-    def _constr_func_wrapped(self, X):
+    def _constr_func_wrapped(self, X, constr_val_now):
         """
         Manage the constraint functions.
         Converting constraint functions into s_k(X) = constr_func(X) - constr_val, thereby constraints are s_k(X) = 0.
         Returns:
 
         """
-        y = self.constr_func(X) - self.constr_val_now
+        y = self.constr_func(X) - constr_val_now
+        y = th.atleast_1d(y)
         return y, y  # repeat the output to use `has_aux` in th.func.jacrev to return the function values
+
+    def _constr_val_wrapped(self, t):
+        """
+        Manage the time-dependent constraint values.
+        Args:
+            t:
+
+        Returns:
+
+        """
+        if self.is_const_constr:
+            return None
+        else:
+            y = self.constr_val_raw(t)
+            if isinstance(y, (Tuple, List)):
+                y = th.stack(y)
+
+            return y, y
 
     def _update_constr(self):
         """
@@ -113,16 +132,9 @@ class _rConstrBase(_rBaseMD):
         Returns:
 
         """
-        if self.is_const_constr:
-            pass
-        else:
+        if not self.is_const_constr:
             self.time_now_tens.copy_(self.time_now)
-            with th.enable_grad():
-                self.time_now_tens.requires_grad_()
-                y = self.constr_val(self.time_now_tens)
-
-            self.constr_val_now = y.detach()
-            self.d_constr = th.autograd.grad(y, self.time_now_tens)[0]  #  d s_k(r)/dt
+            self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now_tens)  #  d s_k(r)/dt
 
     def _jacobian(self, X: th.Tensor) -> th.Tensor:
         """
@@ -135,7 +147,7 @@ class _rConstrBase(_rBaseMD):
         """
         self._update_constr()
         with th.enable_grad():
-            jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X)
+            jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
         constr_err = th.max(th.abs(y)).item()
@@ -145,11 +157,10 @@ class _rConstrBase(_rBaseMD):
 
         return jac
 
-    def _do_qr(self, masses: th.Tensor, jac: th.Tensor):
+    def _do_qr(self, jac: th.Tensor):
         """
         Do QR decomposition and save/update self.Q.
         Args:
-            masses: the masses tensor with the same shape as `X`.
             jac: Jacobian matrix of s_k at X.
 
         Returns: None
@@ -159,12 +170,11 @@ class _rConstrBase(_rBaseMD):
         # (n_batch, n_constr, n_atoms, n_dim) * (n_batch, 1, n_atoms, n_dim) -flatten-> (n_batch, n_constr, n_atoms * n_dim)
         _jac = th.flatten(jac * self.negsqrtM.unsqueeze(1), -2, -1)
         _jacT = _jac.mT.contiguous()
-        Q, R = th.linalg.qr(_jacT)  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
+        R = th.tensor([], device=self.device, dtype=th.float32)
+        th.linalg.qr(_jacT, out=(self.Q, R))  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
 
         if not self.is_const_constr:  # time-dependent constraints
             th.linalg.solve_triangular(R.mT.contiguous(), self.d_constr, upper=False, out=self.q)
-
-        self.Q.copy_(Q)
 
     def _projected(self, X:th.Tensor) -> th.Tensor:
         """
@@ -186,6 +196,9 @@ class _rConstrBase(_rBaseMD):
         Px.sub_(Q @ (Q.mT.contiguous() @ Px))  # (n_batch, n_atoms * n_dim, 1)
         Px = Px.reshape(n_batch, n_atoms, n_dim)
         Px.mul_(sqrtM)
+        # manifold veloc. correction
+        if not self.is_const_constr:
+            Px.add_(self.negsqrtM * (self.Q @ self.q.unsqueeze(-1)).reshape(n_batch, n_atoms, n_dim))
 
         return Px
 
