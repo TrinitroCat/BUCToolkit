@@ -87,12 +87,11 @@ class ConstrNVE(_rConstrBase):
         X: th.Tensor = X.detach()
         with th.no_grad():
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            ProjF = self._projected(Force)
+            ProjF = self._project1(Force)
             V.add_(ProjF / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
             # X = X + P(V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3)
-            #ProjV = self._projected(V)
-            X.add_(V, alpha=self.time_step)
-            X = self._projected(X)
+            ProjV = self._project1(V)
+            X.add_(ProjV, alpha=self.time_step)
             # Update F
             with th.set_grad_enabled(self.require_grad):
                 X.requires_grad_(self.require_grad)
@@ -106,7 +105,7 @@ class ConstrNVE(_rConstrBase):
             jac = self._jacobian(X)
             self._do_qr(jac)
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
-            ProjF = self._projected(Force)
+            ProjF = self._project1(Force)
             V.add_(ProjF / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
 
         return X, V, Energy, Force
