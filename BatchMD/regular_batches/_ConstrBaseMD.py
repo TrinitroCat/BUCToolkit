@@ -93,6 +93,7 @@ class _rConstrBase(_rBaseMD):
             raise TypeError(f"`constr_func` must consist of callable, but got {type(constr_func)}")
         self.constr_func = constr_func
         self.Q = th.tensor([], device=self.device, dtype=th.float32)  # Q(n_batch, n_atoms * n_dim, n_constr)
+        self.R = th.tensor([], device=self.device, dtype=th.float32)  # R(n_batch, n_constr, n_constr)
         self.q = th.tensor([], device=self.device, dtype=th.float32)  # (n_constr, ), solution of `R^T q = d/dt constr_val(t)`
         self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = None  # M^-1/2
@@ -142,7 +143,7 @@ class _rConstrBase(_rBaseMD):
         Args:
             X:
 
-        Returns:
+        Returns: Jacobian (n_batch, n_constr, n_atoms, n_dim)
 
         """
         self._update_constr()
@@ -170,15 +171,11 @@ class _rConstrBase(_rBaseMD):
         # (n_batch, n_constr, n_atoms, n_dim) * (n_batch, 1, n_atoms, n_dim) -flatten-> (n_batch, n_constr, n_atoms * n_dim)
         _jac = th.flatten(jac * self.negsqrtM.unsqueeze(1), -2, -1)
         _jacT = _jac.mT.contiguous()
-        R = th.tensor([], device=self.device, dtype=th.float32)
-        th.linalg.qr(_jacT, out=(self.Q, R))  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
+        th.linalg.qr(_jacT, out=(self.Q, self.R))  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
 
-        if not self.is_const_constr:  # time-dependent constraints
-            th.linalg.solve_triangular(R.mT.contiguous(), self.d_constr, upper=False, out=self.q)
-
-    def _projected(self, X:th.Tensor) -> th.Tensor:
+    def _project1(self, X:th.Tensor) -> th.Tensor:
         """
-        Compute the projector of all constrains by QR decomposition.
+        Compute the projector for 1st-order quantity (e.g. velocity) of all constrains by QR decomposition.
         for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
         define the projector: P = M^1/2 Q_2 Q_2^T M^-1/2 = M^1/2 (I - Q_1 Q_1^T) M^-1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRD.
         Args:
@@ -197,9 +194,37 @@ class _rConstrBase(_rBaseMD):
         Px = Px.reshape(n_batch, n_atoms, n_dim)
         Px.mul_(sqrtM)
         # manifold veloc. correction
-        if not self.is_const_constr:
+        if not self.is_const_constr:  # time-dependent constraints
+            th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr, upper=False, out=self.q)
             Px.add_(self.negsqrtM * (self.Q @ self.q.unsqueeze(-1)).reshape(n_batch, n_atoms, n_dim))
 
         return Px
 
+    def _project2(self, X:th.Tensor, jac_old:th.Tensor, jac_new:th.Tensor, V: th.Tensor) -> th.Tensor:
+        """
+        Compute the projector for 2st-order quantity (e.g. acceleration) of all constrains by QR decomposition and finite differences of dJ/dt.
+        Args:
+            X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
 
+        Returns: th.Tensor, the projected X.
+
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
+        negsqrtM = self.negsqrtM  # M^-1/2
+        # P = M^1/2 @ (I - Q Q^T) @ M^-1/2
+        Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
+        Px = (negsqrtM * X).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
+        Px.sub_(Q @ (Q.mT.contiguous() @ Px))  # (n_batch, n_atoms * n_dim, 1)
+        Px = Px.reshape(n_batch, n_atoms, n_dim)
+        Px.mul_(sqrtM)
+        # 2nd-order terms
+        dJ = (jac_new - jac_old)/self.time_step  # (n_batch, n_constr, n_atoms, n_dim) TODO
+        b = dJ
+        # manifold veloc. correction
+        if not self.is_const_constr:  # time-dependent constraints
+            pass
+        th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr, upper=False, out=self.q)
+        Px.add_(self.negsqrtM * (self.Q @ self.q.unsqueeze(-1)).reshape(n_batch, n_atoms, n_dim))
+
+        return Px
