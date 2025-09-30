@@ -77,6 +77,8 @@ class ConstrNVE(_rConstrBase):
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
         jac = self._jacobian(X)
         self._do_qr(jac)
+        V_init.copy_(self._project1(V_init))
+        self.n_reduce = jac.shape[1]
 
     def _updateXV(
             self, X, V, Force,
@@ -92,6 +94,7 @@ class ConstrNVE(_rConstrBase):
             # X = X + P(V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3)
             ProjV = self._project1(V)
             X.add_(ProjV, alpha=self.time_step)
+            self._project2(X)
             # Update F
             with th.set_grad_enabled(self.require_grad):
                 X.requires_grad_(self.require_grad)
@@ -107,5 +110,6 @@ class ConstrNVE(_rConstrBase):
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             ProjF = self._project1(Force)
             V.add_(ProjF / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
+            V.copy_(self._project1(V))
 
         return X, V, Energy, Force
