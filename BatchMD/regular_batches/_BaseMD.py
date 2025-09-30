@@ -57,6 +57,7 @@ class _rBaseMD:
         self.Ekt_vir = None    # virtual kinetic energy for _CSVR_ thermostat.
         self.Ek = None         # kinetic energy at each timestep.
         self.p_iota = None       # thermostat var. for Nose-Hoover.
+        self.n_reduce = 0     # number of reduction of free degree due to constraints
 
         self.batch_tensor = None  # tensor form of `batch_indices` if it was given.
         self.batch_scatter = None # tensor indices form of `batch_indices` if it was given
@@ -78,14 +79,14 @@ class _rBaseMD:
             self.logger.addHandler(log_handler)
 
     @staticmethod
-    def _reduce_Ek_T(masses, V, n_atom, n_dim):
-        """ calc. Ek and T """
+    def _reduce_Ek_T(masses, V, n_atom, n_dim, n_reduce=0):
+        """ calc. Ek and T, n_reduce is the constraints reducing the system free degrees. """
         Ek = 0.5 * th.sum(
             masses * V ** 2,
             dim=(-2, -1)
         ) * 103.642696562621738  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
         temperature = (2 * Ek) / (
-                n_dim * (n_atom - 1 + 1e-20) * 8.617333262145e-5
+            (n_dim * (n_atom - 1) - n_reduce + 1e-20) * 8.617333262145e-5
         )  # Boltzmann constant kB = 8.617333262145e-5 eV/K
         return Ek, temperature
 
@@ -278,7 +279,7 @@ class _rBaseMD:
             X,
             Element_list,
             masses,
-            V_init,
+            V,
             grad_func,
             func_args,
             func_kwargs,
@@ -308,7 +309,7 @@ class _rBaseMD:
             ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
             for i in range(self.max_step):
                 # update Ek and temperature
-                Ek, temperature = self._reduce_Ek_T(masses, V, n_atom, n_dim)
+                Ek, temperature = self._reduce_Ek_T(masses, V, n_atom, n_dim, self.n_reduce)
                 self.Ek = Ek.squeeze()  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
                 # if self.verbose > 0:
                 if i % self.output_structures_per_step == 0:
