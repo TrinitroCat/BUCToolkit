@@ -93,6 +93,7 @@ class _rConstrBase(_rBaseMD):
             raise TypeError(f"`constr_func` must consist of callable, but got {type(constr_func)}")
         self.constr_func = constr_func
         self.Q = th.tensor([], device=self.device, dtype=th.float32)  # Q(n_batch, n_atoms * n_dim, n_constr)
+        self.jac = None # Jacobian Matrix
         self.R = th.tensor([], device=self.device, dtype=th.float32)  # R(n_batch, n_constr, n_constr)
         self.q = th.tensor([], device=self.device, dtype=th.float32)  # (n_constr, ), solution of `R^T q = d/dt constr_val(t)`
         self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
@@ -139,26 +140,20 @@ class _rConstrBase(_rBaseMD):
             self.time_now_tens.copy_(self.time_now)
             self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now_tens)  #  d s_k(r)/dt
 
-    def _jacobian(self, X: th.Tensor) -> th.Tensor:
+    def _jacobian(self, X: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """
         Compute the Jacobian of all constrains.
         Args:
             X:
 
-        Returns: Jacobian (n_batch, n_constr, n_atoms, n_dim)
+        Returns: Jacobian (n_batch, n_constr, n_atoms, n_dim), and the constraint values.
 
         """
         self._update_constr()
         with th.enable_grad():
             jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
-        if y.ndim != 2:
-            raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
-        constr_err = th.max(th.abs(y)).item()
-        if constr_err > self.proj_thres:
-            self.logger.warning(f'WARNING: Too large constraint error: {constr_err:.4e}')
-        #self.logger.info(f'Max Constraint Error: {constr_err:.4e}')
-
-        return jac
+        self.jac = jac
+        return jac, y
 
     def _do_qr(self, jac: th.Tensor):
         """
@@ -179,7 +174,7 @@ class _rConstrBase(_rBaseMD):
         """
         Compute the projector for 1st-order quantity (e.g. velocity) of all constrains by QR decomposition.
         for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
-        define the projector: P = M^1/2 Q_2 Q_2^T M^-1/2 = M^1/2 (I - Q_1 Q_1^T) M^-1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRD.
+        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRD.
         Args:
             X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
 
@@ -240,32 +235,62 @@ class _rConstrBase(_rBaseMD):
 
         """
         n_batch, n_atoms, n_dim = X.shape
-        is_converged = False
-        # 1st step update
-        with th.enable_grad():
-            jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
+        ### first QRF for velocity ###
+        # update Jacobian
+        jac, y = self._jacobian(X)
+        self._do_qr(jac)
+        #self.Q_tmp.copy_(self.Q)  # to use to update velocity constraints
+        # print
+        constr_err = th.max(th.abs(y)).item()
+        if self.verbose > 0:
+            self.logger.info(f'0 Constraint errors are now: {constr_err:.4e}')
+        # threshold
+        if constr_err < self.proj_thres:
+            return
         corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)  # (n_batch, n_constr, 1)
         # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
         corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
         X.add_(corr, alpha=-1.)
-        for i in range(self.max_proj_iter):
-            with th.enable_grad():
-                jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
+        ### manually unrolling for first 3 steps ###
+        jac, y = self._jacobian(X)
+        constr_err = th.max(th.abs(y)).item()
+        self._do_qr(jac)
+        if self.verbose > 0:
+            self.logger.info(f'1 Constraint errors are now: {constr_err:.4e}')
+        if constr_err < self.proj_thres:
+            return
+        corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
+        corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
+        X.add_(corr, alpha=-1.)
+
+        jac, y = self._jacobian(X)
+        constr_err = th.max(th.abs(y)).item()
+        self._do_qr(jac)
+        if self.verbose > 0:
+            self.logger.info(f'2 Constraint errors are now: {constr_err:.4e}')
+        if constr_err < self.proj_thres:
+            return
+        corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
+        corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
+        X.add_(corr, alpha=-1.)
+
+        # if still not converge, entering loop
+        for i in range(3, self.max_proj_iter):
+            # update Jacobian
+            jac, y = self._jacobian(X)
             # print
             constr_err = th.max(th.abs(y)).item()
+            self._do_qr(jac)
             if self.verbose > 0:
                 self.logger.info(f'{i: < 3d} Constraint errors are now: {constr_err:.4e}')
             # threshold
             if constr_err < self.proj_thres:
-                is_converged = True
-                break
-            # qr decomp.
-            self._do_qr(jac)
+                return
             # P = M^1/2 @ (I - Q Q^T) @ M^-1/2
             # Q(n_batch, n_atoms * n_dim, n_constr)
             corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1) , upper=False) # (n_batch, n_constr, 1)
             # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
             corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
             X.add_(corr, alpha=-1.)
-        if not is_converged:
-            self.logger.warning("Projection of X to the manifold is not converged.")
+        # if not converged
+        self.logger.warning("Projection of X to the manifold is not converged.")

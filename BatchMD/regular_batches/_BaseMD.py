@@ -387,7 +387,7 @@ class _rBaseMD:
                 Ek, temperature = self._reduce_Ek_T(masses, V, n_atom, n_dim)
                 self.Ek = Ek #th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
                 self.logger.info(
-                    f'Step: {i:>12d}\n\t'
+                    f'Step: {i+1:>12d}\n\t'
                     f'T     = {temperature.numpy(force=True)}\n\t'
                     f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
                     f'Ek    = {np.array2string(Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'

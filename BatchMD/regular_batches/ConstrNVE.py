@@ -75,10 +75,27 @@ class ConstrNVE(_rConstrBase):
     ):
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
-        jac = self._jacobian(X)
+        jac, y = self._jacobian(X)
+        if y.ndim != 2:
+            raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
         self._do_qr(jac)
-        V_init.copy_(self._project1(V_init))
+        self.Q_tmp = self.Q.clone()
+        ProjV = self._project1(V_init)
+        Ek = th.sum(
+            masses * V_init ** 2,
+            dim=(-2, -1),
+            keepdim=True
+        )
+        Ek_p = th.sum(
+            masses * ProjV ** 2,
+            dim=(-2, -1),
+            keepdim=True
+        )
+        V_init.copy_(Ek/Ek_p * ProjV)
         self.n_reduce = jac.shape[1]
+        # debug
+        self._debug_X_check = list()
+        self._debug_V_check = list()
 
     def _updateXV(
             self, X, V, Force,
@@ -89,11 +106,9 @@ class ConstrNVE(_rConstrBase):
         X: th.Tensor = X.detach()
         with th.no_grad():
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            ProjF = self._project1(Force)
-            V.add_(ProjF / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
-            # X = X + P(V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3)
-            ProjV = self._project1(V)
-            X.add_(ProjV, alpha=self.time_step)
+            V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
+            X.add_(V, alpha=self.time_step)
+            # iteratively modify positions into the manifold, i.e., the approx. exp. mapping
             self._project2(X)
             # Update F
             with th.set_grad_enabled(self.require_grad):
@@ -103,13 +118,13 @@ class ConstrNVE(_rConstrBase):
                     Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
                     Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-
-            # update projector
-            jac = self._jacobian(X)
-            self._do_qr(jac)
-            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
-            ProjF = self._project1(Force)
-            V.add_(ProjF / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
+            # update another half step
+            V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
+            # project V, i.e., approx. parallel trans.
             V.copy_(self._project1(V))
+            # debug
+            jac, y = self._jacobian(X)
+            self._debug_X_check.append(abs(y.item()))
+            self._debug_V_check.append(abs(th.sum(jac * V.unsqueeze(1), dim=(-2, -1)).item()))
 
         return X, V, Energy, Force
