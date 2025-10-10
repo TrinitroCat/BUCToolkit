@@ -226,14 +226,14 @@ class _rBaseMD:
         # Selective dynamics  TODO: fixed atom is not compatible with freedom degree. FIXME !!!
         if fixed_atom_tensor is None:
             atom_masks = th.ones_like(X, device=self.device)
-            freeze_free_deg: int = 0
+            self.n_reduce += 0
         elif fixed_atom_tensor.shape == X.shape:
             atom_masks = fixed_atom_tensor.to(self.device)
-            freeze_free_deg: int = th.sum(atom_masks == 0).item()
+            self.n_reduce += th.sum(atom_masks == 0).item()
         else:
             raise RuntimeError(f'fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
-        # target kinetic energy for NVT|NPT ensembles
-        self.EK_TARGET = 0.5 * (n_dim * (n_atom - 1) - freeze_free_deg) * 8.617333262145e-5 * self.T_init  # Unit: eV/atom. Boltzmann constant kB = 8.6173332621e-5 eV/K
+        # target kinetic energy for NVT|NPT ensembles. It would be RECALCULATED under CONSTRAINTS !!
+        self.EK_TARGET = 0.5 * (n_dim * (n_atom - 1) - self.n_reduce) * 8.617333262145e-5 * self.T_init  # Unit: eV/atom. Boltzmann constant kB = 8.6173332621e-5 eV/K
         # other check
         if (not isinstance(self.max_step, int)) or (self.max_step <= 0):
             raise ValueError(f'Invalid value of maxiter: {self.max_step}. It would be an integer greater than 0.')
@@ -348,7 +348,7 @@ class _rBaseMD:
                             f'T     = {temperature.squeeze().numpy(force=True)}\n\t'
                             f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
                             f'Ek    = {np.array2string(Ek.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                            f'Ep    = {np.array2string(Energy.squeeze().squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Ep    = {np.array2string(Energy.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
                             f'Time: {time.perf_counter() - t_in:>5.4f}'
                         )
                         t_in = time.perf_counter()

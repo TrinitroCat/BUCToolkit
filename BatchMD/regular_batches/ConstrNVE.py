@@ -11,8 +11,10 @@ from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Seque
 
 import torch as th
 from torch import nn
+import numpy as np
 
 from ._ConstrBaseMD import _rConstrBase
+from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 
 
 class ConstrNVE(_rConstrBase):
@@ -56,47 +58,6 @@ class ConstrNVE(_rConstrBase):
             verbose
         )
 
-    def initialize(
-            self,
-            func: Any | nn.Module,
-            X: th.Tensor,
-            Element_list: List[List[str]] | List[List[int]],
-            masses: th.Tensor,
-            V_init: th.Tensor | None = None,
-            grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
-            func_kwargs: Dict | None = None,
-            grad_func_args: Sequence = tuple(),
-            grad_func_kwargs: Dict | None = None,
-            is_grad_func_contain_y: bool = True,
-            require_grad: bool = False,
-            fixed_atom_tensor: Optional[th.Tensor] = None,
-            is_fix_mass_center: bool = False
-    ):
-        self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
-        self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
-        jac, y = self._jacobian(X)
-        if y.ndim != 2:
-            raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
-        self._do_qr(jac)
-        self.Q_tmp = self.Q.clone()
-        ProjV = self._project1(V_init)
-        Ek = th.sum(
-            masses * V_init ** 2,
-            dim=(-2, -1),
-            keepdim=True
-        )
-        Ek_p = th.sum(
-            masses * ProjV ** 2,
-            dim=(-2, -1),
-            keepdim=True
-        )
-        V_init.copy_(Ek/Ek_p * ProjV)
-        self.n_reduce = jac.shape[1]
-        # debug
-        self._debug_X_check = list()
-        self._debug_V_check = list()
-
     def _updateXV(
             self, X, V, Force,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
@@ -109,7 +70,8 @@ class ConstrNVE(_rConstrBase):
             V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
             # iteratively modify positions into the manifold, i.e., the approx. exp. mapping
-            self._project2(X)
+            Fc = self._project2(X, V)
+            self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # Update F
             with th.set_grad_enabled(self.require_grad):
                 X.requires_grad_(self.require_grad)
@@ -123,8 +85,8 @@ class ConstrNVE(_rConstrBase):
             # project V, i.e., approx. parallel trans.
             V.copy_(self._project1(V))
             # debug
-            jac, y = self._jacobian(X)
-            self._debug_X_check.append(abs(y.item()))
-            self._debug_V_check.append(abs(th.sum(jac * V.unsqueeze(1), dim=(-2, -1)).item()))
+            #jac, y = self._jacobian(X)
+            #self._debug_X_check.append(abs(y.item()))
+            #self._debug_V_check.append(abs(th.sum(jac * V.unsqueeze(1), dim=(-2, -1)).item()))
 
         return X, V, Energy, Force
