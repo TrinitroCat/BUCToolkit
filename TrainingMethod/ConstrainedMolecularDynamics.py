@@ -15,8 +15,10 @@ import torch as th
 from torch import nn
 
 from BM4Ckit.BatchMD import NVE, NVT
+from MAIN.PropDehydro.Check_sample_distribution import X_init
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.BatchGenerate.coords_linear_interp import linear_interpolation_tens
 
 
 class ConstrainedMolecularDynamics(_CONFIGS):
@@ -30,6 +32,8 @@ class ConstrainedMolecularDynamics(_CONFIGS):
 
     Input file parameters: (Under the section `MD` in input files)
         ENSEMBLE: Literal[NVE, NVT], the ensemble for MD.
+        CONSTR_MD_SCHEME: Literal[BLUE_MOON, SLOW_GROWTH], the scheme of constrained MD.
+        NIMAGE: int, the number of images in BLUE_MOON MD. SLOW_GROWTH will ignore it.
         THERMOSTAT: Literal[Langevin, VR, CSVR, Nose-Hoover], the thermostat type. only used for ENSEMBLE=NVT.
                     'VR' is Velocity Rescaling and 'CSVR' is Canonical Sampling Velocity Rescaling by Bussi et al. [1].
         THERMOSTAT_CONFIG: Dict, the configs of thermostat.
@@ -71,6 +75,18 @@ class ConstrainedMolecularDynamics(_CONFIGS):
             self.MDType = __ensembles[self.MD['ENSEMBLE']]  # The Main Function of MD. MD_config is its parameters.
         except KeyError:
             raise NotImplementedError(f'Unknown Ensemble {self.MD["ENSEMBLE"]}.')
+        # check modes
+        self.CMD_MODE = self.MD['CONSTR_MD_SCHEME']
+        if self.CMD_MODE == 'BLUE_MOON':
+            # interp images read & check
+            self.NIMAGE = self.MD['NIMAGE']
+            if self.NIMAGE <= 0:
+                raise RuntimeError(f'Images of configurations must be greater than 0, but got {self.NIMAGE}.')
+        elif self.CMD_MODE == 'SLOW_GROWTH':
+            pass
+        else:
+            raise NotImplementedError(f'Unknown Constrained MD Scheme {self.CMD_MODE}.')
+
         self.MD_config = {'time_step': self.MD.get('TIME_STEP', 1),
                           'max_step': self.MD.get('MAX_STEP'),
                           'T_init': self.MD.get('T_INIT', 298.15),
@@ -187,40 +203,65 @@ class ConstrainedMolecularDynamics(_CONFIGS):
 
             mole_dynam = self.MDType(**self.MD_config)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
+            if getattr(val_set, '_LOADER_TYPE', None) != 'ISFS':
+                __err_msg = f'Data loader of ConstrainedMolecularDynamics requires ISFS, but got {getattr(val_set, '_LOADER_TYPE', None)}'
+                if self.VERBOSE: self.logger.error(__err_msg)
+                raise ValueError(__err_msg)
             n_c = 1  # running batch now
-            for val_data, val_label in val_set:
+            for dataIS, dataFS in val_set:
                 try:
-                    # to avoid get an empty batch
-                    if get_batch_size(val_data) <= 0:
+                    # Check Batch
+                    if get_batch_size(dataIS) != get_batch_size(dataFS):
+                        __err_msg = f'The batch size of {dataIS} and {dataFS} do not match: {get_batch_size(dataIS)} != {get_batch_size(dataFS)}'
+                        if self.VERBOSE: self.logger.error(__err_msg)
+                        raise RuntimeError(__err_msg)
+                    if get_batch_size(dataIS) <= 0:
                         if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
+                    elif get_batch_size(dataIS) > 1:
+                        if self.VERBOSE: self.logger.error(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
+                        raise RuntimeError(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                     # MD
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
                         self.logger.info(f'Running Batch {n_c}.')
                         self.logger.info('*' * 100)
                         cell_str = np.array2string(
-                            get_cell_vec(val_data), **FLOAT_ARRAY_FORMAT
+                            get_cell_vec(dataIS), **FLOAT_ARRAY_FORMAT
                         ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
                         self.logger.info(f'Cell Vectors:\n{cell_str}')
 
                     if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
+                        batch_indx = [len(dat.pos) for dat in dataIS.to_data_list()]
+                        _check_batch_indx = [len(dat.pos) for dat in dataFS.to_data_list()]
+                    elif self.data_type == 'dgl':
+                        batch_indx = dataIS.batch_num_nodes('atom')
+                        _check_batch_indx = dataFS.batch_num_nodes('atom')
                     else:
-                        batch_indx = val_data.batch_num_nodes('atom')
+                        raise RuntimeError(f'Data type {self.data_type} is not supported.')
+                    # check atom numbers
+                    for _, __ in enumerate(batch_indx):
+                        if __ != _check_batch_indx[_]:
+                            __err_msg = f'The atom numbers of {_}-th sample do not match: {__} != {_check_batch_indx[_]}'
+                            if self.VERBOSE > 0: self.logger.error(__err_msg)
+                            raise RuntimeError(__err_msg)
+
                     # initial atom coordinates
                     if self.data_type == 'pyg':
-                        X_init = val_data.pos.unsqueeze(0)
+                        X_is = dataIS.pos.unsqueeze(0)
+                        X_fs = dataFS.pos.unsqueeze(0)
                     else:
-                        X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
+                        X_is = dataIS.nodes['atom'].data['pos'].unsqueeze(0)
+                        X_fs = dataFS.nodes['atom'].data['pos'].unsqueeze(0)
+                    X_init_ = linear_interpolation_tens(X_is, X_fs, self.NIMAGE)
 
                     mole_dynam.run(
                         model_wrap.Energy,
-                        X_init,  # TODO, Now it support pygData and DGLGraph.
-                        get_atomic_number(val_data),
+                        X_init_,  # TODO, Now it support pygData and DGLGraph.
+                        get_atomic_number(dataIS),
                         V_init=None,  # TODO, Support user-defined initial velocities.
                         grad_func=model_wrap.Grad,
-                        func_args=(val_data,), grad_func_args=(val_data,),
+                        func_args=(dataIS,), grad_func_args=(dataIS,),
                         is_grad_func_contain_y=False,
                         fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
                         batch_indices=batch_indx,

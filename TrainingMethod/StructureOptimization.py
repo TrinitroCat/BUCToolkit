@@ -623,8 +623,8 @@ class StructureOptimization(_CONFIGS):
                         if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
                     elif get_batch_size(val_data) > 1:
-                        if self.VERBOSE: self.logger.error(f'Vibration do not support batched calculation yet. You should set BATCH_SIZE to 1.')
-                        raise RuntimeError(f'Vibration do not support batched calculation yet. You should set BATCH_SIZE to 1.')
+                        if self.VERBOSE: self.logger.error(f'Transition state search do not support batched calculation yet. You should set BATCH_SIZE to 1.')
+                        raise RuntimeError(f'Transition state search do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                     # batch indices
                     batch_indx1 = th.sum(
                         th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1

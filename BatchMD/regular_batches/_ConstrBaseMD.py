@@ -77,7 +77,7 @@ class _rConstrBase(_rBaseMD):
         )
         self.time_now_tens = th.tensor(self.time_now, dtype=th.float32, device=self.device)
         if constr_func is None:
-            constr_func = lambda X: 0.
+            constr_func = lambda X: th.tensor(0.)
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
             self.constr_val_raw = None
@@ -120,11 +120,15 @@ class _rConstrBase(_rBaseMD):
     ):
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
+        _y_check = th.vmap(self.constr_func)(X)
+        if _y_check.shape != self.constr_val_now.shape:
+            raise RuntimeError(
+                f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
+            )
         jac, y = self._jacobian(X)
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
         self._do_qr(jac)
-        self.Q_tmp = self.Q.clone()
         ProjV = self._project1(V_init)
         Ek = th.sum(
             masses * V_init ** 2,
@@ -152,7 +156,7 @@ class _rConstrBase(_rBaseMD):
         Returns:
 
         """
-        y = self.constr_func(X) - constr_val_now
+        y = self.constr_func(X) - constr_val_now  # (n_batch, n_constr, )
         y = th.atleast_1d(y)
         return y, y  # repeat the output to use `has_aux` in th.func.jacrev to return the function values
 
@@ -170,7 +174,9 @@ class _rConstrBase(_rBaseMD):
         else:
             y = self.constr_val_raw(t)
             if isinstance(y, (Tuple, List)):
-                y = th.stack(y)
+                y = th.vstack(y).mT
+            else:
+                y = y.reshape(-1, 1)
 
             return y, y
 
@@ -236,8 +242,8 @@ class _rConstrBase(_rBaseMD):
         Px = X - Px
         # manifold veloc. correction
         if not self.is_const_constr:  # time-dependent constraints
-            th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr, upper=False, out=self.q)
-            Px.add_(self.negsqrtM * (self.Q @ self.q.unsqueeze(-1)).reshape(n_batch, n_atoms, n_dim))
+            th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr.unsqueeze(-1), upper=False, out=self.q)
+            Px.add_(self.negsqrtM * (self.Q @ self.q).reshape(n_batch, n_atoms, n_dim))
 
         return Px
 
