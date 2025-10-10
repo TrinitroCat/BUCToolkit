@@ -101,6 +101,50 @@ class _rConstrBase(_rBaseMD):
         self.max_proj_iter = 10
         self.proj_thres = 1e-6
 
+    def initialize(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            Element_list: List[List[str]] | List[List[int]],
+            masses: th.Tensor,
+            V_init: th.Tensor | None = None,
+            grad_func: Any | nn.Module = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            grad_func_args: Sequence = tuple(),
+            grad_func_kwargs: Dict | None = None,
+            is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
+            fixed_atom_tensor: Optional[th.Tensor] = None,
+            is_fix_mass_center: bool = False
+    ):
+        self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
+        self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
+        jac, y = self._jacobian(X)
+        if y.ndim != 2:
+            raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
+        self._do_qr(jac)
+        self.Q_tmp = self.Q.clone()
+        ProjV = self._project1(V_init)
+        Ek = th.sum(
+            masses * V_init ** 2,
+            dim=(-2, -1),
+            keepdim=True
+        )
+        Ek_p = th.sum(
+            masses * ProjV ** 2,
+            dim=(-2, -1),
+            keepdim=True
+        )
+        V_init.copy_(Ek/Ek_p * ProjV)
+        self.n_reduce += jac.shape[1]
+        # recalculate target Ek under constraints
+        _, n_atom, n_dim = X.shape
+        self.EK_TARGET = 0.5 * (n_dim * (n_atom - 1) - self.n_reduce) * 8.617333262145e-5 * self.T_init
+        # debug
+        self._debug_X_check = list()
+        self._debug_V_check = list()
+
     def _constr_func_wrapped(self, X, constr_val_now):
         """
         Manage the constraint functions.
@@ -197,6 +241,92 @@ class _rConstrBase(_rBaseMD):
 
         return Px
 
+    def _project2(self, X:th.Tensor, V:th.Tensor) -> th.Tensor:
+        """
+        Continuously project the Jacobian of all constrains to the exact manifold (by Newton-like iteration).
+        Update X in-place.
+        Args:
+            X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+
+        Returns: th.Tensor, the constraint forces \lambda.
+
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        ### first QRF for velocity ###
+        # update Jacobian
+        jac, y = self._jacobian(X)
+        self._do_qr(jac)
+        # define the constr. force
+        Fc = th.zeros(n_batch, y.shape[1], 1, device=self.device)
+        #self.Q_tmp.copy_(self.Q)  # to use to update velocity constraints
+        # print
+        constr_err = th.max(th.abs(y)).item()
+        if self.verbose > 0:
+            self.logger.info(f' 0 Constraint errors are now: {constr_err:.4e}')
+        # threshold
+        if constr_err < self.proj_thres:
+            return Fc
+        _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)  # (n_batch, n_constr, 1)
+        # the constr forces
+        Fc += - th.linalg.solve_triangular(self.R, _lamb, upper=True)
+        # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
+        corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
+        X.add_(corr, alpha=-1.)
+        #V.add_(corr/self.time_step, alpha=-1.)
+        ### manually unrolling for first 3 steps ###
+        jac, y = self._jacobian(X)
+        constr_err = th.max(th.abs(y)).item()
+        self._do_qr(jac)
+        if self.verbose > 0:
+            self.logger.info(f' 1 Constraint errors are now: {constr_err:.4e}')
+        if constr_err < self.proj_thres:
+            return Fc
+        _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
+        # the constr forces
+        Fc += - th.linalg.solve_triangular(self.R, _lamb, upper=True)
+        corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
+        X.add_(corr, alpha=-1.)
+        #V.add_(corr/self.time_step, alpha=-1.)
+
+        jac, y = self._jacobian(X)
+        constr_err = th.max(th.abs(y)).item()
+        self._do_qr(jac)
+        if self.verbose > 0:
+            self.logger.info(f' 2 Constraint errors are now: {constr_err:.4e}')
+        if constr_err < self.proj_thres:
+            return Fc
+        _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
+        Fc += - th.linalg.solve_triangular(self.R, _lamb, upper=True)
+        corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
+        X.add_(corr, alpha=-1.)
+        #V.add_(corr/self.time_step, alpha=-1.)
+
+        # if still not converge, entering loop
+        for i in range(3, self.max_proj_iter):
+            # update Jacobian
+            jac, y = self._jacobian(X)
+            # print
+            constr_err = th.max(th.abs(y)).item()
+            self._do_qr(jac)
+            if self.verbose > 0:
+                self.logger.info(f'{i: < 3d} Constraint errors are now: {constr_err:.4e}')
+            # threshold
+            if constr_err < self.proj_thres:
+                return Fc
+            # P = M^1/2 @ (I - Q Q^T) @ M^-1/2
+            # Q(n_batch, n_atoms * n_dim, n_constr)
+            _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1) , upper=False) # (n_batch, n_constr, 1)
+            # constr. forces lambda
+            Fc += - th.linalg.solve_triangular(self.R, _lamb, upper=True)
+            # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
+            corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
+            X.add_(corr, alpha=-1.)
+            #V.add_(corr/self.time_step, alpha=-1.)
+
+        # if not converged
+        self.logger.warning("Projection of X to the manifold is not converged.")
+        return Fc
+
     def _project1_std(self, X:th.Tensor) -> th.Tensor:
         """
         Compute the projector for 1st-order quantity (e.g. velocity) of all constrains by QR decomposition.
@@ -224,73 +354,35 @@ class _rConstrBase(_rBaseMD):
 
         return Px
 
-    def _project2(self, X:th.Tensor) -> None:
+    def _project2_std(self, X:th.Tensor) -> None:
         """
-        Continuously project the Jacobian of all constrains to the exact manifold (by Newton-like iteration).
-        Update X in-place.
+        Compute position corrections by directly solving JM^-1J^T q = s(X)
         Args:
-            X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+            X:
 
-        Returns: th.Tensor, the projected X.
+        Returns:
 
         """
         n_batch, n_atoms, n_dim = X.shape
-        ### first QRF for velocity ###
-        # update Jacobian
-        jac, y = self._jacobian(X)
-        self._do_qr(jac)
-        #self.Q_tmp.copy_(self.Q)  # to use to update velocity constraints
-        # print
-        constr_err = th.max(th.abs(y)).item()
-        if self.verbose > 0:
-            self.logger.info(f'0 Constraint errors are now: {constr_err:.4e}')
-        # threshold
-        if constr_err < self.proj_thres:
-            return
-        corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)  # (n_batch, n_constr, 1)
-        # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
-        corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
-        X.add_(corr, alpha=-1.)
-        ### manually unrolling for first 3 steps ###
-        jac, y = self._jacobian(X)
-        constr_err = th.max(th.abs(y)).item()
-        self._do_qr(jac)
-        if self.verbose > 0:
-            self.logger.info(f'1 Constraint errors are now: {constr_err:.4e}')
-        if constr_err < self.proj_thres:
-            return
-        corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
-        corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
-        X.add_(corr, alpha=-1.)
-
-        jac, y = self._jacobian(X)
-        constr_err = th.max(th.abs(y)).item()
-        self._do_qr(jac)
-        if self.verbose > 0:
-            self.logger.info(f'2 Constraint errors are now: {constr_err:.4e}')
-        if constr_err < self.proj_thres:
-            return
-        corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
-        corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
-        X.add_(corr, alpha=-1.)
-
-        # if still not converge, entering loop
-        for i in range(3, self.max_proj_iter):
+        for i in range(0, self.max_proj_iter):
             # update Jacobian
-            jac, y = self._jacobian(X)
+            jac, y = self._jacobian(X)  # jac: (n_batch, n_constr, n_atom, n_dim)
             # print
             constr_err = th.max(th.abs(y)).item()
-            self._do_qr(jac)
+            lamb = 0.
             if self.verbose > 0:
                 self.logger.info(f'{i: < 3d} Constraint errors are now: {constr_err:.4e}')
             # threshold
             if constr_err < self.proj_thres:
                 return
-            # P = M^1/2 @ (I - Q Q^T) @ M^-1/2
+            # solve J M^-1 J^T q = s
+            Z = jac*self.negsqrtM  # TODO
             # Q(n_batch, n_atoms * n_dim, n_constr)
             corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1) , upper=False) # (n_batch, n_constr, 1)
             # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
             corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
             X.add_(corr, alpha=-1.)
+            #V.add_(corr/self.time_step, alpha=-1.)
+
         # if not converged
         self.logger.warning("Projection of X to the manifold is not converged.")
