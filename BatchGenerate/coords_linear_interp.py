@@ -2,7 +2,7 @@
 Linear interpolate of 2 structures
 """
 
-#  Copyright (c) 2024-2025.7.9, BM4Ckit.
+#  Copyright (c) 2024-2025.10.10, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
 #  File: coords_linear_interp.py
@@ -10,6 +10,7 @@ Linear interpolate of 2 structures
 
 from typing import List
 import numpy as np
+import torch as th
 
 
 def linear_interpolation(
@@ -40,6 +41,29 @@ def linear_interpolation(
 
     # main
     points_indx = np.linspace(0, 1, n_points)  # n_pt
+    coord_diff = coords2 - coords1  # n_atom, 3
+    interp_struc = coords1[None, :, :] + points_indx[:, None, None] * coord_diff[None, :, :]  # (1, n_atom, 3) + (n_pt, 1, 1) * (1, n_atom, 3)
+
+    return interp_struc
+
+def linear_interpolation_tens(
+        coords1: th.Tensor,
+        coords2: th.Tensor,
+        n_points: int,
+
+):
+    """
+    The linear interpolation between `coords1` and `coords2` for torch.Tensor inputs. See `linear_interpolation`.
+    Args:
+        coords1: the coordinate of 1st structure.
+        coords2: the coordinate of 2nd structure.
+        n_points: the number of interpolation points.
+
+    Returns:
+        th.Tensor[(n_points, n_atoms, 3)], an array of interpolated structures' coordinates.
+    """
+    # main
+    points_indx = th.linspace(0, 1, n_points)  # n_pt
     coord_diff = coords2 - coords1  # n_atom, 3
     interp_struc = coords1[None, :, :] + points_indx[:, None, None] * coord_diff[None, :, :]  # (1, n_atom, 3) + (n_pt, 1, 1) * (1, n_atom, 3)
 

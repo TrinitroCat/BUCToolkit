@@ -259,6 +259,7 @@ class ConstrNVT(_rConstrBase):
             # Rescaling factor
             alpha = th.sqrt(self.Ekt_vir / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
             V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
+            print(f'constr_val_now: {self.constr_val_now}')
 
         return X, V, Energy, Force
 
