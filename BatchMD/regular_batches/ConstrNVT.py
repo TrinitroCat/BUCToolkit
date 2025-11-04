@@ -27,6 +27,9 @@ class ConstrNVT(_rConstrBase):
         max_step: maxmimum steps.
         thermostat: str, the thermostat of NVT ensemble.
         thermostat_config: Dict|None, configs of thermostat. {'damping_coeff': float} for Langevin, {'time_const': float} for CSVR, {'virt_mass': float} for Nose-Hoover.
+        constr_func:
+        constr_val:
+        constr_threshold:
         T_init: initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: device that the program rum on.
@@ -43,8 +46,10 @@ class ConstrNVT(_rConstrBase):
                  thermostat_config: Dict | None = None,
                  constr_func: Callable[[th.Tensor], th.Tensor] = None,
                  constr_val: Callable[[th.Tensor], th.Tensor | Tuple[th.Tensor]] | th.Tensor = None,
+                 constr_threshold: float = 1e-5,
                  T_init: float = 298.15,
                  output_file: str | None = None,
+                 dump_path: str | None = None,
                  output_structures_per_step: int = 1,
                  device: str | th.device = 'cpu',
                  verbose: int = 2) -> None:
@@ -65,7 +70,9 @@ class ConstrNVT(_rConstrBase):
             T_init,
             constr_func,
             constr_val,
+            constr_threshold,
             output_file,
+            dump_path,
             output_structures_per_step,
             device,
             verbose
@@ -233,7 +240,7 @@ class ConstrNVT(_rConstrBase):
             #X += V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             X.add_(V, alpha=self.time_step)
             # applied constr.
-            Fc = self._project2(X, V)
+            Fc = self._project2(X)
             self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
 
             with th.set_grad_enabled(self.require_grad):
@@ -259,7 +266,7 @@ class ConstrNVT(_rConstrBase):
             # Rescaling factor
             alpha = th.sqrt(self.Ekt_vir / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
             V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
-            print(f'constr_val_now: {self.constr_val_now}')
+            #print(f'constr_val_now: {self.constr_val_now}')
 
         return X, V, Energy, Force
 

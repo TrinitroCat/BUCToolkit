@@ -405,7 +405,7 @@ class CreateASE:
         self.verbose = verbose
         pass
 
-    def feat2ase(self, feat: BatchStructures, set_tags: bool = True, n_core=-1) -> List[ase.Atoms]:
+    def feat2ase(self, feat: BatchStructures, set_tags: bool = True, n_core=-1):
         r"""
         Convert to ase.Atoms from given BatchStructures.
 
@@ -422,7 +422,7 @@ class CreateASE:
         if self.verbose: print('Converting to ASE.Atoms ...')
 
         def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
-                          set_tags: bool = True) -> ase.Atoms:
+                          set_tags: bool = True):
             samp = ase.Atoms(symbols=symb, positions=pos, cell=cell, pbc=pbc)
             if set_tags:
                 samp.set_tags(np.ones(len(samp)))
@@ -437,8 +437,7 @@ class CreateASE:
         return ase_list
 
     def array2ase(self, symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
-                  set_tags: bool = True, n_core: int = -1) -> List[
-        ase.Atoms]:
+                  set_tags: bool = True, n_core: int = -1):
         r"""
         Convert to ase.Atoms from the given Sequence of symbols, positions, cell vectors and pbc information.
 
@@ -451,7 +450,7 @@ class CreateASE:
             pbc: bool|Tuple[bool, bool, bool], the direction of periodic boundary condition (x, y, z).
         
         Returns:
-            Dict[ase.Atoms], the list of Atoms instances.
+            List[ase.Atoms], the list of Atoms instances.
         """
         t_st = time.perf_counter()
         if self.verbose: print('Converting to ASE.Atoms ...')
@@ -471,7 +470,7 @@ class CreateASE:
 
         return ase_list
 
-    def feat2ase_dict(self, feat: BatchStructures, set_tags: bool = True, n_core: int = -1) -> Dict[str, ase.Atoms]:
+    def feat2ase_dict(self, feat: BatchStructures, set_tags: bool = True, n_core: int = -1):
         r"""
         Convert to ase.Atoms from given BatchStructures.
 
@@ -515,7 +514,7 @@ class CreatePygData:
         pass
 
     @staticmethod
-    def single_ase2data(atoms: ase.Atoms):
+    def single_ase2data(atoms):
         """Convert a single atomic structure to a graph.
 
         Args:

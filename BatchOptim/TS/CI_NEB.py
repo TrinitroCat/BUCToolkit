@@ -118,24 +118,27 @@ class CI_NEB:
                 # *_front  = E[i + 1] - E[i]
                 ediff_front  = ediff[1:].unsqueeze(-1).unsqueeze(-1)   # (n_i - 2, 1, 1), E_(n+1) - E_(n)
                 tau_front = _tau[1:]  # set of image[1 : n_i], X[i + 1] - X[i]
+                tau_front_u = Fn.normalize(tau_front.flatten(-2, -1), dim=-1).reshape(n_i - 2, n_atom, -1)
+                tau_back_u = Fn.normalize(tau_back.flatten(-2, -1), dim=-1).reshape(n_i - 2, n_atom, -1)
                 # *_front - *_back: image[i + 1] - image[i] & deltaE[i + 1] - deltaE[i] for each i \in [0, n_i - 1]
                 delta_Emax = th.where(th.abs(ediff_front) > th.abs(ediff_back), th.abs(ediff_front), th.abs(ediff_back))
                 delta_Emin = th.where(th.abs(ediff_front) < th.abs(ediff_back), th.abs(ediff_front), th.abs(ediff_back))
                 tau_extreme = th.where(
                     ediff_front + ediff_back > 0,  # (E_(n+1) > E_(n-1))
-                    tau_front * delta_Emax - tau_front * delta_Emin,
-                    tau_front * delta_Emin - tau_front * delta_Emax
+                    tau_front_u * delta_Emax + tau_back_u * delta_Emin,
+                    tau_front_u * delta_Emin + tau_back_u * delta_Emax
                 )
                 tau = th.where(
                     (ediff_front > 0) * (ediff_back > 0),
-                    tau_front,
+                    tau_front_u,
                     th.where(
                         (ediff_front <= 0) * (ediff_back <= 0),
-                        - tau_front,
+                        tau_back_u,
                         tau_extreme
                     )
                 )# (n_i - 2, n_atom, n_dim)
                 tau = Fn.normalize(tau.flatten(-2, -1), dim=-1)  # (n_i - 2, n_atom*n_dim)
+
                 # forces
                 F_ori[0] = 0.
                 F_ori[-1] = 0.

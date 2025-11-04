@@ -63,7 +63,7 @@ def linear_interpolation_tens(
         th.Tensor[(n_points, n_atoms, 3)], an array of interpolated structures' coordinates.
     """
     # main
-    points_indx = th.linspace(0, 1, n_points)  # n_pt
+    points_indx = th.linspace(0, 1, n_points, device=coords1.device, dtype=coords1.dtype)  # n_pt
     coord_diff = coords2 - coords1  # n_atom, 3
     interp_struc = coords1[None, :, :] + points_indx[:, None, None] * coord_diff[None, :, :]  # (1, n_atom, 3) + (n_pt, 1, 1) * (1, n_atom, 3)
 

@@ -114,6 +114,7 @@ class BiasedMD(NVT):
             grad_func_args: Tuple|List = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
@@ -131,6 +132,7 @@ class BiasedMD(NVT):
             grad_func_args:
             grad_func_kwargs:
             is_grad_func_contain_y:
+            require_grad:
             batch_indices:
             fixed_atom_tensor:
             is_fix_mass_center:
@@ -179,12 +181,15 @@ class BiasedMD(NVT):
                 wrapped_grad_args,
                 wrapped_grad_kwargs,
                 is_grad_func_contain_y,
+                require_grad,
                 batch_indices,
                 fixed_atom_tensor,
                 is_fix_mass_center
             )
 
             return res
+        else:
+            raise RuntimeError(f'The external potential function is not set.')
 
 
 class _FuncWrapperWithExtPot:

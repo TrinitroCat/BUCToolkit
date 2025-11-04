@@ -8,14 +8,14 @@ import math
 import os
 import time
 import traceback
-from typing import Dict, Any, Literal
+from typing import Dict, Any, Literal, Callable, Tuple
 
 import numpy as np
 import torch as th
 from torch import nn
 
-from BM4Ckit.BatchMD import NVE, NVT
-from MAIN.PropDehydro.Check_sample_distribution import X_init
+from BM4Ckit.BatchMD.regular_batches import ConstrNVT, ConstrNVE
+from BM4Ckit.utils._CheckModules import check_module
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.BatchGenerate.coords_linear_interp import linear_interpolation_tens
@@ -41,6 +41,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                            * For 'CSVR', option key 'time_const' (fs) is to control the characteristic timescale. Large time_const leads to a weak coupling. Default: 10*TIME_STEP
         TIME_STEP: float, the time step (fs) for MD. Default: 1
         MAX_STEP: int, total time (fs) = TIME_STEP * MAX_STEP
+        REQUIRE_GRAD: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs). Default: False.
         T_INIT: float, initial Temperature (K). Default: 298.15
                 * For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist if V_init was not given.
                 * For ENSEMBLE=NVT, T_INIT is the target temperature of thermostat.
@@ -65,8 +66,10 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         self.param = None
         self._has_load_data = False
         self._data_loader = None
+        self.constr_func = None
+        self.constr_val = None
 
-        __ensembles = {'NVE': NVE, 'NVT': NVT}
+        __ensembles = {'NVE': ConstrNVE, 'NVT': ConstrNVT}
         if self.MD is None:
             raise RuntimeError('Molecular Dynamics Configs was NOT Set.')
         self.MD: Dict
@@ -75,6 +78,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
             self.MDType = __ensembles[self.MD['ENSEMBLE']]  # The Main Function of MD. MD_config is its parameters.
         except KeyError:
             raise NotImplementedError(f'Unknown Ensemble {self.MD["ENSEMBLE"]}.')
+        self.require_grad = self.MD.get('REQUIRE_GRAD', False)
         # check modes
         self.CMD_MODE = self.MD['CONSTR_MD_SCHEME']
         if self.CMD_MODE == 'BLUE_MOON':
@@ -98,6 +102,14 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         if self.MD['ENSEMBLE'] == 'NVT':
             self.MD_config['thermostat'] = self.MD.get('THERMOSTAT', 'CSVR')
             self.MD_config['thermostat_config'] = self.MD.get('THERMOSTAT_CONFIG', dict())
+
+    def set_constr_func(self, constr_func: Callable) -> None:
+        self.constr_func = constr_func
+        pass
+
+    def set_constr_val(self, constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor) -> None:
+        self.constr_val = constr_val
+        pass
 
     def run(self, model):
         """
@@ -130,9 +142,13 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         # preprocessing data # TODO
         if self._data_loader is None: raise RuntimeError('Please Set the DataLoader.')
         if not self._has_load_data: raise RuntimeError('Please Set the Data to Predict.')
+        #if self.constr_val is None: raise RuntimeError('Please Set the Constraint Values `constr_val`.')
+        if self.constr_func is None: raise RuntimeError('Please Set the Constraint Function `constr_func`.')
+        self.MD_config['constr_func'] = self.constr_func
+        self.MD_config['constr_val'] = self.constr_val
 
         # initialize
-        self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
+        self.n_samp = len(self.TRAIN_DATA['dataIS'])  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
         try:
@@ -180,6 +196,13 @@ class ConstrainedMolecularDynamics(_CONFIGS):
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
+                _pyg = check_module('torch_geometric.data')
+                if _pyg is not None:
+                    import torch_geometric.data as _pyg
+                    self.pygBatch = _pyg.Batch
+                else:
+                    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+
                 model_wrap = _Model_Wrapper_pyg(_model)
                 def get_batch_size(data):
                     return len(data)
@@ -188,10 +211,19 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     return data.cell.numpy(force=True)
 
                 def get_atomic_number(data):
-                    return data.atomic_numbers.unsqueeze(0).tolist()
+                    return data.atomic_numbers.tolist()  # note: here is different from MD/Relaxations that NOT unsqueeze(0)
+
+                def rebatched_graph(single_graph, X):
+                    """ expand batches """
+                    X_in = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
+                    batch_size = X.size(0)
+                    graph = self.pygBatch.from_data_list([single_graph] * batch_size)
+                    graph.pos = X_in
+                    return graph
 
             else:
                 model_wrap = _Model_Wrapper_dgl(_model)
+                raise NotImplementedError  # TODO <<<<
                 def get_batch_size(data):
                     return data.num_nodes('atom')
 
@@ -202,7 +234,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
 
             mole_dynam = self.MDType(**self.MD_config)
-            val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
+            val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, **self._data_loader_configs)
             if getattr(val_set, '_LOADER_TYPE', None) != 'ISFS':
                 __err_msg = f'Data loader of ConstrainedMolecularDynamics requires ISFS, but got {getattr(val_set, '_LOADER_TYPE', None)}'
                 if self.VERBOSE: self.logger.error(__err_msg)
@@ -248,23 +280,27 @@ class ConstrainedMolecularDynamics(_CONFIGS):
 
                     # initial atom coordinates
                     if self.data_type == 'pyg':
-                        X_is = dataIS.pos.unsqueeze(0)
-                        X_fs = dataFS.pos.unsqueeze(0)
+                        X_is = dataIS.pos
+                        X_fs = dataFS.pos
                     else:
-                        X_is = dataIS.nodes['atom'].data['pos'].unsqueeze(0)
-                        X_fs = dataFS.nodes['atom'].data['pos'].unsqueeze(0)
+                        X_is = dataIS.nodes['atom'].data['pos']
+                        X_fs = dataFS.nodes['atom'].data['pos']
                     X_init_ = linear_interpolation_tens(X_is, X_fs, self.NIMAGE)
+                    # rebatch data
+                    origin_elem_list = get_atomic_number(dataIS)
+                    dataIS = rebatched_graph(dataIS, X_init_)
 
+                    # run
                     mole_dynam.run(
                         model_wrap.Energy,
-                        X_init_,  # TODO, Now it support pygData and DGLGraph.
-                        get_atomic_number(dataIS),
+                        X_init_,
+                        [origin_elem_list]*self.NIMAGE,
                         V_init=None,  # TODO, Support user-defined initial velocities.
                         grad_func=model_wrap.Grad,
                         func_args=(dataIS,), grad_func_args=(dataIS,),
                         is_grad_func_contain_y=False,
+                        require_grad=self.require_grad,
                         fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
-                        batch_indices=batch_indx,
                     )
 
                     # Print info
