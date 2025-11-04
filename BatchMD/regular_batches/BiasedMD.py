@@ -13,7 +13,7 @@ import torch as th
 from torch import nn
 
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
-from ._BaseMD import _BaseMD
+from ._BaseMD import _rBaseMD
 from .NVT import NVT
 from .NVE import NVE
 
@@ -185,6 +185,8 @@ class BiasedMD(NVT):
             )
 
             return res
+        else:
+            raise RuntimeError(f'The external potential function is not set.')
 
 
 class _FuncWrapperWithExtPot:

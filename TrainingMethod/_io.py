@@ -1,5 +1,5 @@
 """ Input / Output Module """
-
+import gc
 #  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -10,7 +10,10 @@ import logging
 import os
 import sys
 import time
-from typing import Optional, Dict, Callable, Any, Literal, Sequence
+import traceback
+from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
+import joblib as jb
+import numpy as np
 
 import torch as th
 import yaml
@@ -22,6 +25,8 @@ from .Losses import Energy_Force_Loss, Energy_Loss
 from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 
 from BM4Ckit.utils._CheckModules import check_module
+from BM4Ckit import Structures
+from BM4Ckit.utils.ElemListReduce import elem_list_reduce
 
 
 class _LoggingEnd:
@@ -155,7 +160,11 @@ class _CONFIGS(object):
         self._data_loader = DataLoader
         self._data_loader_configs = DataLoader_configs
 
-    def set_dataset(self, train_data: Dict[Literal['data', 'labels'], Any], valid_data: Optional[Dict[Literal['data', 'labels'], Any]] = None):
+    def set_dataset(
+            self,
+            train_data: Dict[Literal['data', 'labels', 'dataIS', 'dataFS'], Any],
+            valid_data: Optional[Dict[Literal['data', 'labels'], Any]] = None
+    ):
         r"""
         Load the data that put into DataLoader.
         Parameters:
@@ -256,8 +265,8 @@ class _CONFIGS(object):
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
-        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './Predictions_Ef_Origin')
-        while os.path.exists(self.PREDICTIONS_SAVE_FILE + '.npz'):  # avoid overwrite existent data. Automatically rename.
+        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
+        while os.path.exists(self.PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
             self.PREDICTIONS_SAVE_FILE += '_1'
         if (self.SAVE_PREDICTIONS) and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
@@ -329,21 +338,22 @@ class _Model_Wrapper_pyg:
 
     def Energy(self, X, graph):
         self.X = X
-        graph.pos = self.X.squeeze(0)
+        graph.pos = self.X.reshape(-1,3)
         y = self._model(graph)
         energy = y['energy']
         self.forces = y['forces']
         return energy
 
     def Grad(self, X, graph):
+        origin_shape = X.shape
         if self.forces is None:
             self.X = X
-            graph.pos = self.X.squeeze(0)
-            return - ((self._model(graph))['forces']).unsqueeze(0)
+            graph.pos = self.X.reshape(-1,3)
+            return - ((self._model(graph))['forces']).reshape(origin_shape)
         else:
             force = self.forces
             self.forces = None
-            return - force.unsqueeze(0)
+            return - force.reshape(origin_shape)
 
 class _Model_Wrapper_pyg_only_X:
     def __init__(self, model , graph) -> None:
@@ -382,8 +392,6 @@ class _Model_Wrapper_pyg_only_X:
             force = self.forces
             self.forces = None
             return - force.unsqueeze(0)
-
-
 
 
 class _Model_Wrapper_dgl:
@@ -538,3 +546,140 @@ class ExpMovingAverage:
                 pass
         finally:
             self.backup = dict()
+
+
+class DumpStructures:
+    """
+    Dump structures calculated by `Predictor`, `StructureOptimization`, etc.
+    """
+    def __init__(self, path:str|None=None, dump_freq: int=1, n_core:int=-1):
+        """
+
+        Args:
+            path: the path to dump structures. If None, structures will always store in memory.
+            dump_freq: the frequency of dump structures.
+            n_core: the number of cpu cores to use.
+        """
+        self._structures = Structures()
+        self._structures.Mode = 'A'
+        #self._structures.change_mode('A')
+        self.save_path = path
+        self.n_core = n_core if n_core >= 0 else jb.cpu_count(True)
+        self.parallelize = None
+        self.ctx_mgr = None
+        self.dump_freq = dump_freq
+        self.collect_count = 0
+
+    def lauch_multiprocessing(self):
+        self.ctx_mgr = jb.Parallel(self.n_core, "loky", )
+        self._enter_multiproc_ctx()
+
+    def _enter_multiproc_ctx(self):
+        self.parallelize = self.ctx_mgr.__enter__()
+
+    def _exit_multiproc_ctx(self, errt = None, errv = None, tr = None):
+        self.parallelize = None
+        if self.ctx_mgr is not None:
+            self.ctx_mgr.__exit__(errt, errv, tr)
+
+    def collect(
+            self,
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos_type: List[str],
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
+        """
+        Store structures into a `Structures` instance in the ARRAY FORMAT (Mode = 'A') as `self._structres`.
+        Args:
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor[int],
+            cells: th.Tensor | np.ndarray,
+            pos_type: List[str],
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+
+        Returns: None
+
+        """
+        try:
+            # Postprocessing & save TODO: reformat it in future to apply to all functions.
+            batch_indices_arr = np.array(batch_indices)
+            cells = cells.cpu().numpy(force = True) if isinstance(cells, th.Tensor) else cells
+            pos_type = np.array(pos_type)
+            pos = pos.cpu().squeeze(0).numpy(force=True)
+            forces = forces.cpu().squeeze(0).numpy(force=True)
+            energies = energies.cpu().numpy(force=True)
+            fixations = fixations.cpu().squeeze(0).numpy(force=True)
+            #
+            elem_list = th.split(elements[0], batch_indices)
+            elem_list = [_.tolist() for _ in elem_list]
+            elem_comp_list = list()
+            numb_comp_list = list()
+            elem_batch_indices = list()
+            if self.parallelize is not None:
+                _res = self.parallelize(jb.delayed(elem_list_reduce)(_element_list) for _element_list in elem_list)
+                for _element_list in _res:
+                    _elem_comp_list, _, _number_list = _element_list
+                    elem_comp_list.extend(_elem_comp_list)
+                    numb_comp_list.extend(_number_list)
+                    elem_batch_indices.append(len(_element_list))
+            else:
+                for _element_list in elem_list:
+                    _elem_comp_list, _, _number_list = elem_list_reduce(_element_list)
+                    elem_comp_list.extend(_elem_comp_list)
+                    numb_comp_list.extend(_number_list)
+                    elem_batch_indices.append(len(_element_list))
+            elem_batch = np.asarray(elem_batch_indices)
+            elem_arr = np.asarray(elem_comp_list)
+            num_arr = np.asarray(numb_comp_list)
+
+            self._structures.append_from_array(
+                batch_indices_arr,
+                elem_batch,
+                np.asarray(idx),
+                cells,
+                elem_arr,
+                num_arr,
+                pos_type,
+                pos,
+                fixations,
+                energies,
+                forces
+            )
+
+            # dump saved structures
+            self.collect_count += 1
+            if self.save_path is not None:
+                if self.collect_count % self.dump_freq == 0:
+                    self.flush()
+
+        except Exception as e:
+            self._exit_multiproc_ctx(Exception, e, traceback.format_exc())
+
+    def flush(self):
+        """
+        dump the collected structures in `self._structures` into disk as memory-mapped files.
+        Returns:
+
+        """
+        try:
+            self._structures.save(self.save_path, 'a')
+            self._structures = Structures()
+            self._structures.Mode = 'A'
+        except Exception as e:
+            self._exit_multiproc_ctx(Exception, e, traceback.format_exc())
+
+    def __del__(self):
+        self.flush()
+        self._exit_multiproc_ctx()
+        gc.collect()
+

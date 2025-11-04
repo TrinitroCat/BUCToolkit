@@ -71,6 +71,7 @@ class MolecularDynamics(_CONFIGS):
             self.MDType = __ensembles[self.MD['ENSEMBLE']]  # The Main Function of MD. MD_config is its parameters.
         except KeyError:
             raise NotImplementedError(f'Unknown Ensemble {self.MD["ENSEMBLE"]}.')
+        self.require_grad = self.MD.get('REQUIRE_GRAD', False)
         self.MD_config = {'time_step': self.MD.get('TIME_STEP', 1),
                           'max_step': self.MD.get('MAX_STEP'),
                           'T_init': self.MD.get('T_INIT', 298.15),
@@ -223,6 +224,7 @@ class MolecularDynamics(_CONFIGS):
                         func_args=(val_data,), grad_func_args=(val_data,),
                         is_grad_func_contain_y=False,
                         fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
+                        require_grad=self.require_grad,
                         batch_indices=batch_indx,
                     )
 

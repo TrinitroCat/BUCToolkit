@@ -8,7 +8,6 @@ BatchStructure base class.
 #  Environment: Python 3.12
 
 import gc
-import math
 import re
 import logging
 import pickle
@@ -21,12 +20,12 @@ import traceback
 import warnings
 from itertools import accumulate
 import hashlib
-from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple, Any, Hashable, Iterable, Self
+from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple, Any, Iterable, Self
 
 import joblib as jb
 import numpy as np
 
-from ._para_flatt_list import flatten
+from BM4Ckit.utils._para_flatt_list import flatten
 from BM4Ckit.Preprocessing.write_files import WritePOSCARs, write_xyz, write_cif
 
 
@@ -99,8 +98,8 @@ class BatchStructures(object):
         # NumPy.NdArray Version
         self._Sample_ids_: np.ndarray | None = None
         # Batch info part
-        self.Batch_indices_: np.ndarray | None = None
-        self.Elements_batch_indices_: np.ndarray | None = None
+        self.Batch_indices_: np.ndarray | None = None  # storing the split point (ptr) in each array with n_atom length. It both concludes 0 and len(arr).
+        self.Elements_batch_indices_: np.ndarray | None = None  # storing the split point (ptr) in each array with n_elem length. It both concludes 0 and len(arr).
         # Structure part
         self.Atom_list_ = None
         self.Atomic_number_list_ = None
@@ -314,11 +313,11 @@ class BatchStructures(object):
 
     def _check_id(self, ):
         """ check whether duplication in Sample_ids """
-        if self._indices is None:
-            self._update_indices()
-
+        self._update_indices()
         if len(self._indices) != len(self):
-            raise RuntimeError(f'There are duplicate names in the Sample_ids: {set([x for x in self._Sample_ids if self._Sample_ids.count(x) > 1])}')
+            raise RuntimeError(
+                f'There are duplicate names in the Sample_ids: {set([x for x in self._Sample_ids if self._Sample_ids.count(x) > 1])}'
+            )
 
     def _check_len(self, ):
         """ check whether the length of all prop. consistent. """
@@ -367,8 +366,8 @@ class BatchStructures(object):
         _STANDARD_FILE_LIST = set(list(self._ATTR_NAMES) + ['head', ])
         if mode not in {'w', 'a'}:
             raise ValueError(f'Unknown `mode` value {mode}. It must be "w" or "a".')
-        if not os.path.isdir(path):
-            if mode == 'a': raise RuntimeError('Files does not exist.')
+        if not os.path.isdir(path):  # path do not exist
+            if mode == 'a': mode = 'w'
             os.makedirs(path, )
         elif len(os.listdir(path)) > 0:
             if mode == 'a':
@@ -378,8 +377,8 @@ class BatchStructures(object):
                 for ff in os.listdir(path):
                     if ff not in _STANDARD_FILE_LIST:
                         raise RuntimeError(f'The file `{ff}` have already exist in given path.')
-        elif mode == 'a':
-            raise RuntimeError('Files does not exist.')
+        elif mode == 'a':  # exist the path, but it is empty
+            if mode == 'a': mode = 'w'
         # check self
         if len(self) == 0: raise RuntimeError('BatchStructures are empty now!')
         self._update_indices()
@@ -722,7 +721,7 @@ class BatchStructures(object):
                     n_core
                 )
 
-            else:  # TODO: write to `xyz` format.
+            else:
                 raise NotImplementedError
         except Exception as e:
             self.logger.error(f'An error occurred:\n\t{e}\ntraceback:\n\t{traceback.print_exc()}')
@@ -810,7 +809,7 @@ class BatchStructures(object):
         Parameters:
             supercell_indices: NDArray[n_supercell, 3], the indices of supercells that calculate distance.
 
-        self.Dist_mat Format: List[Tensor[(n_prim_cells, n_atom, n_atom)]]
+        self.Dist_mat Format: List[array[(n_prim_cells, n_atom, n_atom)]]
         """
         self.Dist_mat = list()
         for i, atomic_coordinates in enumerate(self.Coords):
@@ -1053,7 +1052,7 @@ class BatchStructures(object):
             self,
             add_Sample_ids: List,
             add_Cells: List[np.ndarray],
-            add_Elements: List[List[int]],
+            add_Elements: List[List[str]],
             add_Numbers: List[List[int]],
             add_Coords_type: List[Literal['C', 'D']],
             add_Coords: List[np.ndarray],
@@ -1225,7 +1224,7 @@ class BatchStructures(object):
             self.Forces,
             self.Labels
         ]):
-            if _new_attr_type[_i] is not None:
+            if (_new_attr_type[_i] is not None) and (_new_attr[_i] is not None):
                 _at = [_.astype(_new_attr_type[_i]) for _ in _new_attr[_i]]
             else:
                 _at = _new_attr[_i]
@@ -1243,6 +1242,73 @@ class BatchStructures(object):
         # check
         self._check_id()
         self._check_len()
+
+    def append_from_array(
+            self,
+            add_atom_batch_sizes: np.ndarray,
+            add_element_batch_sizes: np.ndarray,
+            add_Sample_ids: np.ndarray,
+            add_Cells: np.ndarray,
+            add_Elements: np.ndarray,
+            add_Numbers: np.ndarray,
+            add_Coords_type: np.ndarray,
+            add_Coords: np.ndarray,
+            add_Fixed: np.ndarray,
+            add_Energies: None | np.ndarray = None,
+            add_Forces: None | np.ndarray = None,
+            add_Labels: np.ndarray | None = None,
+    ):
+        """
+        Appending datta from np.ndarray, only work in self.Mode = 'A'.
+        Args:
+            add_atom_batch_sizes: array of atom numbers in each structure.
+            add_element_batch_sizes: array of element numbers in each structure.
+            add_Sample_ids:
+            add_Cells:
+            add_Elements:
+            add_Numbers:
+            add_Coords_type:
+            add_Coords:
+            add_Fixed:
+            add_Energies:
+            add_Forces:
+            add_Labels:
+
+        Returns:
+
+        """
+        # check
+        if self.Mode != 'A':
+            raise ValueError(f'`append_from_array` only work in `A` mode.')
+        if add_atom_batch_sizes.ndim != 1:
+            raise ValueError(f'Expected `add_atom_batch_sizes` of 1 dimension, but got {add_atom_batch_sizes.ndim}.')
+        if add_element_batch_sizes.ndim != 1:
+            raise ValueError(f'Expected `add_element_batch_sizes` of 1 dimension, but got {add_element_batch_sizes.shape}.')
+
+        _new_atom_ptr = np.cumsum(add_atom_batch_sizes)
+        _new_element_ptr = np.cumsum(add_element_batch_sizes)
+        self.Batch_indices_ = np.append(self.Batch_indices_, _new_atom_ptr)
+        self.Elements_batch_indices_ = np.append(self.Elements_batch_indices_, _new_element_ptr)
+        self._Sample_ids_ = np.append(self._Sample_ids_, add_Sample_ids)
+        self.Cells_ = np.append(self.Cells_, add_Cells[None,...])
+        self.Elements_ = np.append(self.Elements_, add_Elements)
+        self.Numbers_ = np.append(self.Numbers_, add_Numbers)
+        self.Coords_type_ = np.append(self.Coords_type_, add_Coords_type)
+        self.Coords_ = np.append(self.Coords_, add_Coords)
+        self.Fixed_ = np.append(self.Fixed_, add_Fixed)
+        if self.Energies_ is not None:
+            self.Energies_ = np.append(self.Energies_, add_Energies)
+        elif add_Energies is not None:
+            warnings.warn(f'`add_Energies` will be dropped because `self.Energies` is None.')
+        if self.Forces_ is not None:
+            self.Forces_ = np.append(self.Forces_, add_Forces)
+        elif add_Forces is not None:
+            warnings.warn(f'`add_Forces` will be dropped because `self.Forces` is None.')
+        if self.Labels_ is not None:
+            self.Labels_ = np.append(self.Labels_, add_Labels)
+        elif add_Labels is not None:
+            warnings.warn(f'`add_Labels` will be dropped because `self.Labels` is None.')
+
 
     def sort_split_by_natoms(
             self,
@@ -1474,7 +1540,7 @@ class BatchStructures(object):
         self._check_id()
         self._check_len()
 
-    def remove(self, key: int | str | slice):
+    def remove(self, key: int | str | slice | List):
         """
         Remove the data of given `key` in-place.
         Args:
@@ -1483,37 +1549,50 @@ class BatchStructures(object):
         Returns: None
 
         """
+        # delete ops
+        def _remove_single(indx):
+            if self.Atom_list is not None:
+                del self.Atom_list[indx]
+            if self.Atomic_number_list is not None:
+                del self.Atomic_number_list[indx]
+            del self.Sample_ids[indx]
+            del self.Cells[indx]
+            del self.Elements[indx]
+            del self.Numbers[indx]
+            del self.Coords[indx]
+            del self.Coords_type[indx]
+            del self.Fixed[indx]
+            if self.Energies is not None: del self.Energies[indx]
+            if self.Forces is not None:   del self.Forces[indx]
+            if self.Labels is not None:   del self.Labels[indx]
         # check key
         if isinstance(key, int):
             if key >= len(self): raise ValueError(f'key {key} is out of range {len(self)}')
-            indx = slice(key, key + 1) if key != -1 else slice(key, None)
+            _remove_single(key)
         elif isinstance(key, slice):
-            indx = key
+            _remove_single(key)
         elif isinstance(key, str):
             if self._indices is None:
                 self._update_indices()
                 self._check_id()
             if key not in self._indices: raise KeyError(f'the input key `"{key}"` does not exist.')
-            indx = self._indices[key]
-            indx = slice(indx, indx + 1)
+            indices = self._indices[key]
+            _remove_single(indices)
+        elif isinstance(key, list):
+            _sort_key = sorted(key, reverse=True)
+            if _sort_key[-1] < 0: raise IndexError(f'Negative index {_sort_key[-1]} in the list is not supported.')
+            if _sort_key[0] > len(self): raise ValueError(f'key {_sort_key[0]} is out of range {len(self)}')
+            _check_repeat = _sort_key[0]
+            _remove_single(_check_repeat)
+            for del_id in _sort_key[1:]:
+                if not isinstance(del_id, int):
+                    raise TypeError(f'Expected all elements in key list are int, but got {type(del_id)}.')
+                if del_id != _check_repeat:  # avoid duplicated indices
+                    _remove_single(del_id)
+                    _check_repeat = del_id
         else:
             raise TypeError(f'Invalid type of key: {type(key)}')
 
-        # load data
-        if self.Atom_list is not None:
-            del self.Atom_list[indx]
-        if self.Atomic_number_list is not None:
-            del self.Atomic_number_list[indx]
-        del self.Sample_ids[indx]
-        del self.Cells[indx]
-        del self.Elements[indx]
-        del self.Numbers[indx]
-        del self.Coords[indx]
-        del self.Coords_type[indx]
-        del self.Fixed[indx]
-        if self.Energies is not None: del self.Energies[indx]
-        if self.Forces is not None:   del self.Forces[indx]
-        if self.Labels is not None:   del self.Labels[indx]
         # update id dict
         self._update_indices()
 
@@ -1526,39 +1605,8 @@ class BatchStructures(object):
         Returns: copy of
 
         """
-        # check key
-        if isinstance(key, int):
-            if key >= len(self): raise ValueError(f'key {key} is out of range {len(self)}')
-            indx = slice(key, key + 1) if key != -1 else slice(key, None)
-        elif isinstance(key, slice):
-            indx = key
-        elif isinstance(key, str):
-            if self._indices is None:
-                self._update_indices()
-                self._check_id()
-            if key not in self._indices: raise KeyError(f'the input key `"{key}"` does not exist.')
-            indx = self._indices[key]
-            indx = slice(indx, indx + 1)
-        else:
-            raise TypeError(f'Invalid type of key: {type(key)}')
-
-        # load data
         sub_self = copy.deepcopy(self)
-        if self.Atom_list is not None:
-            del sub_self.Atom_list[indx]
-        if self.Atomic_number_list is not None:
-            del sub_self.Atomic_number_list[indx]
-        del sub_self.Sample_ids[indx]
-        del sub_self.Cells[indx]
-        del sub_self.Elements[indx]
-        del sub_self.Numbers[indx]
-        del sub_self.Coords[indx]
-        del sub_self.Coords_type[indx]
-        del sub_self.Fixed[indx]
-        if self.Energies is not None: del sub_self.Energies[indx]
-        if self.Forces is not None:   del sub_self.Forces[indx]
-        if self.Labels is not None:   del sub_self.Labels[indx]
-        sub_self._update_indices()
+        sub_self.remove(key)
 
         return sub_self
 
@@ -1904,7 +1952,7 @@ class BatchStructures(object):
         """
         # check key
         if isinstance(key, int):
-            if key >= len(self): raise ValueError(f'key {key} is out of range {len(self)}')
+            if key >= len(self): raise IndexError(f'key {key} is out of range {len(self)}')
             indx = slice(key, key + 1) if key != -1 else slice(key, None)
 
         elif isinstance(key, slice):
@@ -1966,31 +2014,6 @@ class BatchStructures(object):
                 'Directly modifying the data of `key` is not implemented yet. You may use self.append with `strict = False` instead.'
             )
 
-    def show(self, number: int | slice):
-        """
-        Show the information of samples in given slice `number`.
-        Args:
-            number: the slice of samples to show.
-
-        Returns: None.
-
-        """
-        # TODO
-        raise NotImplementedError
-        _data = self[number]
-        max_len_id = max([len(_) for _ in _data._Sample_ids] + [12])
-        print_str = f"{'Sample ids':^{max_len_id}s} | {'Cells':}"  # <<<
-        """
-        return {
-            'Samp_id': self.Sample_ids[indx],
-            'Cell': self.Cells[indx],
-            'Coords_type': self.Coords_type[indx],
-            'Coords': self.Coords[indx],
-            'Fixed': self.Fixed[indx],
-            'Atoms': atomlist,
-            'AtomicNumbers': atomicnumberlist,
-            'Energy': energy,
-            'Forces': force,
-            'Label': label
-        }
-        """
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]

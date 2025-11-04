@@ -15,9 +15,11 @@ from torch import nn
 
 import numpy as np
 
-from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER
+from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
+from BM4Ckit.TrainingMethod._io import DumpStructures
+from BM4Ckit.utils._para_flatt_list import flatten
 
 
 class _rBaseMD:
@@ -29,6 +31,7 @@ class _rBaseMD:
             max_step: int,
             T_init: float = 298.15,
             output_file: str | None = None,
+            dump_path: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
             verbose: int = 2
@@ -63,6 +66,10 @@ class _rBaseMD:
         self.batch_scatter = None # tensor indices form of `batch_indices` if it was given
                                   # e.g., batch_indices = (3, 2, 1), thus self.scatter = tensor([0, 0, 0, 1, 1, 2])
 
+        # dumper
+        self.dump_path = dump_path
+        self.dumper = DumpStructures(dump_path, output_structures_per_step,)
+
         # logging
         self.logger = logging.getLogger('Main.MD')
         self.logger.setLevel(logging.INFO)
@@ -96,16 +103,19 @@ class _rBaseMD:
         Args:
             Element_list:
 
-        Returns:
+        Returns: masses and flatten atomic number list
 
         """
         # Manage Atomic Type & Masses
         masses = list()
+        atomic_number_arr = list()
         for _Elem in Element_list:
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
+            atomic_number_arr.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else __elem for __elem in _Elem])
         masses = th.tensor(masses, dtype=th.float32, device=self.device)
         masses = masses.unsqueeze(-1).expand_as(X)  # (n_batch, n_atom, n_dim)
-        return masses
+        atomic_number_arr = th.tensor(atomic_number_arr, dtype=th.int32, device=self.device)
+        return masses, atomic_number_arr
 
     def _print_elems_info(self, Element_list):
         # print Atoms Information
@@ -209,10 +219,12 @@ class _rBaseMD:
         elif len(X.shape) != 3:
             raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
         n_batch, n_atom, n_dim = X.shape
+        self.batch_tensor = [n_atom, ] * n_batch
+        sample_names = [f'{i}' for i in range(n_batch)]
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
         # Manage Atomic Type & Masses
-        masses = self._elems2masses(Element_list, X)  # (n_batch, n_atom, n_dim)
+        masses, atomic_numbers = self._elems2masses(Element_list, X)  # (n_batch, n_atom, n_dim)
         # grad_func
         if grad_func is None:
             is_grad_func_contain_y = True
@@ -313,6 +325,25 @@ class _rBaseMD:
                 self.Ek = Ek.squeeze()  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
                 # if self.verbose > 0:
                 if i % self.output_structures_per_step == 0:
+                    # Calc. Kinetic Energy, Temperature, etc.
+                    if self.verbose > 0:
+                        np.set_printoptions(
+                            precision = 8,
+                            linewidth = 1024,
+                            floatmode = 'fixed',
+                            suppress = True,
+                            formatter = {'float': '{:> .2f}'.format},
+                            threshold = 2000
+                        )
+                        self.logger.info(
+                            f'Step: {i:>12d}\n\t'
+                            f'T     = {temperature.squeeze().numpy(force=True)}\n\t'
+                            f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Ek    = {np.array2string(Ek.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Ep    = {np.array2string(Energy.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Time: {time.perf_counter() - t_in:>5.4f}'
+                        )
+                        t_in = time.perf_counter()
                     if self.verbose > 1:
                         np.set_printoptions(
                             precision=8, floatmode='fixed', suppress=True, formatter={'float': '{:> 5.10f}'.format}, threshold=3000000
@@ -333,25 +364,6 @@ class _rBaseMD:
                             del V_str
                         self.logger.info('_' * 100)
                     ptlist.append(X.numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-                    # Calc. Kinetic Energy, Temperature, etc.
-                    if self.verbose > 0:
-                        np.set_printoptions(
-                            precision = 8,
-                            linewidth = 1024,
-                            floatmode = 'fixed',
-                            suppress = True,
-                            formatter = {'float': '{:> .2f}'.format},
-                            threshold = 2000
-                        )
-                        self.logger.info(
-                            f'Step: {i:>12d}\n\t'
-                            f'T     = {temperature.squeeze().numpy(force=True)}\n\t'
-                            f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                            f'Ek    = {np.array2string(Ek.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                            f'Ep    = {np.array2string(Energy.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                            f'Time: {time.perf_counter() - t_in:>5.4f}'
-                        )
-                        t_in = time.perf_counter()
 
                 # Update X, V
                 X, V, Energy, Forces = self._updateXV(
@@ -363,6 +375,15 @@ class _rBaseMD:
                 if is_fix_mass_center:
                     X = X - th.sum(masses * X, dim=1, keepdim=True)/masses_sum  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
                     V = V - th.sum(masses * V, dim=1, keepdim=True)/masses_sum
+                # dump
+                # TODO, do a information receiver to get cells, names, etc. <<<
+                '''if self.dump_path is not None:
+                    self.dumper.collect(
+                        sample_names,
+                        self.batch_tensor,
+                        atomic_numbers,
+                        
+                    )'''
 
                 self.time_now += self.time_step
 
