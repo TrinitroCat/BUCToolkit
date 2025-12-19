@@ -279,7 +279,8 @@ class Trainer(_CONFIGS):
             time_tol = time.perf_counter()
             __loss = th.inf
             num_update = 0  # number of parameter updating
-            _can_valid = False  # To avoid stacking
+            _can_valid = False  # To avoid stacking, ensuring that validation is always occurred after param. update.
+            nan_count = 0  # number of nan occurred.
             for i in range(epoch_now, self.EPOCH):
                 time_ep = time.perf_counter()
                 real_n_samp = 0
@@ -313,13 +314,16 @@ class Trainer(_CONFIGS):
                         for key in pred_y.keys():
                             if isinstance(pred_y[key], th.Tensor):
                                 is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
-                            elif isinstance(pred_y[key], List):  # for ensemble wrapper model
+                            elif isinstance(pred_y[key], list):  # for ensemble wrapper model
                                 is_nan = sum([th.isnan(_p) + th.isinf(_p) for _p in pred_y[key]])
                             else:
                                 break
                             if th.any(is_nan):
+                                nan_count += 1
                                 pred_y[key] = th.where(th.isnan(pred_y[key]), 0., pred_y[key])
-                                self.logger.warning('NaN occurred in model output, and has been set to 0.')
+                                self.logger.warning(f'NaN occurred in model output, and has been set to 0. Total NaN number: {nan_count}')
+                                if nan_count > 100:
+                                    raise RuntimeError(f'Too many NaNs occurred in the model output (>= 100).')
                                 if self.DEBUG_MODE: self.logger.warning(f'batch_data:\n {batch_data}\n\nlabels:\n {batch_label}')
                     # backward
                     raw_loss:th.Tensor = LOSS(pred_y, batch_label)  # loss before grad. accum.
