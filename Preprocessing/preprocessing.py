@@ -456,7 +456,7 @@ class CreateASE:
         if self.verbose: print('Converting to ASE.Atoms ...')
 
         def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
-                          set_tags: bool = True) -> ase.Atoms:
+                          set_tags: bool = True):
             samp = ase.Atoms(symbols=symb, positions=pos, cell=cell, pbc=pbc)
             if set_tags:
                 samp.set_tags(np.ones(len(samp)))
@@ -548,7 +548,7 @@ class CreatePygData:
         )
         return data
 
-    def ase2data_list(self, atom_list: List[ase.Atoms], n_core: int = 1) -> List[pygData]:
+    def ase2data_list(self, atom_list: List, n_core: int = 1) -> List[pygData]:
         r"""
         Convert a list of ase.Atoms into a pyg.Batch
         """
@@ -639,7 +639,7 @@ class CreateDglData:
         pass
 
     @staticmethod
-    def single_ase2graph(atoms: ase.Atoms):
+    def single_ase2graph(atoms):
         """
         Convert a single atomic structure to a graph.
 
@@ -680,7 +680,7 @@ class CreateDglData:
         data.nodes['cell'].data['cell'] = cell
         return data
 
-    def ase2graph_list(self, atom_list: List[ase.Atoms], n_core: int = 1) -> List[pygData]:
+    def ase2graph_list(self, atom_list: List, n_core: int = 1) -> List[pygData]:
         r"""
         Convert a list of ase.Atoms into a list of dgl.DGLGraph
         """

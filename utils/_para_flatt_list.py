@@ -76,7 +76,7 @@ def _flatten_1time(x:List):
             y.append(sub_x)
     return y
 
-def flatten(x, flat_num: int=-1, ncore: int=-1):
+def flatten(x, flat_num: int=-1, ncore: int=1):
     """
     flatten x in parallel
 

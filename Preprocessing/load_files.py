@@ -1295,7 +1295,7 @@ class Cif2Feat(BatchStructures):
             return file_name, cell, elements, elem_numbers, coo, fix
 
         except Exception as err:
-            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
+            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.\n{traceback.format_exc()}')
             return None
 
 

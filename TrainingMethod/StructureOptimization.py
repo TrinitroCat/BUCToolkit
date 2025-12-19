@@ -26,7 +26,7 @@ from BM4Ckit import Structures
 
 class StructureOptimization(_CONFIGS):
     """
-    The class of structure optimization for relaxation and transition state.
+    The class of structure optimization for relaxation and transition state (only for single-point TS search, e.g. DIMER).
     Users need to set the dataset and dataloader manually.
 
     Args:
@@ -101,10 +101,6 @@ class StructureOptimization(_CONFIGS):
         self.param = None
         self._has_load_data = False
         self._data_loader = None
-        if self.SAVE_PREDICTIONS:
-            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, 10, 1)
-        else:
-            self.dumper = DumpStructures(None, 1, 1)
 
         __relax_dict = {'CG': CG, 'BFGS': QN, 'FIRE': FIRE, 'DIMER': Dimer, 'DIMER_LS': DimerLinsMomt}
         if self.RELAXATION is not None:

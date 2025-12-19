@@ -6,29 +6,26 @@
 #  File: AtomicNumber2Properties.py
 #  Environment: Python 3.12
 
-from typing import Sequence
+from typing import Sequence, List
 from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_SYMBOL, ATOMIC_NUMBER
 import numpy as np
 
 
-def _atomic_numbers_to_masses(Z: int):
-    mass = N_MASS[int(Z)]
+def atomic_numbers_to_masses(Z: Sequence[int]) -> List[float]:
+    """Convert atomic numbers to masses."""
+    mass = [N_MASS[int(_)] for _ in Z]
     return mass
 
 
-def _atomic_numbers_to_elements(Z: int):
-    elem = ATOMIC_NUMBER[int(Z)]
+def atomic_numbers_to_elements(Z: Sequence[int]) -> List[int]:
+    elem = [ATOMIC_NUMBER[int(_)] for _ in Z]
     return elem
 
 
-def _elements_to_atomic_numbers(Z: str):
-    atomic_numbers = ATOMIC_SYMBOL[str(Z)]
+def elements_to_atomic_numbers(Z: Sequence[str]) -> List[int]:
+    atomic_numbers = [ATOMIC_SYMBOL[str(_)] for _ in Z]
     return atomic_numbers
 
-
-atomic_numbers_to_masses = np.vectorize(_atomic_numbers_to_masses)
-atomic_numbers_to_elements = np.vectorize(_atomic_numbers_to_elements)
-elements_to_atomic_numbers = np.vectorize(_elements_to_atomic_numbers)
 
 __all__ = [
     "atomic_numbers_to_masses",

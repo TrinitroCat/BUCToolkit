@@ -932,6 +932,8 @@ class BatchStructures(object):
         self.Coords_type = [self.Coords_type[_] for _ in indx]  # coordinates type
         self.Coords = [self.Coords[_] for _ in indx]  # Atom coordinates
         self.Fixed = [self.Fixed[_] for _ in indx]  # fixed masks
+        self._check_id()
+        self._check_len()
 
     def revise(
             self,
@@ -1285,30 +1287,52 @@ class BatchStructures(object):
         if add_element_batch_sizes.ndim != 1:
             raise ValueError(f'Expected `add_element_batch_sizes` of 1 dimension, but got {add_element_batch_sizes.shape}.')
 
-        _new_atom_ptr = np.cumsum(add_atom_batch_sizes)
-        _new_element_ptr = np.cumsum(add_element_batch_sizes)
-        self.Batch_indices_ = np.append(self.Batch_indices_, _new_atom_ptr)
-        self.Elements_batch_indices_ = np.append(self.Elements_batch_indices_, _new_element_ptr)
-        self._Sample_ids_ = np.append(self._Sample_ids_, add_Sample_ids)
-        self.Cells_ = np.append(self.Cells_, add_Cells[None,...])
-        self.Elements_ = np.append(self.Elements_, add_Elements)
-        self.Numbers_ = np.append(self.Numbers_, add_Numbers)
-        self.Coords_type_ = np.append(self.Coords_type_, add_Coords_type)
-        self.Coords_ = np.append(self.Coords_, add_Coords)
-        self.Fixed_ = np.append(self.Fixed_, add_Fixed)
-        if self.Energies_ is not None:
-            self.Energies_ = np.append(self.Energies_, add_Energies)
-        elif add_Energies is not None:
-            warnings.warn(f'`add_Energies` will be dropped because `self.Energies` is None.')
-        if self.Forces_ is not None:
-            self.Forces_ = np.append(self.Forces_, add_Forces)
-        elif add_Forces is not None:
-            warnings.warn(f'`add_Forces` will be dropped because `self.Forces` is None.')
-        if self.Labels_ is not None:
-            self.Labels_ = np.append(self.Labels_, add_Labels)
-        elif add_Labels is not None:
-            warnings.warn(f'`add_Labels` will be dropped because `self.Labels` is None.')
+        _new_atom_ptr = np.empty(len(add_atom_batch_sizes) + 1, dtype=int)
+        _new_atom_ptr[0] = 0
+        np.cumsum(add_atom_batch_sizes, out=_new_atom_ptr[1:])
+        _new_element_ptr = np.empty(len(add_element_batch_sizes) + 1, dtype=int)
+        _new_element_ptr[0] = 0
+        np.cumsum(add_element_batch_sizes, out=_new_element_ptr[1:])
+        if self._Sample_ids_ is None:  # a new container
+            self.Batch_indices_ = _new_atom_ptr
+            self.Elements_batch_indices_ = _new_element_ptr
+            self._Sample_ids_ = add_Sample_ids
+            self.Cells_ = add_Cells
+            self.Elements_ = add_Elements
+            self.Numbers_ = add_Numbers
+            self.Coords_ = add_Coords
+            self.Coords_type_ = add_Coords_type
+            self.Fixed_ = add_Fixed
+            self.Energies_ = add_Energies
+            self.Forces_ = add_Forces
+            self.Labels_ = add_Labels
+        else:
+            _new_atom_ptr += self.Batch_indices_[-1]
+            _new_element_ptr += self.Elements_batch_indices_[-1]
+            self.Batch_indices_ = np.append(self.Batch_indices_, _new_atom_ptr[1:])  # drop the 1st element '0' in `_new_atom_ptr`
+            self.Elements_batch_indices_ = np.append(self.Elements_batch_indices_, _new_element_ptr[1:])
+            self._Sample_ids_ = np.append(self._Sample_ids_, add_Sample_ids)
+            self.Cells_ = np.append(self.Cells_, add_Cells, axis=0)
+            self.Elements_ = np.append(self.Elements_, add_Elements)
+            self.Numbers_ = np.append(self.Numbers_, add_Numbers)
+            self.Coords_type_ = np.append(self.Coords_type_, add_Coords_type)
+            self.Coords_ = np.append(self.Coords_, add_Coords, axis=0)
+            self.Fixed_ = np.append(self.Fixed_, add_Fixed, axis=0)
+            if self.Energies_ is not None:
+                self.Energies_ = np.append(self.Energies_, add_Energies)
+            elif add_Energies is not None:
+                warnings.warn(f'`add_Energies` will be dropped because `self.Energies` is None.')
+            if self.Forces_ is not None:
+                self.Forces_ = np.append(self.Forces_, add_Forces)
+            elif add_Forces is not None:
+                warnings.warn(f'`add_Forces` will be dropped because `self.Forces` is None.')
+            if self.Labels_ is not None:
+                self.Labels_ = np.append(self.Labels_, add_Labels)
+            elif add_Labels is not None:
+                warnings.warn(f'`add_Labels` will be dropped because `self.Labels` is None.')
 
+        self._check_id()
+        self._check_len()
 
     def sort_split_by_natoms(
             self,
@@ -1901,14 +1925,20 @@ class BatchStructures(object):
         return elem_distribution_dict
 
     def __len__(self, ) -> int:
-        return len(self._Sample_ids)
+        if self.Mode == 'L':
+            return len(self._Sample_ids)
+        elif self.Mode == 'A':
+            return len(self._Sample_ids_) if self._Sample_ids_ is not None else 0
+        else:
+            raise ValueError(f'Mode {self.Mode} not supported.')
 
     def __repr__(self) -> str:
         info = (
             f'BatchStructures[\n\ttotal {len(self)} structures\n\thas Atom_list: {self.Atom_list is not None}\n\t'
             f'has Atomic_number_list: {self.Atomic_number_list is not None}'
             f'\n\thas Energies: {self.Energies is not None}\n\thas Forces: {self.Forces is not None}\n\t'
-            f'has Labels: {self.Labels is not None}\n{" " * 15}]')
+            f'has Labels: {self.Labels is not None}\n{" " * 15}]'
+        )
         return info
 
     def __contains__(self, val) -> bool:
