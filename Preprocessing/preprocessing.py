@@ -8,13 +8,15 @@
 
 import copy
 import gc
+import os.path
+import pickle
 import random
 # basic modules
 import re
 import time
 import warnings
-from math import floor
-from typing import Dict, Set, Tuple, List, Sequence, Any, Union, Literal
+from math import floor, ceil
+from typing import Dict, Set, Tuple, List, Sequence, Any, Union, Literal, Generator
 
 import joblib as jb
 import numpy as np
@@ -403,7 +405,7 @@ class CreateASE:
         self.verbose = verbose
         pass
 
-    def feat2ase(self, feat: BatchStructures, set_tags: bool = True, n_core=-1) -> List[ase.Atoms]:
+    def feat2ase(self, feat: BatchStructures, set_tags: bool = True, n_core=-1):
         r"""
         Convert to ase.Atoms from given BatchStructures.
 
@@ -420,7 +422,7 @@ class CreateASE:
         if self.verbose: print('Converting to ASE.Atoms ...')
 
         def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
-                          set_tags: bool = True) -> ase.Atoms:
+                          set_tags: bool = True):
             samp = ase.Atoms(symbols=symb, positions=pos, cell=cell, pbc=pbc)
             if set_tags:
                 samp.set_tags(np.ones(len(samp)))
@@ -435,8 +437,7 @@ class CreateASE:
         return ase_list
 
     def array2ase(self, symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
-                  set_tags: bool = True, n_core: int = -1) -> List[
-        ase.Atoms]:
+                  set_tags: bool = True, n_core: int = -1):
         r"""
         Convert to ase.Atoms from the given Sequence of symbols, positions, cell vectors and pbc information.
 
@@ -449,13 +450,13 @@ class CreateASE:
             pbc: bool|Tuple[bool, bool, bool], the direction of periodic boundary condition (x, y, z).
         
         Returns:
-            Dict[ase.Atoms], the list of Atoms instances.
+            List[ase.Atoms], the list of Atoms instances.
         """
         t_st = time.perf_counter()
         if self.verbose: print('Converting to ASE.Atoms ...')
 
         def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
-                          set_tags: bool = True) -> ase.Atoms:
+                          set_tags: bool = True):
             samp = ase.Atoms(symbols=symb, positions=pos, cell=cell, pbc=pbc)
             if set_tags:
                 samp.set_tags(np.ones(len(samp)))
@@ -469,7 +470,7 @@ class CreateASE:
 
         return ase_list
 
-    def feat2ase_dict(self, feat: BatchStructures, set_tags: bool = True, n_core: int = -1) -> Dict[str, ase.Atoms]:
+    def feat2ase_dict(self, feat: BatchStructures, set_tags: bool = True, n_core: int = -1):
         r"""
         Convert to ase.Atoms from given BatchStructures.
 
@@ -513,7 +514,7 @@ class CreatePygData:
         pass
 
     @staticmethod
-    def single_ase2data(atoms: ase.Atoms):
+    def single_ase2data(atoms):
         """Convert a single atomic structure to a graph.
 
         Args:
@@ -547,7 +548,7 @@ class CreatePygData:
         )
         return data
 
-    def ase2data_list(self, atom_list: List[ase.Atoms], n_core: int = 1) -> List[pygData]:
+    def ase2data_list(self, atom_list: List, n_core: int = 1) -> List[pygData]:
         r"""
         Convert a list of ase.Atoms into a pyg.Batch
         """
@@ -638,7 +639,7 @@ class CreateDglData:
         pass
 
     @staticmethod
-    def single_ase2graph(atoms: ase.Atoms):
+    def single_ase2graph(atoms):
         """
         Convert a single atomic structure to a graph.
 
@@ -679,7 +680,7 @@ class CreateDglData:
         data.nodes['cell'].data['cell'] = cell
         return data
 
-    def ase2graph_list(self, atom_list: List[ase.Atoms], n_core: int = 1) -> List[pygData]:
+    def ase2graph_list(self, atom_list: List, n_core: int = 1) -> List[pygData]:
         r"""
         Convert a list of ase.Atoms into a list of dgl.DGLGraph
         """
@@ -757,37 +758,21 @@ class BlockedRW:
     Blocked read files and save to a memory-mapping file, or load the memory-mapping file and write to specific files inversely.
     Used to manage big files that memory cannot be loaded at once.
     """
-
-    def __init__(self, file_format: Literal['OUTCAR', 'EXTXYZ', 'POSCAR']):
-        """
-        Args:
-            file_format: format of files to read or write.
-        """
-        if file_format == 'OUTCAR':
-            ff = OUTCAR2Feat
-        elif file_format == 'EXTXYZ':
-            ff = ExtXyz2Feat
-        elif file_format == 'POSCAR':
-            ff = POSCARs2Feat
-        else:
-            raise ValueError(f'`file_format {file_format} is invalid.')
-
-        self.reader = ff
-        self.file_format = file_format
-
+    @staticmethod
     def save(
-            self,
             files_path: str,
-            file_name_list: List[str] | None = None,
+            file_format: Literal['OUTCAR', 'EXTXYZ', 'POSCAR'],
+        file_name_list: List[str] | None = None,
             read_configs: Dict | None = None,
             save_path: str = './data',
             chunk_size: int = 32,
             verbose: int = 1
     ):
         """
-        Blocked reading files in `files_path`/`file_name_list` by files_reader, and save to `save_path`.
+        Blocked reading files in `files_path`/`file_name_list` by files_reader, and save to `save_path` as memory-mapping files.
         Args:
             files_path: path of files.
+            file_format: format of files to read or write.
             file_name_list: list of file names to read. None for all files in given `files_path`.
             read_configs: kwargs of file reader.
             save_path: the path to save memory-mapping files.
@@ -796,46 +781,75 @@ class BlockedRW:
 
         Returns: None
         """
+        if file_format == 'OUTCAR':
+            reader = OUTCAR2Feat
+        elif file_format == 'EXTXYZ':
+            reader = ExtXyz2Feat
+        elif file_format == 'POSCAR':
+            reader = POSCARs2Feat
+        else:
+            raise ValueError(f'`file_format {file_format} is invalid.')
+
         if read_configs is None: read_configs = dict()
         # split chunks
         n_file = len(file_name_list)
-        n_loop = n_file // chunk_size
+        n_loop = ceil(n_file / chunk_size)
         # write the first chunk file
-        f = self.reader(files_path, verbose)
+        f = reader(files_path, verbose)
         f.read(file_name_list[:chunk_size], **read_configs)
         f.save(save_path, 'w')
         del f
         gc.collect()
-        for i in range(1, n_loop + 1):
+        for i in range(1, n_loop):
             if verbose > 0:
-                print(f'Chunk {i}/{n_loop + 1}, total {chunk_size * i} files have been saved.')
+                print(f'Chunk {i}/{n_loop}, total {chunk_size * i} files have been saved.')
             files = file_name_list[chunk_size * i: chunk_size * (i + 1)]
-            f = self.reader(files_path, verbose)
+            f = reader(files_path, verbose)
             f.read(files, **read_configs)
             f.save(save_path, 'a')
             del f
             gc.collect()
 
+    @staticmethod
     def load(
-            self,
             load_path: str,
-            load_range: Tuple | None = None,
-            chunck_size: int = 5000,
+            load_range: Tuple[int, int] | None = None,
+            chunk_size: int = 5000,
             verbose: int = 1
-    ):
+    ) -> Generator[BatchStructures, None, None]:
         """
         Blocked load data from given BatchStructure memory-mapping path.
         Args:
             load_path: the path to load memory-mapping.
-            load_range:
-            chunck_size:
-            verbose:
+            load_range: the range of structures to read. `None` for all files in given `load_path`.
+            chunk_size: number of structures to read at a time.
+            verbose: verboseness of printing.
 
-        Returns: None
+        Returns: A generator that yields a BatchStructure with given `chunk_size` each time.
         """
-        raise NotImplementedError
+        # read the head file
+        with open(os.path.join(load_path, 'head'), 'rb') as f:
+            header = pickle.load(f)
+        total_size = header['n_batch']
+        if load_range is None:
+            load_range = (0, total_size)
+        elif isinstance(load_range, tuple):
+            assert 0 <= load_range[0] <= load_range[1] <= total_size, f'`load_range` must be in (0, {total_size}) range.'
+        else:
+            raise ValueError(f'Expected `load_range` to be tuple or None, but got {load_range}.')
 
-        pass
+        # split chunk
+        n_file = load_range[1] - load_range[0]
+        n_loop = ceil(n_file / chunk_size)
+        # main loop
+        for i in range(0, n_loop):
+            ptr_st = load_range[0] + i * chunk_size
+            ptr_ed = min(ptr_st + chunk_size, load_range[1])
+            if verbose > 0:
+                print(f'Chunk {i}/{n_loop}, total {chunk_size * i} files have been read.')
+            bs = BatchStructures.load_from_file(load_path, (ptr_st, ptr_ed))
+            yield bs
+
 
 
 def split_dataset(

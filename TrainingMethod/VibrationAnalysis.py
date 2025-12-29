@@ -146,7 +146,7 @@ class VibrationAnalysis(_CONFIGS):
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_regularBatch_pyg(_model)
+                model_wrap = _Model_Wrapper_regularBatch_pyg(_model)  # note: Use regularBatch version of _model wrapper
 
                 def get_batch_size(data):
                     return len(data)
@@ -280,7 +280,6 @@ class VibrationAnalysis(_CONFIGS):
                             self.logger.info(f'Structure {i:>5d}: {ee}')
                         self.logger.info('*' * 100)
                     # run
-                    #graph = rebatched_graph(val_data, )  # TODO, determining batch size in priori is difficult because batch size may change in calculation.
                     with th.no_grad():
                         eig_freq, normal_mode = vib_calculator.normal_mode(
                             model_wrap.Energy,

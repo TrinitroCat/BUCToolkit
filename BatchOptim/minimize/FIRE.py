@@ -40,16 +40,17 @@ class FIRE:
             N_min: int = 5,
             device: str | th.device = 'cpu',
             verbose: int = 2,
+            _hold_samples: bool = False,
             **kwargs
     ) -> None:
         r"""
         FIRE Algorithm for optimization.
 
         Args:
-            E_threshold: float, threshold of difference of func between 2 iteration.
+            E_threshold: float, threshold of difference of func between 2 iterations.
             F_threshold: float, threshold of gradient of func.
             maxiter: int, the maximum iteration steps.
-            steplength: The initial step length i.e. the BatchMD time step.
+            steplength: The initial step length, i.e. the BatchMD time step.
             alpha:
             alpha_fac:
             fac_inc:
@@ -57,6 +58,8 @@ class FIRE:
             N_min:
             device: The device that program runs on.
             verbose: amount of print information.
+            _hold_samples: ONLY FOR SPECIAL USE (e.g., CI-NEB or DEBUG).
+                If True, FIRE optimizer will not remove any sample in a batch even if the sample has converged.
 
         Method:
             run: running the main optimization program.
@@ -82,6 +85,7 @@ class FIRE:
 
         self.device = device
         self.verbose = verbose
+        self._hold_samples = _hold_samples
 
         # logger
         self.logger = logging.getLogger('Main.OPT')
@@ -155,7 +159,7 @@ class FIRE:
             is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X i.e., grad = grad_func(X, y, ...), else grad = grad_func(X, ...)
             require_grad: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs) calculation.
             output_grad: bool, whether output gradient of last step.
-            fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
+            fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed. An integer tensor with the same shape as X where 1 is for free and 0 is for fixation.
             batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
                 the format of batch_indices is the same as `split_size_or_sections` in torch.split:
                 batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
@@ -280,7 +284,7 @@ class FIRE:
             self.logger.info('Iteration Scheme: FIRE')
             self.logger.info('-' * 100)
         # MAIN LOOP
-        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         with th.no_grad():
             for numit in range(self.maxiter):  # Simple Euler
                 t_st = time.perf_counter()
@@ -343,34 +347,55 @@ class FIRE:
                     break
 
                 # update batch
-                func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                    converge_check,
-                    func_args,
-                    func_kwargs,
-                    grad_func_args,
-                    grad_func_kwargs
-                )
-                if self.is_concat_X:
+                if not self._hold_samples:
+                    func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
+                        converge_check,
+                        func_args,
+                        func_kwargs,
+                        grad_func_args,
+                        grad_func_kwargs
+                    )
+                    if self.is_concat_X:
+                        select_mask = ~(converge_mask[0, :, 0])
+                        select_mask_short = ~converge_check
+                        y_ = y[select_mask_short]
+                        F_ = F[:, select_mask, :]
+                        v_ = v[:, select_mask, :]
+                        X_ = X[:, select_mask, :]
+                        masses_ = masses[:, select_mask, :]
+                        atom_masks_ = atom_masks[:, select_mask, :]
+                        t_ = t
+                        a_ = a
+                        n_count_ = n_count
+                    else:
+                        select_mask = ~converge_check
+                        y_ = y[select_mask]
+                        F_ = F[select_mask, ...]
+                        v_ = v[select_mask, ...]
+                        X_ = X[select_mask, ...]
+                        masses_ = masses[select_mask, ...]
+                        atom_masks_ = atom_masks[select_mask, ...]
+                        t_ = t[select_mask, ...]
+                        a_ = a[select_mask, ...]
+                        n_count_ = n_count[select_mask, ...]
+                else:  # perform an identity transform
+                    func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = (
+                        func_args,
+                        func_kwargs,
+                        grad_func_args,
+                        grad_func_kwargs
+                    )
                     select_mask = ~(converge_mask[0, :, 0])
                     select_mask_short = ~converge_check
-                    y_ = y[select_mask_short]
-                    F_ = F[:, select_mask, :]
-                    v_ = v[:, select_mask, :]
-                    X_ = X[:, select_mask, :]
-                    masses_ = masses[:, select_mask, :]
-                    atom_masks_ = atom_masks[:, select_mask, :]
+                    y_ = y
+                    F_ = F
+                    v_ = v
+                    X_ = X
+                    masses_ = masses
+                    atom_masks_ = atom_masks
                     t_ = t
                     a_ = a
-                else:
-                    select_mask = ~converge_check
-                    y_ = y[select_mask]
-                    F_ = F[select_mask, ...]
-                    v_ = v[select_mask, ...]
-                    X_ = X[select_mask, ...]
-                    masses_ = masses[select_mask, ...]
-                    atom_masks_ = atom_masks[select_mask, ...]
-                    t_ = t[select_mask, ...]
-                    a_ = a[select_mask, ...]
+                    n_count_ = n_count
 
                 # Forward Euler Algo. to update X & v
                 v_.add_(F_ * t_ / masses_)  # (n_batch, n_atom, n_dim)
@@ -389,13 +414,13 @@ class FIRE:
                 X_ = X_.detach()
                 F_hat = F_ / th.linalg.norm(F_, dim=(-2, -1), keepdim=True)
                 # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
-                p = th.sum(F_ * v_, dim=(-1, -2))
+                p = th.sum(F_ * v_, dim=(-1, -2), keepdim=True)
                 # update velocity
                 v_.mul_((1 - a_))
                 v_.add_(a_ * th.linalg.norm(v_, dim=(-2, -1), keepdim=True) * F_hat)
                 # if P > 0.
-                n_count += th.where(p > 0., 1, -n_count)
-                is_ncount_gt_Nmin = n_count >= self.N_min
+                n_count_ += th.where(p > 0., 1, -n_count_)
+                is_ncount_gt_Nmin = n_count_ >= self.N_min
                 new_t_ = th.where(t_ * self.fac_inc < 10 * self.steplength, t_ * self.fac_inc, 10 * self.steplength)
                 t_ = th.where(is_ncount_gt_Nmin, new_t_, t_)
                 a_ = th.where(is_ncount_gt_Nmin, a_ * self.alpha_fac, a_)
@@ -406,28 +431,41 @@ class FIRE:
                 a_ = th.where(is_p_lt_0, self.alpha, a_)
 
                 # update origin variables
-                if self.is_concat_X:
-                    select_indices = th.where(select_mask)[0]
-                    select_indices_short = th.where(select_mask_short)[0]
-                    y: th.Tensor
-                    y.index_copy_(0, select_indices_short, y_)
-                    F.index_copy_(1, select_indices, F_)
-                    v.index_copy_(1, select_indices, v_)
-                    X.index_copy_(1, select_indices, X_)
-                    masses.index_copy_(1, select_indices, masses_)
+                if not self._hold_samples:
+                    if self.is_concat_X:
+                        select_indices = th.where(select_mask)[0]
+                        select_indices_short = th.where(select_mask_short)[0]
+                        y: th.Tensor
+                        y.index_copy_(0, select_indices_short, y_)
+                        F.index_copy_(1, select_indices, F_)
+                        v.index_copy_(1, select_indices, v_)
+                        X.index_copy_(1, select_indices, X_)
+                        masses.index_copy_(1, select_indices, masses_)
+                        t = t_
+                        a = a_
+                        n_count = n_count_
+                    else:
+                        select_indices = th.where(select_mask)[0]
+                        y.index_copy_(0, select_indices, y_)
+                        F.index_copy_(0, select_indices, F_)
+                        v.index_copy_(0, select_indices, v_)
+                        X.index_copy_(0, select_indices, X_)
+                        masses.index_copy_(0, select_indices, masses_)
+                        t.index_copy_(0, select_indices, t_)
+                        a.index_copy_(0, select_indices, a_)
+                        n_count.index_copy_(0, select_indices, n_count_)
+                else:
+                    y = y_
+                    F = F_
+                    v = v_
+                    X = X_
+                    masses = masses_
+                    atom_masks = atom_masks_
                     t = t_
                     a = a_
-                else:
-                    select_indices = th.where(select_mask)[0]
-                    y.index_copy_(0, select_indices, y_)
-                    F.index_copy_(0, select_indices, F_)
-                    v.index_copy_(0, select_indices, v_)
-                    X.index_copy_(0, select_indices, X_)
-                    masses.index_copy_(0, select_indices, masses_)
-                    t.index_copy_(0, select_indices, t_)
-                    a.index_copy_(0, select_indices, a_)
+                    n_count = n_count_
 
-                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
@@ -463,4 +501,4 @@ class FIRE:
         if output_grad:
             return y, X, - F
         else:
-            return y, X  #, ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            return y, X  , ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
