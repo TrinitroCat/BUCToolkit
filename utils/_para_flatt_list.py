@@ -16,9 +16,9 @@ import time
 import numpy as np
 import torch as th
 
-def _flatten_until_1d(x: List):
+def _flatten_until_1d_(x: List):
     """
-    Recursively flatten x until
+    Recursively flatten x until (deprecated)
 
     Args:
         x: input list
@@ -33,6 +33,31 @@ def _flatten_until_1d(x: List):
         else:
             y.append(sub_x)
     return y
+
+def _flatten_until_1d(x: List) -> List:
+    """
+    Flatten x recursively until 1D using iterative approach. (iteration version)
+
+    Args:
+        x: input list
+
+    Returns: flattened list
+
+    """
+    result = []
+    stack = [x]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (list, tuple, np.ndarray)):
+            stack.extend(reversed(current))
+        else:
+            # check other type s
+            if isinstance(current, Iterable) and not isinstance(current, (str, bytes)):
+                stack.extend(reversed(list(current)))
+            else:
+                result.append(current)
+    return result
+
 
 def _flatten_1time(x:List):
     """
@@ -51,7 +76,7 @@ def _flatten_1time(x:List):
             y.append(sub_x)
     return y
 
-def flatten(x, flat_num: int=-1, ncore: int=-1):
+def flatten(x, flat_num: int=-1, ncore: int=1):
     """
     flatten x in parallel
 
@@ -74,7 +99,9 @@ def flatten(x, flat_num: int=-1, ncore: int=-1):
         ncore = 1
 
     n_chunk = len(x)//(ncore - 1) if ncore > 1 else len(x)
-    if n_chunk == 0: n_chunk = len(x)
+    if n_chunk == 0:
+        n_chunk = len(x)
+        ncore = 1
     # Process Pools
     pools = mp.Pool(ncore)
     # run
@@ -98,3 +125,7 @@ def flatten(x, flat_num: int=-1, ncore: int=-1):
     pools.join()
 
     return z
+
+if __name__ == '__main__':
+    a = [[[22]]*3, [[[124., 24.]]*2, ['44', 'fas', [222.]]], 45., 'gqw']
+    print(flatten(a, 2))

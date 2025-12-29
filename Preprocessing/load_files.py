@@ -580,6 +580,17 @@ class OUTCAR2Feat(BatchStructures):
             cells = np.array(cells, dtype=np.float32).reshape(-1, 3, 6)
             cells = cells[:, :, :3]
             _data = np.array(_data, dtype=np.float32)  # (n_step, n_atom, 3)
+            # check if match
+            if _data.shape[1] != np.sum(numbers):
+                warnings.warn(
+                    f'Number of the read atoms and coordinates are not match in the file {file_name}, skipped. '
+                    f'Maybe your elements in this structure are too many (e.g., > 10).',
+                    RuntimeWarning
+                )
+                if parallel:
+                    return [], [], [], [], [], [], [], [], []
+                else:
+                    return None
             if len(_data) == 0:
                 warnings.warn(f'Occurred empty data in file {file_name}, skipped.', RuntimeWarning)
                 if parallel:
@@ -1284,7 +1295,7 @@ class Cif2Feat(BatchStructures):
             return file_name, cell, elements, elem_numbers, coo, fix
 
         except Exception as err:
-            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
+            warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.\n{traceback.format_exc()}')
             return None
 
 

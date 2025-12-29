@@ -13,7 +13,7 @@ import torch as th
 from torch import nn
 
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
-from ._BaseMD import _BaseMD
+from ._BaseMD import _rBaseMD
 from .NVT import NVT
 from .NVE import NVE
 
@@ -114,7 +114,6 @@ class BiasedMD(NVT):
             grad_func_args: Tuple|List = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
-            require_grad: bool = False,
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
@@ -132,7 +131,6 @@ class BiasedMD(NVT):
             grad_func_args:
             grad_func_kwargs:
             is_grad_func_contain_y:
-            require_grad:
             batch_indices:
             fixed_atom_tensor:
             is_fix_mass_center:
@@ -181,7 +179,6 @@ class BiasedMD(NVT):
                 wrapped_grad_args,
                 wrapped_grad_kwargs,
                 is_grad_func_contain_y,
-                require_grad,
                 batch_indices,
                 fixed_atom_tensor,
                 is_fix_mass_center

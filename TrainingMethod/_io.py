@@ -1,5 +1,5 @@
 """ Input / Output Module """
-
+import gc
 #  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -10,7 +10,10 @@ import logging
 import os
 import sys
 import time
-from typing import Optional, Dict, Callable, Any, Literal, Sequence
+import traceback
+from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
+import joblib as jb
+import numpy as np
 
 import torch as th
 import yaml
@@ -22,6 +25,9 @@ from .Losses import Energy_Force_Loss, Energy_Loss
 from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 
 from BM4Ckit.utils._CheckModules import check_module
+from BM4Ckit import Structures
+from BM4Ckit.utils.ElemListReduce import elem_list_reduce
+from BM4Ckit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 
 
 class _LoggingEnd:
@@ -155,7 +161,11 @@ class _CONFIGS(object):
         self._data_loader = DataLoader
         self._data_loader_configs = DataLoader_configs
 
-    def set_dataset(self, train_data: Dict[Literal['data', 'labels'], Any], valid_data: Optional[Dict[Literal['data', 'labels'], Any]] = None):
+    def set_dataset(
+            self,
+            train_data: Dict[Literal['data', 'labels', 'dataIS', 'dataFS'], Any],
+            valid_data: Optional[Dict[Literal['data', 'labels'], Any]] = None
+    ):
         r"""
         Load the data that put into DataLoader.
         Parameters:
@@ -169,6 +179,83 @@ class _CONFIGS(object):
             self.VALID_DATA = valid_data
         else:
             self.VALID_DATA = {'data': list(), 'label': list()}
+
+    def logout_element_information(self, element_tensor, batch_indx):
+        """
+        Logout element information.
+        Args:
+            element_tensor: the atom-wise element tensor.
+            batch_indx: the number of atoms in a sample within a batch.
+
+        Returns:
+
+        """
+        element_list = element_tensor.tolist()
+        elem_list = list()
+        _element_list = list()
+        if batch_indx is not None:
+            indx_old = 0
+            for indx in batch_indx:
+                _element_list.append(element_list[0][indx_old: indx_old + indx])
+                indx_old += indx
+        else:
+            _element_list = element_list
+        for elements in _element_list:
+            __element_now = ''
+            __elem = ''
+            elem_info = ''
+            __elem_count = ''
+            for i, elem in enumerate(elements, 1):
+                # get element symbol
+                if isinstance(elem, int):
+                    __elem = ATOMIC_NUMBER[elem]
+                else:
+                    __elem = elem
+                # count element number
+                if __elem == __element_now:
+                    __elem_count += 1
+                else:
+                    elem_info = elem_info + str(__elem_count) + '  '
+                    elem_info = elem_info + __elem + ': '
+                    __elem_count = 1
+                    __element_now = __elem
+            elem_info = elem_info + str(__elem_count)
+            elem_list.append(elem_info)
+        # log out
+        for i, ee in enumerate(elem_list):
+            self.logger.info(f'Structure {i:>5d}: {ee}')
+        self.logger.info('*' * 100)
+
+    def fixation_resolve(self):
+        """
+        resolving fixation information.
+        Returns:
+
+        """
+        if self.FIXATIONS is None:
+            raise ValueError(f'No fixation information is available for fixation resolving.')
+
+        MODE_DICT = {'FIX':'fix', 'INV_FIX':'inv_fix', 'FREE':'free'}
+        SELECT_DICT = {'ELEMENT': 'select_element', 'HEIGHT': 'select_height', 'INDEX': 'atom_index'}
+
+        fix_mode_list = list()
+        for k, v in self.FIXATIONS.items():
+            if k not in MODE_DICT:
+                raise ValueError(f'Unknown fixation mode: {k}')
+            key = MODE_DICT[k]
+            _tmp_dict = dict()
+            for fix_info, fix_val in v.items():
+                if fix_info not in SELECT_DICT:
+                    raise ValueError(f'Unknown fixation config: {fix_info}')
+                _tmp_dict[SELECT_DICT[fix_info]] = fix_val
+            _tmp_dict['select_mode'] = key
+            # put the inv_fix to the 1st to avoiding overriding
+            if key == 'inv_fix':
+                fix_mode_list = [_tmp_dict, ] + fix_mode_list
+            else:
+                fix_mode_list.append(_tmp_dict)
+
+        return fix_mode_list
 
     def reload_config(self, config_file_path: str| None = None) -> None:
         """
@@ -256,11 +343,15 @@ class _CONFIGS(object):
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
-        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './Predictions_Ef_Origin')
-        while os.path.exists(self.PREDICTIONS_SAVE_FILE + '.npz'):  # avoid overwrite existent data. Automatically rename.
+        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
+        while os.path.exists(self.PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
             self.PREDICTIONS_SAVE_FILE += '_1'
         if (self.SAVE_PREDICTIONS) and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
+        if self.SAVE_PREDICTIONS:
+            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, 10, 1)
+        else:
+            self.dumper = DumpStructures(None, 1, 1)
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
         if self.REDIRECT:
             self.OUTPUT_PATH = self.config.get('OUTPUT_PATH', './')
@@ -273,7 +364,7 @@ class _CONFIGS(object):
         # debug mode
         self.DEBUG_MODE = self.config.get('DEBUG_MODE', False)
         if not isinstance(self.DEBUG_MODE, bool): raise TypeError('DEBUG_MODE must be a boolean.')
-        self.CHECK_NAN = self.config.get('CHECK_NAN', False)
+        self.CHECK_NAN = self.config.get('CHECK_NAN', True)
         if not isinstance(self.CHECK_NAN, bool): raise TypeError('CHECK_NAN must be a boolean.')
 
         # logging
@@ -296,12 +387,18 @@ class _CONFIGS(object):
             self.log_handler.setFormatter(formatter)
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
 
+        # loading atoms fixation info.
+        self.FIXATIONS = self.config.get('FIXATIONS', None)
+
         # If Structure opt.
         self.RELAXATION = self.config.get('RELAXATION', None)
         self.TRANSITION_STATE = self.config.get('TRANSITION_STATE', None)
 
         # If Molecular Dynamics
         self.MD = self.config.get('MD', None)
+
+        # NEB Transition State Search
+        self.NEB = self.config.get('NEB', None)
 
         # If Vibration Calc.
         self.VIBRATION = self.config.get('VIBRATION', None)
@@ -329,21 +426,22 @@ class _Model_Wrapper_pyg:
 
     def Energy(self, X, graph):
         self.X = X
-        graph.pos = self.X.squeeze(0)
+        graph.pos = self.X.reshape(-1,3)
         y = self._model(graph)
         energy = y['energy']
         self.forces = y['forces']
         return energy
 
     def Grad(self, X, graph):
+        origin_shape = X.shape
         if self.forces is None:
             self.X = X
-            graph.pos = self.X.squeeze(0)
-            return - ((self._model(graph))['forces']).unsqueeze(0)
+            graph.pos = self.X.reshape(-1,3)
+            return - ((self._model(graph))['forces']).reshape(origin_shape)
         else:
             force = self.forces
             self.forces = None
-            return - force.unsqueeze(0)
+            return - force.reshape(origin_shape)
 
 class _Model_Wrapper_pyg_only_X:
     def __init__(self, model , graph) -> None:
@@ -382,8 +480,6 @@ class _Model_Wrapper_pyg_only_X:
             force = self.forces
             self.forces = None
             return - force.unsqueeze(0)
-
-
 
 
 class _Model_Wrapper_dgl:
@@ -538,3 +634,166 @@ class ExpMovingAverage:
                 pass
         finally:
             self.backup = dict()
+
+
+class DumpStructures:
+    """
+    Dump structures calculated by `Predictor`, `StructureOptimization`, etc.
+    """
+    def __init__(self, path:str|None=None, dump_freq: int=1, n_core:int=-1):
+        """
+
+        Args:
+            path: the path to dump structures. If None, structures will always store in memory.
+            dump_freq: the frequency of dump structures.
+            n_core: the number of cpu cores to use.
+        """
+        self._structures = Structures()
+        self._structures.Mode = 'A'
+        #self._structures.change_mode('A')
+        self.save_path = path
+        self.n_core = n_core if n_core >= 0 else jb.cpu_count(True)
+        self.parallelize = None
+        self.ctx_mgr = None
+        self.dump_freq = dump_freq
+        self.collect_count = 0
+        # initialize Structure
+        self._Sample_ids_ = np.array([])
+        # Batch info part
+        self.Batch_indices_: np.ndarray | None = np.array([])  # storing the split point (ptr) in each array with n_atom length. It both concludes 0 and len(arr).
+        self.Elements_batch_indices_: np.ndarray | None = np.array([])  # storing the split point (ptr) in each array with n_elem length. It both concludes 0 and len(arr).
+        # Structure part
+        self.Atom_list_ = np.array([])
+        self.Atomic_number_list_ = np.array([])
+        self.Cells_: np.ndarray | None = np.array([])  # cell vectors
+        self.Coords_type_: np.ndarray[Literal['C', 'D']] | None = np.array([])  # coordinate type
+        self.Coords_: np.ndarray | None = np.array([])  # atomic coordinates
+        self.Fixed_: np.ndarray | None = np.array([])  # fixed atoms masks, 0 for fixed and 1 for free.
+        self.Elements_: np.ndarray[str] | None = np.array([])  # elements
+        self.Numbers_: np.ndarray[int] | None = np.array([])  # atom number of each element
+        # Properties part
+        self.Energies_ = np.array([])  # energies of structures. None | List[float]
+        self.Forces_ = np.array([])  # forces of structures. None | List[np.NdArray[N, 3]]
+        self.Dist_mat_ = None  # distance matrices of structures. None | List[np.NdArray[N, N]]
+        # Others
+        self.Labels_ = None  # structure labels
+
+    #def lauch_multiprocessing(self):
+    #    self.ctx_mgr = jb.Parallel(self.n_core, "loky", )
+    #    self._enter_multiproc_ctx()
+
+    #def _enter_multiproc_ctx(self):
+    #    self.parallelize = self.ctx_mgr.__enter__()
+
+    def _exit_multiproc_ctx(self, errt = None, errv = None, tr = None):
+        self.parallelize = None
+        if self.ctx_mgr is not None:
+            self.ctx_mgr.__exit__(errt, errv, tr)
+        if errt is not None:
+            raise errt(f'{errv}, {tr}')
+
+    def collect(
+            self,
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos_type: List[str],
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
+        """
+        Store structures into a `Structures` instance in the ARRAY FORMAT (Mode = 'A') as `self._structres`.
+        Args:
+            batch_indices: List, the list of atom numbers in each sample.
+            idx: List[str],
+            elements: th.Tensor[int] | List[List[int]], the atom-wise elements sequence
+            cells: th.Tensor | np.ndarray,
+            pos_type: List[str],
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+
+        Returns: None
+
+        """
+        try:
+            # Postprocessing & save TODO: reformat it in future to apply to all functions.
+            batch_indices_arr = np.array(batch_indices)
+            cells = cells.cpu().numpy(force = True) if isinstance(cells, th.Tensor) else cells
+            pos_type = np.array(pos_type)
+            pos = pos.cpu().squeeze(0).numpy(force=True)
+            forces = forces.cpu().squeeze(0).numpy(force=True)
+            energies = energies.cpu().numpy(force=True)
+            fixations = fixations.cpu().squeeze(0).numpy(force=True)
+            # check elements type
+            if isinstance(elements, th.Tensor):
+                elem_list = th.split(elements.squeeze(0), batch_indices)
+                elem_list = [_.tolist() for _ in elem_list]
+            elif isinstance(elements, list):
+                elem_list = elements
+            elem_comp_list = list()
+            numb_comp_list = list()
+            elem_batch_indices = list()
+            #if self.parallelize is not None:
+            #    _res = self.parallelize(jb.delayed(elem_list_reduce)(_element_list) for _element_list in elem_list)
+            #    for _element_list in _res:
+            #        _elem_comp_list, _, _number_list = _element_list
+            #        elem_comp_list.extend(_elem_comp_list)
+            #        numb_comp_list.extend(_number_list)
+            #        elem_batch_indices.append(len(_element_list))
+            #else:
+            for _element_list in elem_list:
+                _elem_comp_list, _, _number_list = elem_list_reduce(_element_list)
+                elem_comp_list.extend(_elem_comp_list)
+                numb_comp_list.extend(_number_list)
+                elem_batch_indices.append(len(_number_list))
+            elem_batch = np.asarray(elem_batch_indices)
+            elem_arr = np.asarray(elem_comp_list)
+            num_arr = np.asarray(numb_comp_list)
+
+            self._structures.append_from_array(
+                batch_indices_arr,
+                elem_batch,
+                np.asarray(idx),
+                cells,
+                elem_arr,
+                num_arr,
+                pos_type,
+                pos,
+                fixations,
+                energies,
+                forces
+            )
+
+            # dump saved structures
+            self.collect_count += 1
+            if self.save_path is not None:
+                if self.collect_count % self.dump_freq == 0:
+                    self.flush()
+
+        except Exception as e:
+            self._exit_multiproc_ctx(Exception, e, traceback.format_exc())
+
+    def flush(self):
+        """
+        dump the collected structures in `self._structures` into disk as memory-mapped files.
+        Returns:
+
+        """
+        try:
+            if (self.save_path is not None) and (len(self._structures) > 0):
+                self._structures.save(self.save_path, 'a')
+            self._structures = Structures()
+            self._structures.Mode = 'A'
+        except Exception as e:
+            self._exit_multiproc_ctx(Exception, e, traceback.format_exc())
+
+    def __del__(self):
+        if self.save_path is not None: self.flush()
+        self._exit_multiproc_ctx()
+        gc.collect()
+

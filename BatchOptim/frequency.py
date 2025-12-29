@@ -135,7 +135,8 @@ class Frequency:
         block_size = all_batch if self.block_size is None else self.block_size
         n_int_block = pp.flatten(0, 1).shape[0] // block_size
         n_rest = pp.flatten(0, 1).shape[0] % block_size
-        real_block_size = [block_size] * n_int_block + [n_rest]  # manage the problem that all_batch could not be divided by given block_size.
+        real_block_size = [block_size] * n_int_block
+        if n_rest > 0: real_block_size = real_block_size + [n_rest]  # manage the problem that all_batch could not be divided by given block_size.
         pp = th.split(pp.flatten(0, 1), real_block_size)  # (9N**2, N ,3)
         np = th.split(np.flatten(0, 1), real_block_size)
         pn = th.split(pn.flatten(0, 1), real_block_size)

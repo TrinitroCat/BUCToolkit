@@ -15,7 +15,8 @@ import torch as th
 from torch import nn
 from torch.nn import functional as Fn
 
-from BM4Ckit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BM4Ckit.BatchGenerate.coords_linear_interp import linear_interpolation_tens
 from ..minimize import CG, QN, FIRE
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)
@@ -30,10 +31,9 @@ class CI_NEB:
     def __init__(
             self,
             N_images: int,
-            spring_const: float = 0.1,
-            optimizer: Literal['CG', 'QN', 'FIRE'] = 'CG',
-            iter_scheme: Literal['BFGS', 'Newton', 'PR', 'PR+', 'SD', 'FR'] = 'PR+',
-            linesearch: Literal['Backtrack', 'Wolfe', 'NWolfe', '2PT', '3PT', 'Golden', 'Newton', 'None'] = 'Backtrack',
+            spring_const: float = 1.,
+            optimizer: Literal['FIRE'] = 'FIRE',
+            optimizer_configs: Optional[Dict[str, Any]] = None,
             steplength: float = 0.05,
             E_threshold: float = 1e-3,
             F_threshold: float = 0.05,
@@ -41,21 +41,21 @@ class CI_NEB:
             device: str | th.device = 'cpu',
             verbose: int = 2
     ):
-
+        if optimizer_configs is None:
+            optimizer_configs = dict()
         warnings.filterwarnings('always')
-        optimizer_dict = {'CG': CG, 'QN': QN, 'FIRE': FIRE}
+        optimizer_dict = {'FIRE': FIRE}
+        if optimizer not in optimizer_dict:
+            raise NotImplementedError(f"Optimizer {optimizer} is not implemented yet. Now only `FIRE` is available.")
         self.Optimizer = optimizer_dict[optimizer](
-            iter_scheme = iter_scheme,
             E_threshold = E_threshold,
             F_threshold = F_threshold,
             maxiter = maxiter,
-            linesearch = 'None',
-            linesearch_maxiter = 10,
-            linesearch_thres = 0.02,
-            linesearch_factor = 0.6,
             steplength = steplength,
             device = device,
-            verbose = verbose
+            verbose = verbose,
+            _hold_samples = True,  # important! To ensure that no sample will be removed during NEB process.
+            **optimizer_configs
         )
         self.N_images = N_images
         self.spring_const = spring_const
@@ -67,6 +67,8 @@ class CI_NEB:
         # check
         if (not isinstance(self.maxiter, int)) or (self.maxiter <= 0):
             raise ValueError(f'Invalid value of maxiter: {self.maxiter}. It would be an integer greater than 0.')
+        if self.N_images < 1:
+            raise ValueError(f'`N_images` must be >= 1 for CI-NEB, but got {self.N_images}.')
 
         # logger
         self.logger = logging.getLogger('Main.OPT')
@@ -81,70 +83,92 @@ class CI_NEB:
 
     class __NebWrapper:
         """ function wrapper for NEB, Adding the elastic potential """
-        def __init__(self, f: Callable, gf: Callable, k: float, is_grad_contain_y: bool):
+        def __init__(self, f: Callable, gf: Callable, k: float, require_grad: bool, is_grad_contain_y: bool):
             self.ener = None
+            self.F_ori = None
             self.f = f
             self.gf = gf
             self.k = k
             self.is_grad_contain_y = is_grad_contain_y
+            self.require_grad = require_grad
 
         def energy(self, X, *args, **kwargs):
-            with th.enable_grad():
+            with th.set_grad_enabled(self.require_grad):
+                X.requires_grad_(self.require_grad)
                 y = self.f(X, *args, **kwargs)
                 self.ener = y
-            return y
+                if self.is_grad_contain_y:  # here `X` is actually `y`
+                    F_ori = - self.gf(y, X, *args, **kwargs)  # (n_i, n_atom, 3)
+                else:
+                    F_ori = - self.gf(X, *args, **kwargs)  # (n_i, n_atom, 3)
+                self.F_ori = F_ori
+            return y  # the true energy, only for exhibiting system energy, not involving into optimizing.
 
         def grad(self, X, *args, **kwargs):
+            """
+            Returns the gradient of the energy function
+            Args:
+                X: It is only a placeholder, a dummy variable.
+                *args: args[0] is the true coordinates X
+                **kwargs:
+
+            Returns:
+
+            """
             assert self.ener is not None, 'Energy is None now, please calculate energy first.'
-            with th.enable_grad():
-                X.requires_grad_()
-                if self.is_grad_contain_y:  # here `X` is actually `y`
-                    F_ori = self.gf(X, args[0], *(args[1:]), **kwargs)  # (n_i, n_atom, 3)
-                    X = args[0]
-                else:
-                    F_ori = self.gf(X, *args, **kwargs)  # (n_i, n_atom, 3)
-                n_i, n_atom, n_dim = X.shape
+            F_ori = self.F_ori  # (n_i, n_atom, 3)
+            if self.is_grad_contain_y:
+                X = args[0]
+            else:
+                X = X
+
+            n_i, n_atom, n_dim = X.shape
 
             with th.no_grad():
                 # projected direction
                 _tau = th.diff(X, dim=0)  # (n_i - 1, n_atom, 3)
-                ediff = th.diff(self.ener)  # (n_i, )
-                ediff_back = ediff[:-1].unsqueeze(-1).unsqueeze(-1)  # (n_i - 2, ), E_(n) - E_(n-1)
-                tau_back = _tau[:-1]
-                ediff_front  = ediff[1:].unsqueeze(-1).unsqueeze(-1)   # (n_i - 2, ), E_(n+1) - E_(n)
-                tau_front = _tau[1:]
-                #tau_shift = th.cat((th.zeros((1, n_atom, n_dim)), tau), dim=0)  # (n_i, n_atom, 3)
-                delta_Emax = th.where(th.abs(ediff_front) - th.abs(ediff_back) > 0, th.abs(ediff_front), th.abs(ediff_back))
-                delta_Emin = th.where(th.abs(ediff_front) - th.abs(ediff_back) < 0, th.abs(ediff_front), th.abs(ediff_back))
+                ediff = th.diff(self.ener)  # (n_i - 1, )
+                # *_back = E[i] - E[i - 1]
+                ediff_back = ediff[:-1].unsqueeze(-1).unsqueeze(-1)  # (n_i - 2, 1, 1), E_(n) - E_(n-1), keep the same dim as `_tau`
+                tau_back = _tau[:-1]  # set of image[0 : n_i - 1], X[i] - X[i - 1]
+                # *_front  = E[i + 1] - E[i]
+                ediff_front  = ediff[1:].unsqueeze(-1).unsqueeze(-1)   # (n_i - 2, 1, 1), E_(n+1) - E_(n)
+                tau_front = _tau[1:]  # set of image[1 : n_i], X[i + 1] - X[i]
+                tau_front_u = Fn.normalize(tau_front.flatten(-2, -1), dim=-1).reshape(n_i - 2, n_atom, -1)
+                tau_back_u = Fn.normalize(tau_back.flatten(-2, -1), dim=-1).reshape(n_i - 2, n_atom, -1)
+                # *_front - *_back: image[i + 1] - image[i] & deltaE[i + 1] - deltaE[i] for each i \in [0, n_i - 1]
+                delta_Emax = th.where(th.abs(ediff_front) > th.abs(ediff_back), th.abs(ediff_front), th.abs(ediff_back))
+                delta_Emin = th.where(th.abs(ediff_front) < th.abs(ediff_back), th.abs(ediff_front), th.abs(ediff_back))
                 tau_extreme = th.where(
                     ediff_front + ediff_back > 0,  # (E_(n+1) > E_(n-1))
-                    tau_front * delta_Emax + tau_back * delta_Emin,
-                    tau_front * delta_Emin + tau_back * delta_Emax
+                    tau_front_u * delta_Emax + tau_back_u * delta_Emin,
+                    tau_front_u * delta_Emin + tau_back_u * delta_Emax
                 )
                 tau = th.where(
                     (ediff_front > 0) * (ediff_back > 0),
-                    tau_front,
+                    tau_front_u,
                     th.where(
                         (ediff_front <= 0) * (ediff_back <= 0),
-                        tau_back,
+                        tau_back_u,
                         tau_extreme
                     )
                 )# (n_i - 2, n_atom, n_dim)
                 tau = Fn.normalize(tau.flatten(-2, -1), dim=-1)  # (n_i - 2, n_atom*n_dim)
+
                 # forces
                 F_ori[0] = 0.
                 F_ori[-1] = 0.
                 F_image = F_ori[1: -1].flatten(-2, -1)  # (n_i - 2, n_atom*n_dim)
                 # climbing
-                #max_indx = th.argmax(self.ener[1:-1])
-                #maxF = F_image[max_indx]
-                #maxF = maxF - 2 * ((maxF.unsqueeze(0) @ tau[max_indx].unsqueeze(-1)).squeeze()) * tau[max_indx]
+                max_indx = th.argmax(self.ener[1:-1])
+                maxF = F_image[max_indx].clone()  # (n_atom * n_dim, )
+                maxF -= 2 * ((maxF.unsqueeze(0) @ tau[max_indx].unsqueeze(-1)).squeeze()) * tau[max_indx]
                 # other NEB
                 F_vert = F_image - ((F_image.unsqueeze(1) @ tau.unsqueeze(-1)).squeeze(-1)) * tau
                 F_hori = self.k * (th.linalg.norm(tau_front, dim=(-2, -1)) - th.linalg.norm(tau_back, dim=(-2, -1))).unsqueeze(-1) * tau
                 F_ori[1: -1] = (F_vert + F_hori).reshape(n_i-2, n_atom, n_dim)
-                print(f'NEB forces: {F_ori.tolist()}')
-                #F_ori[max_indx + 1] = maxF.reshape(n_atom, n_dim)
+                #print(f'NEB forces: {F_ori.tolist()}')
+                F_ori[max_indx + 1] = maxF.reshape(n_atom, n_dim)
 
             return - F_ori
 
@@ -154,43 +178,42 @@ class CI_NEB:
             X_init: th.Tensor,
             X_fin: th.Tensor,
             grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
+            func_args: Tuple = tuple(),
             func_kwargs=None,
-            grad_func_args: Sequence = tuple(),
+            grad_func_args: Tuple = tuple(),
             grad_func_kwargs=None,
             is_grad_func_contain_y: bool = True,
+            require_grad = False,
             output_grad: bool = False,
             fixed_atom_tensor: Optional[th.Tensor] = None,
     ):
         """
-        run Dimer algo.
+        run CI-NEB algo.
         Args:
             func: function
-            X_init: initial structure coordinates
-            X_fin: finale structure coordinates
+            X_init: (n_atom, n_dim), initial structure coordinates
+            X_fin: (n_atom, n_dim), finale structure coordinates
             grad_func: function of func's gradient
             func_args: function args
             func_kwargs: function kwargs
             grad_func_args: gradient function args
             grad_func_kwargs: gradient function kwargs
-            is_grad_func_contain_y: whether gradient function contains dependant various y
+            is_grad_func_contain_y: whether gradient function contains dependent various y
+            require_grad: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs) calculation.
             output_grad: whether output gradient
-            fixed_atom_tensor: mask of fixed atoms
+            fixed_atom_tensor: (n_atom, n_dim), mask of fixed atoms
 
         Returns:
 
         """
-
+        # initialize
         if grad_func_kwargs is None:
             grad_func_kwargs = dict()
         if func_kwargs is None:
             func_kwargs = dict()
-
-        t_main = time.perf_counter()
-        n_batch, n_atom, n_dim = X_init.shape
         if grad_func is None:
             is_grad_func_contain_y = True
-
+            require_grad = True
             def grad_func_(y, x, grad_shape=None):
                 if grad_shape is None:
                     grad_shape = th.ones_like(y)
@@ -198,15 +221,6 @@ class CI_NEB:
                 return g[0]
         else:
             grad_func_ = grad_func
-        '''# Selective dynamics
-        if fixed_atom_tensor is None:
-            atom_masks = th.ones_like(X_init, device=self.device)
-        elif fixed_atom_tensor.shape == X_init.shape:
-            atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not have the same shape of X (shape: {X_init.shape}).')
-        atom_masks_ = atom_masks.flatten(-2, -1)  # (n_batch, n_atom*n_dim)'''
-
 
         # check
         if len(X_init.shape) != 2:
@@ -223,19 +237,24 @@ class CI_NEB:
             raise ValueError(f'Invalid shape of X_init: {X_init.shape}, it mast be (n_atom, 3).')
         X_init = X_init.to(self.device)
         X_fin = X_fin.to(self.device)
+        # Selective dynamics for interpolation
+        if fixed_atom_tensor is None:
+            atom_masks = th.ones_like(X_init, device=self.device)
+        elif fixed_atom_tensor.shape == X_init.shape:
+            atom_masks = fixed_atom_tensor.to(self.device)
+        else:
+            raise RuntimeError(f'fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not have the same shape of X (shape: {X_init.shape}).')
 
         # interpolation images
-        ind = th.linspace(0., 1., self.N_images + 2).tolist()
-        X_pnts = [(X_init + _ * (X_fin - X_init)).unsqueeze(0) for _ in ind]  # (N_img, n_atom, n_dim)
-        X_pnts = th.cat(X_pnts, dim=0)
-        plist = list()  # TEST <<<<
-        is_main_loop_converge = False
+        X_pnts: th.Tensor = linear_interpolation_tens(X_init, X_fin, self.N_images + 2, atom_masks)  # (N_img, n_atom, n_dim)
+        #plist = list()  # TEST <<<<
+
         # Main Loop
-        X_pnts_ = X_pnts.flatten(-2, -1)  # (N_img, n_atom * n_dim). NOTE: '_' means the flatten variables.
-        f = self.__NebWrapper(func, grad_func_, self.spring_const, is_grad_func_contain_y)
-        self.Optimizer: CG
+        #X_pnts = X_pnts.flatten(0, 1)  # (N_img, n_atom, n_dim). NOTE: '_' means the flatten variables.
+        f = self.__NebWrapper(func, grad_func_, self.spring_const, require_grad, is_grad_func_contain_y)
+        self.Optimizer: FIRE
         with th.no_grad():
-            _energy, _X, plist = self.Optimizer.run(
+            oup = self.Optimizer.run(
                 f.energy,
                 X_pnts,
                 f.grad,
@@ -244,10 +263,24 @@ class CI_NEB:
                 grad_func_args,
                 grad_func_kwargs,
                 is_grad_func_contain_y,
-                False,
-                fixed_atom_tensor
+                require_grad,
+                output_grad,
+                atom_masks.broadcast_to(X_pnts.shape)
+            )
+            if output_grad:
+                _energy, _X, out_grad = oup
+            else:
+                _energy, _X, plst = oup
+        # final print
+        if self.verbose:
+            max_ener, max_indx = th.max(_energy, dim=0)
+            self.logger.info(
+                f'-----------------------------------------------------\n'
+                f'Final NEB path energy: {np.array2string(_energy.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n'
+                f'Final CI-NEB max energy: {max_ener.item():< .8e}\n'
+                f'Image index: {max_indx.item():< 3d}\n'
+                f'-----------------------------------------------------\n'
             )
 
-        return _energy, _X, plist  # TEST <<<<<<
+        return oup#, plist  # TEST <<<<<<
 
-        pass

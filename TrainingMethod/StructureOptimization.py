@@ -7,7 +7,7 @@ import logging
 import os
 import time
 import traceback
-from typing import Any, Literal, Dict
+from typing import Any, Literal, Dict, List
 
 import numpy as np
 import torch as th
@@ -16,7 +16,7 @@ from torch import nn
 from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
 from BM4Ckit.BatchOptim.TS.Dimer import Dimer
 from BM4Ckit.BatchOptim.TS.Dimer_linseach_momt import DimerLinsMomt
-from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl, DumpStructures
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
 from BM4Ckit.utils._CheckModules import check_module
@@ -26,7 +26,7 @@ from BM4Ckit import Structures
 
 class StructureOptimization(_CONFIGS):
     """
-    The class of structure optimization for relaxation and transition state.
+    The class of structure optimization for relaxation and transition state (only for single-point TS search, e.g. DIMER).
     Users need to set the dataset and dataloader manually.
 
     Args:
@@ -94,7 +94,9 @@ class StructureOptimization(_CONFIGS):
         else:
             self.pygData = None
         self.data_type = data_type
+
         self.reload_config(config_file)
+
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
@@ -333,10 +335,7 @@ class StructureOptimization(_CONFIGS):
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             idx = list()
-            # To record the minimized X, Force, and Energies.
-            total_structures_list = list()
             for val_data, val_label in val_set:
-                _structures = Structures()
                 try:  # Catch error in each loop & continue, instead of directly exit.
                     # to avoid get an empty batch
                     if get_batch_size(val_data) <= 0:
@@ -347,9 +346,9 @@ class StructureOptimization(_CONFIGS):
                         th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1
                     )
                     if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
+                        batch_indx:List = [len(dat.pos) for dat in val_data.to_data_list()]
                     else:
-                        batch_indx = val_data.batch_num_nodes('atom')
+                        batch_indx:List = val_data.batch_num_nodes('atom').tolist()
                         # initial atom coordinates
                     if self.data_type == 'pyg':
                         X_init = val_data.pos.unsqueeze(0)
@@ -421,44 +420,25 @@ class StructureOptimization(_CONFIGS):
                             batch_indices=batch_indx,
                             fixed_atom_tensor=fixed_mask,
                         )
-                        min_ener.detach_()
-                        min_x.detach_()
-                        min_force.detach_()
+                        min_ener.detach_().squeeze(0)
+                        min_x.detach_().squeeze(0)
+                        min_force.detach_().squeeze(0)
                         # Postprocessing & save TODO: reformat it in future to apply to all functions.
-                        min_x = min_x.cpu().squeeze(0)
-                        min_force = min_force.cpu().squeeze(0)
-                        min_ener = min_ener.cpu()
-                        cell_list = [_ for _ in CELL]
-                        elem_list = th.split(element_tensor[0], batch_indx)
-                        elem_list = [_.tolist() for _ in elem_list]
-                        x_list = th.split(min_x, batch_indx)
-                        x_list = [_.numpy() for _ in x_list]
-                        f_list = th.split(min_force, batch_indx)
-                        f_list = [_.numpy() for _ in f_list]
-                        fix_list = th.split(fixed_mask[0], batch_indx)
-                        fix_list = [_.numpy(force=True) for _ in fix_list]
-                        elem_comp_list = list()
-                        numb_comp_list = list()
-                        for _element_list in elem_list:
-                            _elem_comp_list, _, _number_list = elem_list_reduce(_element_list)
-                            elem_comp_list.append(_elem_comp_list)
-                            numb_comp_list.append(_number_list)
-
-                        _structures.append_from_lists(
+                        self.dumper.collect(
+                            batch_indx,
                             idx,
-                            cell_list,
-                            elem_comp_list,
-                            numb_comp_list,
+                            _element_list,
+                            CELL,
                             ['C'] * len(idx),
-                            x_list,
-                            fix_list,
-                            min_ener.tolist(),
-                            f_list
+                            min_x,
+                            fixed_mask[0],
+                            min_ener,
+                            min_force,
                         )
+
                     # Print info
                     if self.VERBOSE > 0:
                         self.logger.info('-' * 100)
-                    total_structures_list.append(_structures)
                     n_c += 1
 
                 except Exception as e:
@@ -469,17 +449,16 @@ class StructureOptimization(_CONFIGS):
                     n_c += 1
 
             if self.VERBOSE: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
-            total_structures = Structures()
-            total_structures.extend(total_structures_list)
             if self.SAVE_PREDICTIONS:
                 t_save = time.perf_counter()
                 with _LoggingEnd(self.log_handler):
                     if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
-                #th.save({'ID': idx, 'Coordinates': x_list, 'Forces': f_list, 'Energies': min_ener.tolist()}, self.PREDICTIONS_SAVE_FILE)
-                th.save(total_structures, self.PREDICTIONS_SAVE_FILE)
+                self.dumper.flush()
                 if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
             else:
-                return total_structures
+                structures = self.dumper._structures
+                structures.change_mode('L')
+                return structures
 
         except Exception as e:
             th.cuda.synchronize()
@@ -623,8 +602,8 @@ class StructureOptimization(_CONFIGS):
                         if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
                     elif get_batch_size(val_data) > 1:
-                        if self.VERBOSE: self.logger.error(f'Vibration do not support batched calculation yet. You should set BATCH_SIZE to 1.')
-                        raise RuntimeError(f'Vibration do not support batched calculation yet. You should set BATCH_SIZE to 1.')
+                        if self.VERBOSE: self.logger.error(f'Transition state search do not support batched calculation yet. You should set BATCH_SIZE to 1.')
+                        raise RuntimeError(f'Transition state search do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                     # batch indices
                     batch_indx1 = th.sum(
                         th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1
