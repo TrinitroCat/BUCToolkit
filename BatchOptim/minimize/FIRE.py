@@ -25,6 +25,7 @@ from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_
 from .._utils._warnings import FaildToConvergeWarning
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
 
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 class FIRE:
     def __init__(
@@ -170,7 +171,6 @@ class FIRE:
             argmin func: Tensor(X.shape), the X corresponds to min func.
             grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
         """
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         t_main = time.perf_counter()
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
@@ -249,7 +249,7 @@ class FIRE:
             for _Elem in elements:
                 masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
             masses = th.tensor(masses, dtype=th.float32, device=self.device)
-            masses = masses.unsqueeze(-1).expand_as(X)  # (n_batch, n_atom, n_dim)
+            masses = masses.unsqueeze(-1).expand_as(X).clone()  # (n_batch, n_atom, n_dim)
         else:
             raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
 
@@ -284,7 +284,7 @@ class FIRE:
             self.logger.info('Iteration Scheme: FIRE')
             self.logger.info('-' * 100)
         # MAIN LOOP
-        ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         with th.no_grad():
             for numit in range(self.maxiter):  # Simple Euler
                 t_st = time.perf_counter()
@@ -349,7 +349,7 @@ class FIRE:
                 # update batch
                 if not self._hold_samples:
                     func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                        converge_check,
+                        ~converge_check,
                         func_args,
                         func_kwargs,
                         grad_func_args,
@@ -412,12 +412,13 @@ class FIRE:
                 y_ = y_.detach()
                 F_ = F_.detach()
                 X_ = X_.detach()
-                F_hat = F_ / th.linalg.norm(F_, dim=(-2, -1), keepdim=True)
+                F_hat = F_ / (th.linalg.norm(F_, dim=(-2, -1), keepdim=True) + 1e-20)
                 # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
                 p = th.sum(F_ * v_, dim=(-1, -2), keepdim=True)
                 # update velocity
+                v_norm = th.linalg.norm(v_, dim=(-2, -1), keepdim=True)
                 v_.mul_((1 - a_))
-                v_.add_(a_ * th.linalg.norm(v_, dim=(-2, -1), keepdim=True) * F_hat)
+                v_.add_(a_ * v_norm * F_hat)
                 # if P > 0.
                 n_count_ += th.where(p > 0., 1, -n_count_)
                 is_ncount_gt_Nmin = n_count_ >= self.N_min
@@ -440,7 +441,7 @@ class FIRE:
                         F.index_copy_(1, select_indices, F_)
                         v.index_copy_(1, select_indices, v_)
                         X.index_copy_(1, select_indices, X_)
-                        masses.index_copy_(1, select_indices, masses_)
+                        #masses.index_copy_(1, select_indices, masses_)
                         t = t_
                         a = a_
                         n_count = n_count_
@@ -450,7 +451,7 @@ class FIRE:
                         F.index_copy_(0, select_indices, F_)
                         v.index_copy_(0, select_indices, v_)
                         X.index_copy_(0, select_indices, X_)
-                        masses.index_copy_(0, select_indices, masses_)
+                        #masses.index_copy_(0, select_indices, masses_)
                         t.index_copy_(0, select_indices, t_)
                         a.index_copy_(0, select_indices, a_)
                         n_count.index_copy_(0, select_indices, n_count_)
@@ -465,7 +466,7 @@ class FIRE:
                     a = a_
                     n_count = n_count_
 
-                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
@@ -501,4 +502,4 @@ class FIRE:
         if output_grad:
             return y, X, - F
         else:
-            return y, X  , ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            return y, X  #, ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<

@@ -20,8 +20,7 @@ from BM4Ckit.utils.grad_functions import bjvp, bhvp
 
 class _rConstrBase(_rBaseMD):
     """
-    Constrained Base BatchMD with regular batches
-    micro canonical ensemble (NVE) molecular dynamics implemented via velocity Verlet algo. on the tangent space.
+    Constrained Base Dynamics
 
     Args:
         time_step: float, time per step (ps).
@@ -107,7 +106,7 @@ class _rConstrBase(_rBaseMD):
         self.Q = th.tensor([], device=self.device, dtype=th.float32)  # Q(n_batch, n_atoms * n_dim, n_constr)
         self.jac = None # Jacobian Matrix
         self.R = th.tensor([], device=self.device, dtype=th.float32)  # R(n_batch, n_constr, n_constr)
-        self.q = th.tensor([], device=self.device, dtype=th.float32)  # (n_constr, ), solution of `R^T q = d/dt constr_val(t)`
+        self.q = th.tensor([], device=self.device, dtype=th.float32)  # (n_batch, n_constr, 1), solution of `R^T q = d/dt constr_val(t)`
         self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = None  # M^-1/2
         self.max_proj_iter = 10
@@ -159,7 +158,7 @@ class _rConstrBase(_rBaseMD):
             dim=(-2, -1),
             keepdim=True
         )
-        V_init.copy_(th.where(Ek_p < 1e-5, 0., Ek/Ek_p * ProjV))
+        V_init.copy_(th.where(Ek_p < 1e-5, 0., th.sqrt(Ek/Ek_p) * ProjV))
         self.n_reduce += jac.shape[1]
         # recalculate target Ek under constraints
         _, n_atom, n_dim = X.shape
@@ -168,8 +167,8 @@ class _rConstrBase(_rBaseMD):
         n_batch, n_constr, _ = self.R.shape
         self.lamb = th.zeros((n_batch, n_constr), device=self.device)
         # debug
-        self._debug_X_check = list()
-        self._debug_V_check = list()
+        #self._debug_X_check = list()
+        #self._debug_V_check = list()
         # ...
 
     def _constr_func_wrapped(self, X, constr_val_now):
@@ -314,61 +313,9 @@ class _rConstrBase(_rBaseMD):
 
         """
         n_batch, n_atoms, n_dim = X.shape
-        Fc = th.zeros(n_batch, self.R.shape[-1], 1, device=self.device)
-        '''### first QRF for velocity ###
-        # update Jacobian
-        jac, y = self._jacobian(X)
-        self._do_qr(jac)
-        # define the constr. force
-        Fc = th.zeros(n_batch, y.shape[1], 1, device=self.device)
-        #self.Q_tmp.copy_(self.Q)  # to use to update velocity constraints
-        # print
-        constr_err = th.max(th.abs(y)).item()
-        if self.verbose > 0:
-            self.logger.info(f' 0 Constraint errors are now: {constr_err:.4e}')
-        # threshold
-        if constr_err < self.constr_thres:
-            return Fc
-        _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)  # (n_batch, n_constr, 1)
-        # the constr forces
-        Fc += th.linalg.solve_triangular(self.R, _lamb, upper=True)
-        # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
-        corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
-        X.add_(corr, alpha=-1.)
-        #V.add_(corr/self.time_step, alpha=-1.)
-        ### manually unrolling for first 3 steps ###
-        jac, y = self._jacobian(X)
-        constr_err = th.max(th.abs(y)).item()
-        self._do_qr(jac)
-        if self.verbose > 0:
-            self.logger.info(f' 1 Constraint errors are now: {constr_err:.4e}')
-        if constr_err < self.constr_thres:
-            # unit conversion
-            Fc *= 207.28617/(self.time_step**2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
-            return Fc
-        _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
-        # the constr forces
-        Fc += th.linalg.solve_triangular(self.R, _lamb, upper=True)
-        corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
-        X.add_(corr, alpha=-1.)
-        #V.add_(corr/self.time_step, alpha=-1.)
+        _lamb = th.zeros(n_batch, self.R.shape[-1], 1, device=self.device)
 
-        jac, y = self._jacobian(X)
-        constr_err = th.max(th.abs(y)).item()
-        self._do_qr(jac)
-        if self.verbose > 0:
-            self.logger.info(f' 2 Constraint errors are now: {constr_err:.4e}')
-        if constr_err < self.constr_thres:
-            # unit conversion
-            Fc *= 207.28617/(self.time_step**2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
-            return Fc
-        _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1), upper=False)
-        Fc += th.linalg.solve_triangular(self.R, _lamb, upper=True)
-        corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
-        X.add_(corr, alpha=-1.)
-        #V.add_(corr/self.time_step, alpha=-1.)'''
-
-        # if still not converge, entering loop
+        # MAIN loop
         for i in range(0, self.max_proj_iter):
             # update Jacobian
             jac, y = self._jacobian(X)
@@ -378,6 +325,8 @@ class _rConstrBase(_rBaseMD):
                 self.logger.info(f'{i: < 3d} Constraint errors are now: {constr_err:.4e}')
             # threshold
             if constr_err < self.constr_thres:
+                # constr. forces lambda
+                Fc = th.linalg.solve_triangular(self.R, _lamb, upper=True)
                 # unit conversion
                 Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
                 return Fc
@@ -386,8 +335,6 @@ class _rConstrBase(_rBaseMD):
             # P = M^1/2 @ (I - Q Q^T) @ M^-1/2
             # Q(n_batch, n_atoms * n_dim, n_constr)
             _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1) , upper=False) # (n_batch, n_constr, 1)
-            # constr. forces lambda
-            Fc += th.linalg.solve_triangular(self.R, _lamb, upper=True)
             # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
             corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
             X.add_(corr, alpha=-1.)
@@ -395,6 +342,10 @@ class _rConstrBase(_rBaseMD):
 
         # if not converged
         self.logger.warning("Projection of X to the manifold is not converged.")
+        # constr. forces lambda
+        Fc = th.linalg.solve_triangular(self.R, _lamb, upper=True)
+        # unit conversion
+        Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
         return Fc
 
     def _project1_std(self, X:th.Tensor) -> th.Tensor:

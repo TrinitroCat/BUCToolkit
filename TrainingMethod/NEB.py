@@ -178,7 +178,10 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                 model_wrap = _Model_Wrapper_pyg(_model)
                 def get_indx(data):
                     _indx = getattr(data, 'idx', None)
-                    if _indx is not None: _indx = [_[0] + f'_{iii}' for iii,_ in enumerate(_indx)]
+                    # To correctly manage the names after NEB opt. There names will be [[`idx`], [`idx`], ...] (repeat N_images times).
+                    if (_indx is not None) and isinstance(_indx[0], list):
+                        _indx = [_[0] + f'_{iii}' for iii, _ in enumerate(_indx)]
+
                     return _indx
 
                 def get_batch_size(data):
@@ -191,7 +194,10 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     return data.cell.numpy(force=True)
 
                 def get_atomic_number(data):
-                    return data.atomic_numbers  # note: here is different from MD/Relaxations that NOT unsqueeze(0)
+                    return data.atomic_numbers.unsqueeze(0)
+
+                def get_fixed_mask(data):
+                    return data.fixed
 
                 def rebatched_graph(single_graph, N_images):
                     """ expand batches """
@@ -210,6 +216,10 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                 def get_atomic_number(data):
                     return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
 
+                def get_fixed_mask(data):
+                    return data.nodes['atom'].data.get('fix', None)
+
+            # Instantiate NEB ALGO class
             neb_ops = self.NEB_ALGO(**self.NEB_config)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, **self._data_loader_configs)
             if getattr(val_set, '_LOADER_TYPE', None) != 'ISFS':
@@ -233,6 +243,14 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     elif batch_size > 1:
                         if self.VERBOSE: self.logger.error(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                         raise RuntimeError(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
+                    if self.data_type == 'pyg':
+                        batch_indx = [len(dat.pos) for dat in dataIS.to_data_list()]
+                        _check_batch_indx = [len(dat.pos) for dat in dataFS.to_data_list()]
+                    elif self.data_type == 'dgl':
+                        batch_indx = dataIS.batch_num_nodes('atom')
+                        _check_batch_indx = dataFS.batch_num_nodes('atom')
+                    else:
+                        raise RuntimeError(f'Data type {self.data_type} is not supported.')
                     # NEB
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
@@ -242,16 +260,8 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                             cells, **FLOAT_ARRAY_FORMAT
                         ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
                         self.logger.info(f'Cell Vectors:\n{cell_str}')
-                        self.logout_element_information(get_atomic_number(dataIS), get_batch_indx(dataIS))
+                        self.logout_element_information(get_atomic_number(dataIS), batch_indx)
 
-                    if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in dataIS.to_data_list()]
-                        _check_batch_indx = [len(dat.pos) for dat in dataFS.to_data_list()]
-                    elif self.data_type == 'dgl':
-                        batch_indx = dataIS.batch_num_nodes('atom')
-                        _check_batch_indx = dataFS.batch_num_nodes('atom')
-                    else:
-                        raise RuntimeError(f'Data type {self.data_type} is not supported.')
                     # check atom numbers
                     for _, __ in enumerate(batch_indx):
                         if __ != _check_batch_indx[_]:
@@ -267,8 +277,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                         X_is = dataIS.nodes['atom'].data['pos']
                         X_fs = dataFS.nodes['atom'].data['pos']
                     # rebatch data
-                    origin_elem_tensor = get_atomic_number(dataIS)
-                    dataIS = rebatched_graph(dataIS, self.N_IMAGES)
+                    origin_elem_tensor = get_atomic_number(dataIS).squeeze(0)
                     # creat fixation
                     if self.FIXATIONS is not None:
                         fixed_atom_tensor = th.ones_like(X_is, dtype=th.int8)
@@ -282,7 +291,8 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                             )
                         fixed_atom_tensor = fixed_atom_tensor.repeat((self.N_IMAGES, 1))
                     else:
-                        fixed_atom_tensor = None
+                        fixed_atom_tensor = get_fixed_mask(dataIS)
+                    dataIS = rebatched_graph(dataIS, self.N_IMAGES)
 
                     # run
                     _energy, _X, out_grad = neb_ops.run(
@@ -302,9 +312,9 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     idx = get_indx(dataIS)
 
                     self.dumper.collect(
-                        get_batch_indx(dataIS),
+                        batch_indx,
                         idx,
-                        get_atomic_number(dataIS),
+                        get_atomic_number(dataIS).squeeze(0),
                         get_cell_vec(dataIS),
                         ['C'] * len(idx),
                         _X.flatten(0, 1),
