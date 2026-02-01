@@ -380,7 +380,9 @@ class BatchStructures(object):
         elif mode == 'a':  # exist the path, but it is empty
             if mode == 'a': mode = 'w'
         # check self
-        if len(self) == 0: raise RuntimeError('BatchStructures are empty now!')
+        if len(self) == 0:
+            self.logger.error('ERROR: BatchStructures are empty now!')
+            return None
         self._update_indices()
         self._check_id()
         self._check_len()
@@ -893,6 +895,36 @@ class BatchStructures(object):
                 self.Coords[i] @= cell
                 self.Coords_type[i] = 'C'
 
+    def standardize(self, ):
+        """
+        Standardize the atomic coordinates, i.e., translation the centre of all coordinates to their lattice centre.
+        Only work in 'L' Mode.
+
+        Returns: None
+        """
+        # TODO, standardize coo
+        raise NotImplementedError('Standardize not implemented yet.')
+        _CELL_CENTRE = np.asarray([0.5, 0.5, 0.5])
+        for i, coo in enumerate(self.Coords):
+            if self.Coords_type[i] == 'C':  # cartesian
+                # shape center
+                c1 = np.mean(coo, axis=0, keepdims=True)
+                #   check out of cell
+                fc1 = c1 @ np.linalg.inv(self.Cells[i])
+                if np.any((fc1 < 0.) | (fc1 > 1.)):
+                    self.logger.warning(f'Center out of cell in {self.Sample_ids[i]}')
+                    fc1 -= np.floor(fc1)
+                    self.Coords[i] = fc1 @ self.Cells[i]
+                lc1 = _CELL_CENTRE @ self.Cells[i]
+                self.Coords[i] -= c1 - lc1  # (n_atom, 3) - (1, 3)
+            elif self.Coords_type[i] == 'D':  # frac
+                # shape center
+                fc1 = np.mean(coo, axis=0, keepdims=True)
+                if np.any((fc1 < 0.) | (fc1 > 1.)):
+                    self.logger.warning(f'Center out of cell in {self.Sample_ids[i]}')
+                    fc1 -= np.floor(fc1)
+                self.Coords[i] -= fc1 - _CELL_CENTRE  # (n_atom, 3) - (1, 3)
+
     def shuffle(self, seed:int = None):
         """
         Shuffle the samples with given random seed.
@@ -934,6 +966,37 @@ class BatchStructures(object):
         self.Fixed = [self.Fixed[_] for _ in indx]  # fixed masks
         self._check_id()
         self._check_len()
+
+    def fix_atoms_by_height(self, height:float, coord_type: Literal['C', 'D']='C', direction: Literal['x', 'y', 'z'] = 'z'):
+        """
+        Fix atoms by height at the given direction.
+        All atoms with coordinates lower than the given height will be fixed.
+        Returns: None
+
+        """
+        _DIRECT_DICT = {'x': slice(None, 1), 'y': slice(1, 2), 'z': slice(-1, None)}
+        if coord_type == 'C':
+            self.direct2cartesian()
+        elif coord_type == 'D':
+            self.cartesian2direct()
+        else:
+            self.logger.error(f'ERROR: Unknown coord_type `{coord_type}`.')
+            return
+
+        if direction not in _DIRECT_DICT:
+            self.logger.error(f'ERROR: Unknown direction `{direction}`.')
+            return
+
+        i = 0
+        try:
+            for i, m in enumerate(self.Coords):
+                mask = np.where(self.Coords[i][:, _DIRECT_DICT[direction]] <= height, 0, 1)
+                mask = np.repeat(mask, 3, axis=-1)
+                self.Fixed[i] = mask.astype(np.int8)
+        except Exception as e:
+            self.logger.error(f'ERROR: Fixation failed in the {i}-th structure:')
+            self.logger.error(e)
+            self.logger.error(traceback.format_exc())
 
     def revise(
             self,
@@ -1633,6 +1696,25 @@ class BatchStructures(object):
         sub_self.remove(key)
 
         return sub_self
+
+    ########################################################################################
+    #                                    QUERIES
+    #
+    ########################################################################################
+    def where(self, key: str | List[str]):
+        """
+        Return the index/indices of given sample id(s) `key` in self
+        Returns: int | List[int]
+
+        """
+        if isinstance(key, list):
+            indx_list = list()
+            for kk in key:
+                indx_list.append(self._indices[kk])
+        else:
+            indx_list = self._indices[key]
+
+        return indx_list
 
     def contain_any(self, elements: List[str] | Set[str]):
         """
