@@ -404,6 +404,24 @@ class _CONFIGS(object):
         self.VIBRATION = self.config.get('VIBRATION', None)
 
 
+def compare_tensors(X1: th.Tensor, X2: th.Tensor):
+    """Compare two tensors."""
+    char1 = (X1.untyped_storage().data_ptr(),
+             X1.storage_offset(),
+             tuple(X1.shape),
+             tuple(X1.stride()),
+             X1.device,
+             X1.dtype)
+    char2 = (X2.untyped_storage().data_ptr(),
+             X2.storage_offset(),
+             tuple(X2.shape),
+             tuple(X2.stride()),
+             X2.device,
+             X2.dtype)
+
+    return char1 == char2
+
+
 class _Model_Wrapper_pyg:
     def __init__(self, model) -> None:
         """
@@ -420,6 +438,7 @@ class _Model_Wrapper_pyg:
         """
         self._model = model
         self.forces = None
+        self.X = None
         if check_module('torch_geometric') is None:
             ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
@@ -434,6 +453,8 @@ class _Model_Wrapper_pyg:
 
     def Grad(self, X, graph):
         origin_shape = X.shape
+        if (self.X is None) or (not compare_tensors(X, self.X)):
+            self.forces = None
         if self.forces is None:
             self.X = X
             graph.pos = self.X.reshape(-1,3)
@@ -472,6 +493,9 @@ class _Model_Wrapper_pyg_only_X:
         return energy
 
     def Grad(self, X):
+        origin_shape = X.shape
+        if not th.allclose(X, self.X, atol=1e-6):
+            self.forces = None
         if self.forces is None:
             self.X = X
             self.graph.pos = self.X.squeeze(0)
@@ -526,6 +550,8 @@ class _Model_Wrapper_dgl:
         return energy
 
     def Grad(self, X, graph):
+        if not th.allclose(X, self.X, atol=1e-6):
+            self.forces = None
         if self.forces is None:
             self.X = X
             graph.nodes['atom'].data['pos'] = self.X.squeeze(0)
@@ -574,10 +600,13 @@ class _Model_Wrapper_regularBatch_pyg:
         return energy
 
     def Grad(self, X, graph):
+        origin_shape = X.shape
+        if not th.allclose(X, self.X, atol=1e-6):
+            self.forces = None
         if self.forces is None:
             self.Energy(X, graph)
 
-        force = self.forces
+        force: th.Tensor = self.forces
         self.forces = None
         return - force.unsqueeze(0)
 
@@ -734,7 +763,9 @@ class DumpStructures:
                 elem_list = th.split(elements.squeeze(0), batch_indices)
                 elem_list = [_.tolist() for _ in elem_list]
             elif isinstance(elements, list):
-                elem_list = elements
+                elem_list = list(elements)
+            else:
+                raise TypeError(f'`elements` should be a tensor or a list, but got {type(elements)}.')
             elem_comp_list = list()
             numb_comp_list = list()
             elem_batch_indices = list()
@@ -796,4 +827,54 @@ class DumpStructures:
         if self.save_path is not None: self.flush()
         self._exit_multiproc_ctx()
         gc.collect()
+
+
+class PygBatchUpdater:
+    """ batch updater for torch-geometric objects """
+
+    def __init__(self):
+        self.__check_old = None
+        self.pygData = check_module('torch_geometric.data.batch')
+
+    def initialize(self):
+        self.__check_old = None
+
+    def _reallocate(
+            self,
+            converge_check: th.Tensor,
+            func_args,
+            func_kwargs,
+            grad_func_args,
+            grad_func_kwargs
+    ):
+        # main
+        g = func_args[0]
+        g_list = g.index_select(converge_check)
+        g_new = self.pygData.Batch.from_data_list(g_list)
+        self.__check_old = converge_check
+        self.__g_old = g_new
+        return (g_new,), func_kwargs, (g_new,), grad_func_kwargs
+
+    def __call__(
+            self,
+            converge_check: th.Tensor,
+            func_args,
+            func_kwargs,
+            grad_func_args,
+            grad_func_kwargs
+    ):
+        # adding a buffer
+        is_new = (self.__check_old is None) or (converge_check.shape != self.__check_old.shape)
+        if is_new:
+            self.__check_old = converge_check
+            self.__g_old = func_args[0]
+            if th.all(converge_check):  # if all are unconverged. usually occurred for new ones.
+                return func_args, func_kwargs, grad_func_args, grad_func_kwargs
+            else:
+                return self._reallocate(converge_check, func_args, func_kwargs, grad_func_args, grad_func_kwargs)
+
+        elif th.all(th.eq(self.__check_old, converge_check)):
+            return (self.__g_old,), func_kwargs, (self.__g_old,), grad_func_kwargs
+        else:
+            return self._reallocate(converge_check, func_args, func_kwargs, grad_func_args, grad_func_kwargs)
 

@@ -13,6 +13,7 @@ import numpy as np
 import torch as th
 from torch import nn
 
+from BM4Ckit import BatchOptim
 from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
 from BM4Ckit.BatchOptim.TS.Dimer import Dimer
 from BM4Ckit.BatchOptim.TS.Dimer_linseach_momt import DimerLinsMomt
@@ -21,7 +22,7 @@ from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
 from BM4Ckit.utils._CheckModules import check_module
 from BM4Ckit.utils.ElemListReduce import elem_list_reduce
-from BM4Ckit import Structures
+from BM4Ckit.TrainingMethod._io import PygBatchUpdater
 
 
 class StructureOptimization(_CONFIGS):
@@ -62,9 +63,13 @@ class StructureOptimization(_CONFIGS):
         # For transition state tasks:
         TRANSITION_STATE:
             ALGO: Literal[DIMER, DIMER_LS], the optimization algo.
-            X_DIFF: list, the dimer difference coordinate corresponding to initial coordinate X. Default: a random tensor with the same shape of X.
+            X_DIFF_ATTR: str, the name of the attribute of dimer direction guess for initial coordinate X in data.
+                the dimer direction `X_diff` will be set by `X_diff = data.X_DIFF_ATTR`.
+                If `X_DIFF_ATTR` not a data's attribute, a random vector will be generated.
             E_THRES: float, threshold of Energy difference (eV). Default: 1e-4.
             TORQ_THRES: float, the threshold of max torque of Dimer. Default: 1e-2.
+            CURVATURE_THRES: float, the threshold of curvature for rotation convergence. Once the curvatures less than `CURVATURE_THRES`,
+                convergence will be viewed as reached. Default: - 0.1.
             F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
             MAXITER_TRANS: int, the maximum iteration numbers of transition steps. Default: 300.
             MAXITER_ROT: int, the maximum iteration numbers of rotation steps. Default: 10.
@@ -87,6 +92,7 @@ class StructureOptimization(_CONFIGS):
     ) -> None:
         super().__init__(config_file)
 
+        self.dX = None
         self.config_file = config_file
         assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
         if data_type == 'pyg':
@@ -108,6 +114,7 @@ class StructureOptimization(_CONFIGS):
                 self.logger.warning(
                     '** WARNING: Both `RELAXATION` and `TRANSITION_STATE` were set. Hence, `TRANSITION_STATE` will be ignored. **'
                 )
+                self.TRANSITION_STATE = None
             if self.RELAXATION['ALGO'] == 'BFGS':
                 _iterschem = 'BFGS'
                 iterschem = 'iter_scheme'
@@ -155,9 +162,10 @@ class StructureOptimization(_CONFIGS):
         elif self.TRANSITION_STATE is not None:
             self.Stru_Opt = __relax_dict[self.TRANSITION_STATE['ALGO']]
             self.require_grad = self.TRANSITION_STATE.get('REQUIRE_GRAD', False)
-            self.X_diff = self.TRANSITION_STATE.get('X_DIFF', None)
+            self.x_diff_attr = self.TRANSITION_STATE.get('X_DIFF_ATTR', 'x_dimer')
             self.Stru_Opt_config = {'E_threshold': self.TRANSITION_STATE.get('E_THRES', 1.e-4),
                                     'Torque_thres': self.TRANSITION_STATE.get('TORQ_THRES', 1e-2),
+                                    'Curvature_thres': self.TRANSITION_STATE.get('CURVATURE_THRES', -0.1),
                                     'F_threshold': self.TRANSITION_STATE.get('F_THRES', 0.05),
                                     'maxiter_trans': int(self.TRANSITION_STATE.get('MAXITER_TRANS', 300)),
                                     'maxiter_rot': int(self.TRANSITION_STATE.get('MAXITER_ROT', 10)),
@@ -179,10 +187,20 @@ class StructureOptimization(_CONFIGS):
             self.logger.error('** ERROR: Both `RELAXATION` and `TRANSITION_STATE` were NOT set. NO TASK HERE, BYE!!! **')
             raise RuntimeError('** ERROR: Both `RELAXATION` and `TRANSITION_STATE` were NOT set. NO TASK HERE, BYE!!! **')
 
-    def relax(self, model):
+    def set_dimer_init_direction(self, directions: th.Tensor):
         """
+        Set the initial direction guess for the dimer algorithm.
+        Returns: None
+
+        """
+        self._dimer_init_direction = directions
+
+    def run(self, model, mode: Literal['minimize', 'ts']):
+        """
+        Run structure optimization algorithms to search local minima or saddle point (TS).
         Parameters:
             model: the input model which is `uninstantiated` nn.Module class.
+            mode: choose whether `minimize` or `ts`.
         """
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
@@ -202,6 +220,14 @@ class StructureOptimization(_CONFIGS):
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
         else:
             raise ValueError('Invalid START value. It should be "from_scratch" / 0 or "resume" / 1 ')
+        if mode not in {'minimize', 'ts'}:
+            raise ValueError(f'Invalid mode value. It should be "minimize" or "ts", but got {mode}')
+        if (mode == 'minimize') and self.RELAXATION is None:
+            self.logger.error('** ERROR: `mode` is "minimize" but the configs `RELAXATION` is None! NO TASK HERE, BYE!!! **')
+            raise RuntimeError('** ERROR: `mode` is "minimize" but the configs `RELAXATION` is None! NO TASK HERE, BYE!!! **')
+        elif (mode == 'ts') and self.TRANSITION_STATE is None:
+            self.logger.error('** ERROR: `mode` is "ts" but the configs `TRANSITION_STATE` is None! NO TASK HERE, BYE!!! **')
+            raise RuntimeError('** ERROR: `mode` is "ts" but the configs `TRANSITION_STATE` is None! NO TASK HERE, BYE!!! **')
         # model vars
         _model = _model.to(self.DEVICE)
 
@@ -219,7 +245,10 @@ class StructureOptimization(_CONFIGS):
                 __time = time.strftime("%Y%m%d_%H:%M:%S")
                 para_count = sum(p.numel() for p in _model.parameters() if p.requires_grad)
                 self.logger.info('*' * 60 + f'\n TIME: {__time}')
-                self.logger.info(' TASK: Structure Optimization <<')
+                if mode == 'minimize':
+                    self.logger.info(' TASK: Structure Optimization (minimize) <<')
+                elif mode == 'ts':
+                    self.logger.info(' TASK: Structure Optimization (TS) <<')
                 if (self.START == 0) or (self.START == 'from_scratch'):
                     self.logger.info(' FROM_SCRATCH <<')
                 else:
@@ -246,7 +275,10 @@ class StructureOptimization(_CONFIGS):
                 else:
                     self.logger.info(f' PREDICTIONS WILL SAVE IN MEMORY AND RETURN AS A VARIABLE.')
                 self.logger.info(f' ITERATION INFORMATION:')
-                self.logger.info(f'\tALGO: {self.RELAXATION["ALGO"]}')
+                if mode == 'minimize':
+                    self.logger.info(f'\tALGO: {self.RELAXATION["ALGO"]}')
+                else:
+                    self.logger.info(f'\tALGO: {self.TRANSITION_STATE["ALGO"]}')
                 for _algo_conf_name, _algo_conf in self.Stru_Opt_config.items():
                     self.logger.info(f'\t{_algo_conf_name}: {_algo_conf}')
                 self.logger.info(f'\tBATCH SIZE: {self.BATCH_SIZE}' +
@@ -276,29 +308,19 @@ class StructureOptimization(_CONFIGS):
                 def get_fixed_mask(data):
                     return data.fixed.unsqueeze(0)
 
+                def get_batch_indx(data):
+                    return [len(dat.pos) for dat in data.to_data_list()]
+
+                def get_init_dX(data):
+                    """ get dimer initial guess """
+                    return getattr(data, self.x_diff_attr, None)
+
                 self.__check_old: th.Tensor|None = None
-                def update_batch(
-                        converge_check: th.Tensor,
-                        func_args,
-                        func_kwargs,
-                        grad_func_args,
-                        grad_func_kwargs
-                ):
-                    # adding a buffer
-                    if self.__check_old is None:
-                        self.__check_old = converge_check
-                        self.__g_old = func_args[0]
-                        return func_args, func_kwargs, grad_func_args, grad_func_kwargs
-                    elif th.all(self.__check_old == converge_check):
-                        return (self.__g_old, ), func_kwargs, (self.__g_old, ), grad_func_kwargs
-                    else:
-                        # main
-                        g = func_args[0]
-                        g_list = g.index_select(~converge_check)
-                        g_new = self.pygData.Batch.from_data_list(g_list)
-                        self.__check_old = converge_check
-                        self.__g_old = g_new
-                        return (g_new, ), func_kwargs, (g_new, ), grad_func_kwargs
+                update_batch = PygBatchUpdater()
+                if mode == 'ts':
+                    update_batch_rot = PygBatchUpdater()
+                else:
+                    update_batch_rot = None
 
             else:
                 model_wrap = _Model_Wrapper_dgl(_model)
@@ -319,6 +341,13 @@ class StructureOptimization(_CONFIGS):
                 def get_fixed_mask(data):
                     return data.nodes['atom'].data.get('fix', None)
 
+                def get_batch_indx(data):
+                    return data.batch_num_nodes('atom').tolist()
+
+                def get_init_dX(data):
+                    """ get dimer initial guess """
+                    return data.nodes['atom'].data['dx'].unsqueeze(0)
+
                 def update_batch(
                         converge_check,
                         func_args,
@@ -329,8 +358,10 @@ class StructureOptimization(_CONFIGS):
                     # TODO <<<<<<<<<
                     pass
 
+                update_batch_rot = None
+                raise NotImplementedError
+
             optimizer = self.Stru_Opt(**self.Stru_Opt_config)
-            optimizer.set_update_batch(update_batch)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
@@ -342,18 +373,35 @@ class StructureOptimization(_CONFIGS):
                         if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
                     # batch indices
-                    batch_indx1 = th.sum(
-                        th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1
-                    )
-                    if self.data_type == 'pyg':
-                        batch_indx:List = [len(dat.pos) for dat in val_data.to_data_list()]
-                    else:
-                        batch_indx:List = val_data.batch_num_nodes('atom').tolist()
-                        # initial atom coordinates
+                    batch_indx:List = get_batch_indx(val_data)
+                    # initial atom coordinates
                     if self.data_type == 'pyg':
                         X_init = val_data.pos.unsqueeze(0)
                     else:
                         X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
+                    # initialize X_diff
+                    if mode == 'ts':
+                        X_diff = get_init_dX(val_data)
+                        if X_diff is None:
+                            pass
+                        elif not isinstance(X_diff, th.Tensor):
+                            X_diff = None
+                            self.logger.warning(
+                                f'WARNING: The dimer direction `X_diff` is expected to be a torch.Tensor, but got {type(X_diff)}, '
+                                f'so it will be reset randomly.'
+                            )
+                        else:
+                            if X_diff.dim() == 2:
+                                X_diff = X_diff.unsqueeze(0)
+                            X_diff = X_diff.to(X_init.dtype)
+                            if X_diff.shape != X_init.shape:
+                                X_diff = None  # TS (Dimer) method will automatically create a random X_diff when input `X_diff = None`.
+                                self.logger.warning(
+                                    f'WARNING: The dimer direction X_diff has different shape from `X_init`, so it will be reset randomly.'
+                                )
+                    else:
+                        X_diff = None  # placeholder
+                    # cells & fixations
                     CELL = get_cell_vec(val_data)
                     fixed_mask = get_fixed_mask(val_data)
                     # get id
@@ -361,79 +409,64 @@ class StructureOptimization(_CONFIGS):
                     idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
                     n_s += len(batch_indx)
                     element_tensor = get_atomic_number(val_data)
-                    element_list = element_tensor.tolist()
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
-                        self.logger.info(f'Relaxation Batch {n_c}.')
+                        self.logger.info(f'Running Batch {n_c}.')
                         cell_str = np.array2string(
                             CELL, **FLOAT_ARRAY_FORMAT
                         ).replace("[", " ").replace("]", " ")
                         self.logger.info(f'Structure names: {idx}\n')
                         self.logger.info(f'Cell Vectors:\n{cell_str}\n')
-                        # print Atoms Information
-                        elem_list = list()
-                        _element_list = list()
-                        if batch_indx is not None:
-                            indx_old = 0
-                            for indx in batch_indx:
-                                _element_list.append(element_list[0][indx_old: indx_old + indx])
-                                indx_old += indx
-                        else:
-                            _element_list = element_list
-                        for elements in _element_list:
-                            __element_now = ''
-                            __elem = ''
-                            elem_info = ''
-                            __elem_count = ''
-                            for i, elem in enumerate(elements, 1):
-                                # get element symbol
-                                if isinstance(elem, int):
-                                    __elem = ATOMIC_NUMBER[elem]
-                                else:
-                                    __elem = elem
-                                # count element number
-                                if __elem == __element_now:
-                                    __elem_count += 1
-                                else:
-                                    elem_info = elem_info + str(__elem_count) + '  '
-                                    elem_info = elem_info + __elem + ': '
-                                    __elem_count = 1
-                                    __element_now = __elem
-                            elem_info = elem_info + str(__elem_count)
-                            elem_list.append(elem_info)
-                        # log out
-                        for i, ee in enumerate(elem_list):
-                            self.logger.info(f'Structure {i:>5d}: {ee}')
-                        self.logger.info('*' * 100)
+                        # print structures titles with elements
+                        self.logout_element_information(element_tensor, batch_indx)
                     # relax
                     with th.no_grad():
-                        self.__check_old: th.Tensor | None = None
-                        min_ener, min_x, min_force = optimizer.run(
-                            model_wrap.Energy,
-                            X_init,
-                            model_wrap.Grad,
-                            func_args=(val_data,),
-                            grad_func_args=(val_data,),
-                            is_grad_func_contain_y=False,
-                            output_grad=True,
-                            require_grad = self.require_grad,
-                            batch_indices=batch_indx,
-                            fixed_atom_tensor=fixed_mask,
-                        )
-                        min_ener.detach_().squeeze(0)
-                        min_x.detach_().squeeze(0)
-                        min_force.detach_().squeeze(0)
+                        update_batch.initialize()
+                        if mode == 'minimize':
+                            optimizer: BatchOptim.FIRE
+                            optimizer.set_update_batch(update_batch)
+                            fin_ener, fin_x, fin_grad = optimizer.run(
+                                func=model_wrap.Energy,
+                                X=X_init,
+                                grad_func=model_wrap.Grad,
+                                func_args=(val_data,),
+                                grad_func_args=(val_data,),
+                                is_grad_func_contain_y=False,
+                                output_grad=True,
+                                require_grad = self.require_grad,
+                                batch_indices=batch_indx,
+                                fixed_atom_tensor=fixed_mask,
+                            )
+                        else:  # i.e., mode == 'ts'
+                            optimizer: BatchOptim.Dimer
+                            optimizer.set_update_batch(update_batch, update_batch_rot)
+                            fin_ener, fin_x, fin_grad = optimizer.run(
+                                func=model_wrap.Energy,
+                                X=X_init,
+                                X_diff=X_diff,
+                                grad_func=model_wrap.Grad,
+                                func_args=(val_data,),
+                                grad_func_args=(val_data,),
+                                is_grad_func_contain_y=False,
+                                output_grad=True,
+                                require_grad=self.require_grad,
+                                batch_indices=batch_indx,
+                                fixed_atom_tensor=fixed_mask,
+                            )
+                        fin_ener = fin_ener.detach().squeeze(0)
+                        fin_x = fin_x.detach().squeeze(0)
+                        fin_grad = fin_grad.detach().squeeze(0)
                         # Postprocessing & save TODO: reformat it in future to apply to all functions.
                         self.dumper.collect(
                             batch_indx,
                             idx,
-                            _element_list,
+                            get_atomic_number(val_data).squeeze(0),
                             CELL,
                             ['C'] * len(idx),
-                            min_x,
+                            fin_x,
                             fixed_mask[0],
-                            min_ener,
-                            min_force,
+                            fin_ener,
+                            - fin_grad,
                         )
 
                     # Print info
@@ -442,7 +475,7 @@ class StructureOptimization(_CONFIGS):
                     n_c += 1
 
                 except Exception as e:
-                    self.logger.warning(f'** WARNING: An error occurred in {n_c}th batch. Error: {e}. **')
+                    self.logger.warning(f'** WARNING: An error occurred in the {n_c}-th batch. Error: {e}. **')
                     if self.VERBOSE > 0:
                         excp = traceback.format_exc()
                         self.logger.warning(f"Traceback:\n{excp}")
@@ -471,271 +504,24 @@ class StructureOptimization(_CONFIGS):
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
 
+    def relax(self, model):
+        """
+        Run minimization algorithms to relax the structures.
+        Alias of `self.run(model, mode='minimize')`.
+        Args:
+            model: the input model which is `uninstantiated` nn.Module class.
+
+        """
+        return self.run(model, mode='minimize')
+
     def transition_state(self, model):
         """
-        Parameters:
+        Use single-point methods (e.g., Dimer) to search the transition states.
+        Alias of `self.run(model, mode='ts')`.
+        Args:
             model: the input model which is `uninstantiated` nn.Module class.
         """
-        # check logger
-        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
-        # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
-        if self.START == 'resume' or self.START == 1:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
-            if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=False)
-            else:
-                _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
-        elif self.START == 'from_scratch' or self.START == 0:
-            self.logger.warning(
-                '** WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING! **'
-            )
-            epoch_now = 0
-            if self.param is not None:
-                _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-        else:
-            raise ValueError('Invalid START value. It should be "from_scratch" / 0 or "resume" / 1 ')
-        # model vars
-        _model = _model.to(self.DEVICE)
-
-        # preprocessing data # TODO
-        if self._data_loader is None: raise RuntimeError('Please Set the DataLoader.')
-        if not self._has_load_data: raise RuntimeError('Please Set the Data to Predict.')
-
-        # initialize
-        self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
-        self.n_batch = self.n_samp // self.BATCH_SIZE + 1  # total batch number per epoch
-
-        # I/O
-        try:
-            if self.VERBOSE > 0:
-                __time = time.strftime("%Y%m%d_%H:%M:%S")
-                para_count = sum(p.numel() for p in _model.parameters() if p.requires_grad)
-                self.logger.info('*' * 60 + f'\n TIME: {__time}')
-                self.logger.info(' TASK: Structure Optimization <<')
-                if (self.START == 0) or (self.START == 'from_scratch'):
-                    self.logger.info(' FROM_SCRATCH <<')
-                else:
-                    self.logger.info(' RESUME <<')
-                self.logger.info(f' I/O INFORMATION:')
-                if not self.REDIRECT:
-                    self.logger.info('\tPREDICTION LOG OUTPUT TO SCREEN')
-                else:
-                    output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-                    self.logger.info(f'\tPREDICTION LOG OUTPUT TO {output_file}')  # type: ignore
-                if (self.START != 0) and (self.START != 'from_scratch'):
-                    self.logger.info(f'\tMODEL PARAMETERS LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
-                self.logger.info(f' MODEL NAME: {self.MODEL_NAME}')
-                self.logger.info(f' MODEL INFORMATION:')
-                self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
-                if self.VERBOSE > 1:
-                    for hp, hpv in self.MODEL_CONFIG.items():
-                        self.logger.info(f'\t\t{hp}: {hpv}')
-                self.logger.info(f' MODEL WILL RUN ON {self.DEVICE}')
-                if self.SAVE_PREDICTIONS:
-                    self.logger.info(f' PREDICTIONS WILL SAVE TO {self.PREDICTIONS_SAVE_FILE}')
-                else:
-                    self.logger.info(f' PREDICTIONS WILL SAVE IN MEMORY AND RETURN AS A VARIABLE.')
-                self.logger.info(f' ITERATION INFORMATION:')
-                self.logger.info(f'\tALGO: {self.TRANSITION_STATE["ALGO"]}')
-                for _algo_conf_name, _algo_conf in self.Stru_Opt_config.items():
-                    self.logger.info(f'\t{_algo_conf_name}: {_algo_conf}')
-                self.logger.info(f'\tBATCH SIZE: {self.BATCH_SIZE}' +
-                                 f'\n\tTOTAL SAMPLE NUMBER: {self.n_samp}\n' +
-                                 '*' * 60 + '\n' + 'ENTERING MAIN LOOP...')
-
-            time_tol = time.perf_counter()
-            _model.eval()
-            # MAIN LOOP
-            # define the model wrapper & batch size getter & cell vector getter for different data type
-            if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_pyg(_model)
-
-                def get_batch_size(data):
-                    return len(data)
-
-                def get_cell_vec(data):
-                    return data.cell.numpy(force=True)
-
-                def get_atomic_number(data):
-                    return data.atomic_numbers.unsqueeze(0).tolist()
-
-                def get_indx(data):
-                    _indx: Dict = getattr(data, 'idx', None)
-                    return _indx
-
-                def get_fixed_mask(data):
-                    return data.fixed.unsqueeze(0)
-
-            else:
-                model_wrap = _Model_Wrapper_dgl(_model)
-
-                def get_batch_size(data):
-                    return data.num_nodes('atom')
-
-                def get_cell_vec(data):
-                    return data.nodes['cell'].data['cell'].numpy(force=True)
-
-                def get_atomic_number(data):
-                    return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
-
-                def get_indx(data):
-                    _indx: Dict = data.nodes['atom'].data
-                    return _indx.get('idx', None)
-
-                def get_fixed_mask(data):
-                    return data.nodes['atom'].data.get('fix', None)
-
-            optimizer = self.Stru_Opt(**self.Stru_Opt_config)
-            val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
-            n_c = 1  # number of cycles. each for-loop += 1.
-            n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
-            # To record the minimized X, Force, and Energies.
-            X_dict = dict()
-            F_dict = dict()
-            E_dict = dict()
-            for val_data, val_label in val_set:
-                try:  # Catch error in each loop & continue, instead of directly exit.
-                    # to avoid get an empty batch
-                    if get_batch_size(val_data) <= 0:
-                        if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
-                        continue
-                    elif get_batch_size(val_data) > 1:
-                        if self.VERBOSE: self.logger.error(f'Transition state search do not support batched calculation yet. You should set BATCH_SIZE to 1.')
-                        raise RuntimeError(f'Transition state search do not support batched calculation yet. You should set BATCH_SIZE to 1.')
-                    # batch indices
-                    batch_indx1 = th.sum(
-                        th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1
-                    )
-                    if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
-                    else:
-                        batch_indx = val_data.batch_num_nodes('atom')
-                        # initial atom coordinates
-                    if self.data_type == 'pyg':
-                        X_init = val_data.pos.unsqueeze(0)
-                    else:
-                        X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
-                    # initialize X_diff
-                    _is_rand_X_diff = False
-                    _X_diff = None
-                    if self.X_diff is None:
-                        _is_rand_X_diff = True
-                    else:
-                        if len(self.X_diff) < n_c:
-                            _is_rand_X_diff = True
-                            self.logger.warning(f'The length of read `X_DIFF` is less than {n_c}, so it will be set randomly.')
-                        else:
-                            _X_diff = th.tensor(self.X_diff[n_c - 1], dtype=X_init.dtype, device=X_init.device).unsqueeze(0)
-                            if _X_diff.shape != X_init.shape:
-                                _is_rand_X_diff = True
-                                self.logger.warning(f'The `X_DIFF[{n_c-1}]` has different shape from `X_init`, so it will be set randomly.')
-
-                    if _is_rand_X_diff:
-                        X_diff = th.rand_like(X_init) * 0.015
-                    else:
-                        X_diff = _X_diff
-                    CELL = get_cell_vec(val_data)
-                    fixed_mask = get_fixed_mask(val_data)
-                    # get id
-                    idx = get_indx(val_data)
-                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
-                    n_s += len(batch_indx)
-                    if self.VERBOSE > 0:
-                        self.logger.info('*' * 100)
-                        self.logger.info(f'Relaxation Batch {n_c}.')
-                        cell_str = np.array2string(
-                            CELL, **FLOAT_ARRAY_FORMAT
-                        ).replace("[", " ").replace("]", " ")
-                        self.logger.info(f'Structure names: {idx}\n')
-                        self.logger.info(f'Cell Vectors:\n{cell_str}\n')
-                        # print Atoms Information
-                        element_list = get_atomic_number(val_data)
-                        elem_list = list()
-                        _element_list = list()
-                        if batch_indx is not None:
-                            indx_old = 0
-                            for indx in batch_indx:
-                                _element_list.append(element_list[0][indx_old: indx_old + indx])
-                                indx_old += indx
-                        else:
-                            _element_list = element_list
-                        for elements in _element_list:
-                            __element_now = ''
-                            __elem = ''
-                            elem_info = ''
-                            __elem_count = ''
-                            for i, elem in enumerate(elements, 1):
-                                # get element symbol
-                                if isinstance(elem, int):
-                                    __elem = ATOMIC_NUMBER[elem]
-                                else:
-                                    __elem = elem
-                                # count element number
-                                if __elem == __element_now:
-                                    __elem_count += 1
-                                else:
-                                    elem_info = elem_info + str(__elem_count) + '  '
-                                    elem_info = elem_info + __elem + ': '
-                                    __elem_count = 1
-                                    __element_now = __elem
-                            elem_info = elem_info + str(__elem_count)
-                            elem_list.append(elem_info)
-                        # log out
-                        for i, ee in enumerate(elem_list):
-                            self.logger.info(f'Structure {i:>5d}: {ee}')
-                        self.logger.info('*' * 100)
-                    # search
-                    with th.no_grad():
-                        min_ener, min_x, min_force = optimizer.run(
-                            model_wrap.Energy,
-                            X_init,
-                            X_diff,
-                            model_wrap.Grad,
-                            func_args=(val_data,),
-                            grad_func_args=(val_data,),
-                            is_grad_func_contain_y=False,
-                            output_grad=True,
-                            fixed_atom_tensor=fixed_mask,
-                        )
-                        #min_ener.detach_()
-                        #min_x.detach_()
-                        #min_force.detach_()
-
-                    # Print info
-                    if self.VERBOSE > 0:
-                        self.logger.info('-' * 100)
-                    n_c += 1
-
-                except Exception as e:
-                    self.logger.warning(f'** WARNING: An error occurred in {n_c}th batch. Error: {e}. **')
-                    if self.VERBOSE > 1:
-                        excp = traceback.format_exc()
-                        self.logger.warning(f"Traceback:\n{excp}")
-                    n_c += 1
-
-            if self.VERBOSE: self.logger.info(f'TRANSITION STATE SEARCH DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
-            if self.SAVE_PREDICTIONS:
-                t_save = time.perf_counter()
-                with _LoggingEnd(self.log_handler):
-                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS...')
-                th.save({'Coordinates': X_dict, 'Forces': F_dict, 'Energies': E_dict}, self.PREDICTIONS_SAVE_FILE)
-                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
-            else:
-                return X_dict
-
-        except Exception as e:
-            th.cuda.synchronize()
-            excp = traceback.format_exc()
-            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
-
-        finally:
-            th.cuda.synchronize()
-            self.logger.removeHandler(self.log_handler)
-            if isinstance(self.log_handler, logging.FileHandler):
-                self.log_handler.close()
-            pass
+        return self.run(model, mode='ts')
 
     def ts(self, model):
         """

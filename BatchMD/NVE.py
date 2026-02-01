@@ -60,10 +60,9 @@ class NVE(_BaseMD):
         X: th.Tensor = X.detach()
         with th.no_grad():
             #X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
-            X.add_(V, alpha=self.time_step)
-            X.add_(Force / (2. * masses), alpha=self.time_step ** 2 * 9.64853329045427e-3)
-            #V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
+            X.add_(V, alpha=self.time_step)
+            #V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             # Update V
             with th.set_grad_enabled(self.require_grad):
                 X.requires_grad_(self.require_grad)

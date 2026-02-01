@@ -261,11 +261,11 @@ the method of updating function arguments for a mask.
         self.converge_mask = th.full((n_batch, 1, 1), fill_value=False, device=self.device, dtype=th.bool)
         X_grad_old = th.full((n_batch, n_atom , n_dim), 1e-6, dtype=th.float32, device=self.device)  # initial old grad
         displace = th.full_like(X_grad_old, 0.)
-        ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
             self.logger.info('-' * 100)
             self.logger.info(f'Iteration Scheme: {self.iterform}')
-        self.logger.info('-' * 100)
+            self.logger.info('-' * 100)
         # MAIN LOOP
         with (th.no_grad()):
             with th.set_grad_enabled(require_grad):
@@ -357,7 +357,7 @@ the method of updating function arguments for a mask.
                 #g: th.Tensor = th.flatten(X_grad, 1, 2).unsqueeze(-1).contiguous()  # (n_batch, n_atom*3, 1)
                 # update batch
                 func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                    converge_check,
+                    ~converge_check,
                     func_args,
                     func_kwargs,
                     grad_func_args,
@@ -456,7 +456,7 @@ the method of updating function arguments for a mask.
                 # Check NaN
                 if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
 
-                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
@@ -499,7 +499,7 @@ the method of updating function arguments for a mask.
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X  , ptlist  # test <<<
+            return energies, X  #, ptlist  # test <<<
 
     def initialize_algo_param(self):
         """
