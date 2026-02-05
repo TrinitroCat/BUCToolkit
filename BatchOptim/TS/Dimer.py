@@ -136,7 +136,7 @@ class FindMinEigen:
             warnings.warn(f'`Curve_thres` should be less than 0 to determind the negative cone direction, but occurred {Curve_thres}.\n'
                           f'Now it has been set to its opposite number: {- Curve_thres}.')
             self.Curve_thres =  - Curve_thres
-        assert (maxiter_rot > 1) and isinstance(maxiter_rot, int), '`maxiter_rot` must be an integer greater than 1.'
+        assert (maxiter_rot > 0) and isinstance(maxiter_rot, int), '`maxiter_rot` must be an integer greater than 0.'
         self.maxiter_rot = int(maxiter_rot)
         self.dx = float(dx)
         self.subspace_hessian = None
@@ -550,7 +550,7 @@ class Dimer:
         self.Curvature_thres = float(Curvature_thres)
         self.F_threshold = float(F_threshold)
         self.maxiter_trans = int(maxiter_trans)
-        assert (maxiter_rot > 1) and isinstance(maxiter_rot, int), '`maxiter_rot` must be an integer greater than 1.'
+        assert (maxiter_rot > 0) and isinstance(maxiter_rot, int), '`maxiter_rot` must be an integer greater than 0.'
         self.maxiter_rot = int(maxiter_rot)
         self.max_steplength = float(max_steplength)
         self.dx = float(dx)

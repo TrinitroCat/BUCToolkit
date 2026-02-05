@@ -453,7 +453,7 @@ class StructureOptimization(_CONFIGS):
                                 batch_indices=batch_indx,
                                 fixed_atom_tensor=fixed_mask,
                             )
-                        fin_ener = fin_ener.detach().squeeze(0)
+                        fin_ener = fin_ener.detach()#.squeeze(0)
                         fin_x = fin_x.detach().squeeze(0)
                         fin_grad = fin_grad.detach().squeeze(0)
                         # Postprocessing & save TODO: reformat it in future to apply to all functions.
