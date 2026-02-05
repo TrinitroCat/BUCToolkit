@@ -19,7 +19,7 @@ class NVE(_BaseMD):
     Micro canonical ensemble (NVE) molecular dynamics implemented via velocity Verlet algo.
 
     Parameters:
-        time_step: float, time per step (ps).
+        time_step: float, time per step (fs).
         max_step: int, maximum steps.
         T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         output_structures_per_step: int, output structures per output_structures_per_step steps.

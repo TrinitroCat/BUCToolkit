@@ -206,7 +206,8 @@ class _LineSearch:
             func_kwargs=None,
             grad_func_args: Sequence = tuple(),
             grad_func_kwargs=None,
-            converge_mask: th.Tensor|None = None  # the mask of the batch that has been converged has the same shape as y0
+            converge_mask: th.Tensor|None = None,  # the mask of the batch that has been converged has the same shape as y0
+            batch_indices: th.Tensor=None
     ) -> th.Tensor:
         self.steplength = steplength
         if func_kwargs is None:
@@ -260,7 +261,7 @@ class _LineSearch:
                     # A kind of 'slow' backtrack.
                     _steplength = th.where(mask, _steplength, self._backtrack_update(steplength, i))
 
-                if not is_converge: warnings.warn(f'linesearch did not converge in {self.maxiter} steps.', RuntimeWarning)
+                if not is_converge: warnings.warn(f'line search did not converge in {self.maxiter} steps.', RuntimeWarning)
                 return th.where(_steplength > 1.e-4, _steplength, 1.e-4)  # (n_batch, 1, 1)
 
         elif (self.method == 'Wolfe') or (self.method == 'NWolfe'):  # 2-points interpolation algo.
@@ -365,15 +366,15 @@ class _LineSearch:
             return th.where(_steplength > 2 * steplength, 0.05, _steplength)  # (n_batch, 1, 1)
 
         elif self.method == '2PT':
-            dy1 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+            dy0 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
             Xn = X0 + _steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
             y1 = func(Xn, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)
             if self.is_concat_X:
                 y1 = th.sum(y1, dim=(0, -1), keepdim=True)
-            a = -dy1 * _steplength - y0 + y1
-            _steplength = (- dy1 * _steplength ** 2) / (2 * a)
+            a = -dy0 * _steplength - y0 + y1
+            _steplength = (- dy0 * _steplength ** 2) / (2 * a)
             _steplength = th.where(
-                (_steplength < 1e-6) * (_steplength > 2 * steplength),
+                (_steplength < 1e-6) | (_steplength > 2 * steplength),
                 0.05 * steplength,
                 _steplength
             )
@@ -383,7 +384,7 @@ class _LineSearch:
         elif self.method == '3PT':
             # cubic interpolation search. points: 0, dy0, mid_step, step
             step_mid = 0.5 * _steplength
-            dy1 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
+            dy0 = th.sum(grad * p, dim=(-2, -1), keepdim=True)  # (n_batch, 1, 1)
             Xn_mid = X0 + step_mid * p
             y_mid = func(Xn_mid, *func_args, **func_kwargs).unsqueeze(-1).unsqueeze(-1)  # (n_batch, )
             Xn = X0 + _steplength * p.view(self.n_batch, self.n_atom, self.n_dim)  # (n_batch, n_atom, n_dim)
@@ -392,13 +393,13 @@ class _LineSearch:
                 y_mid = th.sum(y_mid, dim=(0, -1), keepdim=True)
                 y1 = th.sum(y1, dim=(0, -1), keepdim=True)
             # Coefficients
-            a = (dy1 * step_mid ** 2 * _steplength - dy1 * step_mid * _steplength ** 2 + step_mid ** 2 * y0
+            a = (dy0 * step_mid ** 2 * _steplength - dy0 * step_mid * _steplength ** 2 + step_mid ** 2 * y0
                  - _steplength ** 2 * y0 + _steplength ** 2 * y_mid - step_mid ** 2 * y1) / (
                         step_mid ** 2 * _steplength ** 2 * (step_mid - _steplength))
-            b = (- dy1 * step_mid ** 3 * _steplength + dy1 * step_mid * _steplength ** 3 - step_mid ** 3 * y0
+            b = (- dy0 * step_mid ** 3 * _steplength + dy0 * step_mid * _steplength ** 3 - step_mid ** 3 * y0
                  + _steplength ** 3 * y0 - _steplength ** 3 * y_mid + step_mid ** 3 * y1) / (
                         step_mid ** 2 * _steplength ** 2 * (step_mid - _steplength))
-            c = (dy1 * step_mid ** 3 * _steplength ** 2 - dy1 * step_mid ** 2 * _steplength ** 3) / (
+            c = (dy0 * step_mid ** 3 * _steplength ** 2 - dy0 * step_mid ** 2 * _steplength ** 3) / (
                     step_mid ** 2 * _steplength ** 2 * (step_mid - _steplength))
             a = 3 * a
             b = 2 * b
@@ -416,7 +417,7 @@ class _LineSearch:
             )
             # if steplength < 0 or > 2 * steplength, use a fixed steplength.
             _steplength = th.where(
-                (_steplength < 1e-6) * (_steplength > 2 * steplength),
+                (_steplength < 1e-6) | (_steplength > 2 * steplength),
                 0.1 * steplength,
                 _steplength
             )

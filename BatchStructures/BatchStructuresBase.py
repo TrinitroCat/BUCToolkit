@@ -256,7 +256,7 @@ class BatchStructures(object):
             self.Cells = None
             self.Coords_type_ = np.asarray(self.Coords_type, dtype='<U2')
             self.Coords_type = list()
-            self._Sample_ids_ = np.asarray(self._Sample_ids, dtype=str)
+            self._Sample_ids_ = np.asarray(self._Sample_ids, dtype='<U128')
             self._Sample_ids = list()
             if self.Energies is not None:
                 self.Energies_ = np.asarray(self.Energies, dtype=np.float32)
@@ -367,7 +367,7 @@ class BatchStructures(object):
         if mode not in {'w', 'a'}:
             raise ValueError(f'Unknown `mode` value {mode}. It must be "w" or "a".')
         if not os.path.isdir(path):  # path do not exist
-            if mode == 'a': mode = 'w'
+            mode = 'w'
             os.makedirs(path, )
         elif len(os.listdir(path)) > 0:
             if mode == 'a':
@@ -378,14 +378,14 @@ class BatchStructures(object):
                     if ff not in _STANDARD_FILE_LIST:
                         raise RuntimeError(f'The file `{ff}` have already exist in given path.')
         elif mode == 'a':  # exist the path, but it is empty
-            if mode == 'a': mode = 'w'
+            mode = 'w'
         # check self
         if len(self) == 0:
             self.logger.error('ERROR: BatchStructures are empty now!')
             return None
         self._update_indices()
         self._check_id()
-        self._check_len()
+        #self._check_len()
 
         if self.Mode != 'A':
             self._list2np()
@@ -479,7 +479,7 @@ class BatchStructures(object):
                     _dtype = '|O'
                     _shape = (1,)
                     new_head_info['which_None'].add(filename)
-                # check consistency of old & new data
+                # check the consistency of old & new data
                 if old_shape[1:] != _shape[1:]:
                     raise RuntimeError(f'The existing file has a shape on non-1st dim {old_shape[1:]} '
                                        f'does not match the new data {_temp_attr_list[i].shape[1:]}')
@@ -508,6 +508,7 @@ class BatchStructures(object):
         if has_conv:
             self._np2list(True)
             gc.collect()
+        return None
 
     def load(self, path: str, data_slice: Tuple[int, int] | None = None, mode: Literal['w', 'a'] = 'w'):
         """
@@ -1322,22 +1323,24 @@ class BatchStructures(object):
             add_Energies: None | np.ndarray = None,
             add_Forces: None | np.ndarray = None,
             add_Labels: np.ndarray | None = None,
+            is_check_length: bool = False,
     ):
         """
         Appending datta from np.ndarray, only work in self.Mode = 'A'.
         Args:
             add_atom_batch_sizes: array of atom numbers in each structure.
             add_element_batch_sizes: array of element numbers in each structure.
-            add_Sample_ids:
-            add_Cells:
-            add_Elements:
-            add_Numbers:
-            add_Coords_type:
-            add_Coords:
-            add_Fixed:
-            add_Energies:
-            add_Forces:
-            add_Labels:
+            add_Sample_ids: array of element numbers in each structure.
+            add_Cells: array of element numbers in each structure.
+            add_Elements: array of element numbers in each structure.
+            add_Numbers: array of element numbers in each structure.
+            add_Coords_type: array of element numbers in each structure.
+            add_Coords: array of element numbers in each structure.
+            add_Fixed: array of element numbers in each structure.
+            add_Energies: array of element numbers in each structure.
+            add_Forces: array of element numbers in each structure.
+            add_Labels: array of element numbers in each structure.
+            is_check_length: bool, whether to check the consistency of sample numbers of all `add_*` vars. Very expensive!
 
         Returns:
 
@@ -1356,6 +1359,18 @@ class BatchStructures(object):
         _new_element_ptr = np.empty(len(add_element_batch_sizes) + 1, dtype=int)
         _new_element_ptr[0] = 0
         np.cumsum(add_element_batch_sizes, out=_new_element_ptr[1:])
+        # standarize shape
+        add_Sample_ids = add_Sample_ids.astype('<U128')
+        add_Cells = add_Cells.astype('<f4')
+        add_Elements = add_Elements.astype('<U3')
+        add_Numbers = add_Numbers.astype('<i4')
+        add_Coords = add_Coords.astype('<f4')
+        add_Coords_type = add_Coords_type.astype('<U2')
+        add_Fixed = add_Fixed.astype('|i1')
+        if add_Energies is not None: add_Energies = add_Energies.astype('<f4')
+        if add_Forces  is not None: add_Forces = add_Forces.astype('<f4')
+        if add_Labels  is not None: add_Labels = add_Labels.astype('|O')
+        # write
         if self._Sample_ids_ is None:  # a new container
             self.Batch_indices_ = _new_atom_ptr
             self.Elements_batch_indices_ = _new_element_ptr
@@ -1395,7 +1410,7 @@ class BatchStructures(object):
                 warnings.warn(f'`add_Labels` will be dropped because `self.Labels` is None.')
 
         self._check_id()
-        self._check_len()
+        if is_check_length: self._check_len()
 
     def sort_split_by_natoms(
             self,

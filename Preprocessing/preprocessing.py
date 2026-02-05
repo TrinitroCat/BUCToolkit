@@ -411,7 +411,7 @@ class CreateASE:
 
         Parameters:
             feat: BatchStructures.
-            set_tags: bool, whether set Atoms. tags = np.ones(n_atom) automatically.
+            set_tags: bool, whether to set Atoms.tags which represents the feat.Fixed.
             n_core: number of CPU cores in parallel.
         
         Returns:
@@ -421,15 +421,20 @@ class CreateASE:
         feat.generate_atom_list()
         if self.verbose: print('Converting to ASE.Atoms ...')
 
-        def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
+        def _base_convert(symb: Sequence, pos: Sequence, cell: Sequence, fix: Sequence,
+                          pbc: Tuple[bool, bool, bool] | bool = (True, True, True),
                           set_tags: bool = True):
             samp = ase.Atoms(symbols=symb, positions=pos, cell=cell, pbc=pbc)
             if set_tags:
-                samp.set_tags(np.ones(len(samp)))
+                tag = np.sum(fix, axis=1)
+                tag = np.where(tag > 0, 1, 0)
+                samp.set_tags(tag)
             return samp
 
         _para = jb.Parallel(n_jobs=n_core, verbose=self.verbose)
-        ase_list = _para(jb.delayed(_base_convert)(symb, feat.Coords[i], feat.Cells[i], True, set_tags) for i, symb in enumerate(feat.Atom_list))
+        ase_list = _para(
+            jb.delayed(_base_convert)(symb, feat.Coords[i], feat.Cells[i], feat.Fixed[i], True, set_tags) for i, symb in enumerate(feat.Atom_list)
+        )
 
         if ase_list is None: raise RuntimeError
         if self.verbose: print(f'Done. Total Time: {time.perf_counter() - t_st:<5.4f}')
