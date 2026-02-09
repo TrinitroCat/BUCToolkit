@@ -61,6 +61,8 @@ class _CONFIGS(object):
 
     def __init__(self, config_file: str) -> None:
         self.config_file = config_file
+        self.logger = None
+        self.config = dict()
         self.DEVICE = 'cpu'
         self._OPTIM_DICT = {'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
                             'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'custom': None}
@@ -73,6 +75,8 @@ class _CONFIGS(object):
         self.param = None
         self._has_load_data = False
         self._data_loader = None
+        self.reload_config(config_file)
+        self.reset_logger()
 
     def set_device(self, device: str | th.device) -> None:
         """ reset the device that model would train on """
@@ -260,6 +264,39 @@ class _CONFIGS(object):
 
         return fix_mode_list
 
+    def reset_logger(self):
+        """
+        Reset logger & its handlers.
+        Returns: None
+
+        """
+        # logging
+        # logging.getLogger().disabled = True
+        self.logger = logging.getLogger('Main')
+        self.logger.propagate = False
+        self.logger.setLevel(logging.INFO)
+        # remove existing handlers
+        for _hdl in list(self.logger.handlers):
+            self.logger.removeHandler(_hdl)
+            try:
+                _hdl.close()
+            except Exception as ehdl:
+                warnings.warn(f'Failed to close handler {_hdl}: {ehdl}', RuntimeWarning)
+        formatter = logging.Formatter('%(message)s')
+        if self.REDIRECT:
+            output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+            # check whether path exists
+            if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
+            # set log handler
+            self.log_handler = logging.FileHandler(output_file, 'w', delay=True)
+            self.log_handler.setLevel(logging.INFO)
+            self.log_handler.setFormatter(formatter)
+        else:
+            self.log_handler = logging.StreamHandler(stream=sys.stdout)
+            self.log_handler.setLevel(logging.INFO)
+            self.log_handler.setFormatter(formatter)
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
+
     def reload_config(self, config_file_path: str| None = None) -> None:
         """
         Reload the yaml configs file.
@@ -346,18 +383,19 @@ class _CONFIGS(object):
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
-        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
-        while os.path.exists(self.PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
+        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
+        while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
             warnings.warn(
-                f'`PREDICTIONS_SAVE_FILE`: "{self.PREDICTIONS_SAVE_FILE}" already exists. '
-                f'It will be renamed as "{self.PREDICTIONS_SAVE_FILE}_1".',
+                f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
+                f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
                 RuntimeWarning
             )
-            self.PREDICTIONS_SAVE_FILE += '_1'
-        if (self.SAVE_PREDICTIONS) and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
+            self._PREDICTIONS_SAVE_FILE += '_1'
+        if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
-            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, 10)
+            self.DUMP_FREQUENCY = self.config.get('DUMP_FREQUENCY', 10)
+            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, self.DUMP_FREQUENCY)
         else:
             self.dumper = DumpStructures(None, 1)
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
@@ -375,26 +413,6 @@ class _CONFIGS(object):
         self.CHECK_NAN = self.config.get('CHECK_NAN', True)
         if not isinstance(self.CHECK_NAN, bool): raise TypeError('CHECK_NAN must be a boolean.')
 
-        # logging
-        # logging.getLogger().disabled = True
-        self.logger = logging.getLogger('Main')
-        self.logger.propagate = False
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if self.REDIRECT:
-            output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-            # check whether path exists
-            if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
-            # set log handler
-            self.log_handler = logging.FileHandler(output_file, 'w', delay=True)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        else:
-            self.log_handler = logging.StreamHandler(stream=sys.stdout)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
-
         # loading atoms fixation info.
         self.FIXATIONS = self.config.get('FIXATIONS', None)
 
@@ -410,6 +428,17 @@ class _CONFIGS(object):
 
         # If Vibration Calc.
         self.VIBRATION = self.config.get('VIBRATION', None)
+
+    @property
+    def PREDICTIONS_SAVE_FILE(self):
+        return self._PREDICTIONS_SAVE_FILE
+
+    @PREDICTIONS_SAVE_FILE.setter
+    def PREDICTIONS_SAVE_FILE(self, value):
+        self._PREDICTIONS_SAVE_FILE = value
+        if setattr(self, 'DUMP_FREQUENCY', None) is None:
+            self.DUMP_FREQUENCY = self.config.get('DUMP_FREQUENCY', 10)
+        self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, 10)
 
 
 def compare_tensors(X1: th.Tensor, X2: th.Tensor):
