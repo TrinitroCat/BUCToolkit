@@ -233,7 +233,7 @@ class _rConstrBase(_rBaseMD):
 
         """
         self._update_constr()
-        with th.enable_grad():
+        with th.no_grad():
             jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
         self.jac = jac
         return jac, y
