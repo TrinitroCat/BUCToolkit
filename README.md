@@ -1,4 +1,4 @@
-![image](logo.png)
+![image](logo_cut.jpg)
 # BM4Ckit
 ## Batched Machine-learning for Catalysts kit
 A Python-based package containing various tools for machine learning applied in catalytic chemistry, 
