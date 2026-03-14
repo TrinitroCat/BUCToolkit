@@ -862,7 +862,7 @@ class Xyz2Feat(BatchStructures):
         atom_list = [
             int(re.findall(r'\s+[0-9]+\n', d)[0]) for d in data if len(re.findall(r'\s+[0-9]+\n', d)) != 0
         ]
-        energy_list = [data[1 + (atom_list[i] + 2) * i].split()[-1] for i in range(len(line_of_energy))]
+        energy_list = [float(data[1 + (atom_list[i] + 2) * i].split()[-1]) for i in range(len(line_of_energy))]
         element_position_list = [
             data[2 + (atom_list[i] + 2) * i: (atom_list[i] + 2) * (i + 1)] for i in range(len(line_of_energy))
         ]
@@ -922,7 +922,7 @@ class Xyz2Feat(BatchStructures):
                 self.Numbers.extend(temp[5])
                 self.Coords.extend(temp[6])
                 self.Coords_type.extend(temp[7])
-                self.Fixed.extend([np.ones_like(_) for _ in temp[6]])
+                self.Fixed.extend([np.ones_like(_, dtype='|i1') for _ in temp[6]])
 
             except Exception as e:
                 err += 1

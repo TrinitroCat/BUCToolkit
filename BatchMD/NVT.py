@@ -171,7 +171,7 @@ class NVT(_BaseMD):
 
         return X, V, Energy, Force
 
-    def __CSVR(
+    def __CSVR_old(
             self,
             X,
             V,
@@ -205,7 +205,6 @@ class NVT(_BaseMD):
                     Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
                     Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-
             #V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
 
@@ -231,6 +230,109 @@ class NVT(_BaseMD):
                 # Rescaling factor
                 alpha = th.sqrt(self.Ekt_vir / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
                 V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
+
+        return X, V, Energy, Force
+
+    def __CSVR(
+            self,
+            X,
+            V,
+            Force,
+            func,
+            grad_func_,
+            func_args,
+            func_kwargs,
+            grad_func_args,
+            grad_func_kwargs,
+            masses,
+            atom_masks,
+            is_grad_func_contain_y,
+            batch_indices
+    ):
+        """
+        The Analytic solution of CSVR that uses Chi^2 distribution and exp.
+        Returns:
+
+        """
+        n_batch, n_atom, n_dim = X.shape
+        # read thermostat configs
+        time_const = self.thermostat_config.get('time_const', 10 * self.time_step)  # Unit: fs^-1
+        # NVE Step
+        dtT = self.time_step
+        tauT = time_const
+
+        # c = exp(-dt/tau)  (scalar)
+        c = th.exp(th.as_tensor(-dtT / tauT, device=self.device, dtype=V.dtype))
+        sqrt_c = th.sqrt(c)
+
+        # avoid divide-by-zero in K
+        epsK = th.as_tensor(1e-12, device=self.device, dtype=V.dtype)
+
+        with th.no_grad():
+            # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
+            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            X.add_(V, alpha=self.time_step)
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
+            # Update V
+            with th.set_grad_enabled(self.require_grad):
+                X.requires_grad_(self.require_grad)
+                Energy = func(X, *func_args, **func_kwargs)
+                if is_grad_func_contain_y:
+                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
+                else:
+                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+
+            if batch_indices is not None:
+                # Nf per (irregular) configuration; keep your convention (3*N-3)
+                Nf = self.free_degree  # shape (n_batch,)
+                K = th.clamp(self.Ek, min=epsK)  # shape (n_batch,)
+                K0 = self.EK_TARGET  # scalar or shape-compatible
+
+                # f = (1-c) * K0 / (Nf*K)
+                f = (1.0 - c) * K0 / (Nf * K)
+
+                # R ~ N(0,1)
+                R = th.randn_like(K)
+
+                # S ~ Chi2(df=Nf-1)
+                df = th.clamp(Nf - 1.0, min=1.0)
+                S = th.distributions.chi2.Chi2(df=df).sample()  # shape (n_batch,)
+
+                # alpha^2 = (sqrt(c)+sqrt(f)R)^2 + f S
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                alpha2 = (sqrt_c + sqrt_f * R) ** 2 + f * S
+                alpha2 = th.clamp(alpha2, min=epsK)
+
+                # (optional bookkeeping: post-thermostat kinetic energy)
+                self.Ekt_vir = alpha2 * K
+
+                alpha = th.sqrt(alpha2).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
+                V *= alpha.transpose(0, 1)[:, self.batch_scatter, :]
+
+            else:
+                # Nf is same for all batches; keep your convention (3*N-3)
+                Nf = th.as_tensor(3 * n_atom - 3, device=self.device, dtype=V.dtype)  # scalar tensor
+                K = th.clamp(self.Ek, min=epsK)  # (n_batch,)
+                K0 = self.EK_TARGET  # scalar or (n_batch,)
+
+                f = (1.0 - c) * K0 / (Nf * K)
+
+                R = th.randn_like(K)
+                df = th.clamp(Nf - 1.0, min=1.0)
+                # sample per-batch
+                S = th.distributions.chi2.Chi2(df=df).sample(sample_shape=K.shape)
+
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                alpha2 = (sqrt_c + sqrt_f * R) ** 2 + f * S
+                alpha2 = th.clamp(alpha2, min=epsK)
+
+                self.Ekt_vir = alpha2 * K
+
+                alpha = th.sqrt(alpha2).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1)
+                V *= alpha
 
         return X, V, Energy, Force
 

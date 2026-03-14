@@ -475,16 +475,16 @@ class _rConstrBase(_rBaseMD):
             # where P is the inverse of `I + dt * B H V_mid`.
             #
             # Hence, the iteration formulae are:
-            #   X_new = X_new - (R_X + 0.5 * dt * P @ R_V)
-            #   V_new = V_new - P @ R_V
+            #   * X_new = X_new - (R_X + 0.5 * dt * P @ R_V)
+            #   * V_new = V_new - P @ R_V
             # For solving P, Woodbury identity: (I + U V^T)^-1 = I - U (I + V^T U)^-1 V^T can be applied:
             #   denote `H V_mid` with dJ^T, (I + dt * B H V_mid)^-1 = (I + dt * B dJ^T)^-1
             #   (I + dt * B dJ^T)^-1 = I - dt * B (I + dJ^T B*dt)^-1 dJ^T
             # Hence P @ R_V can be calculated as :
-            # P @ R_V = dt * B @ linalg.solve(I + dJ^T @ B*dt, dJ^T @ R_V)
+            # P @ R_V = RV - dt * B @ linalg.solve(I + dJ^T @ B*dt, dJ^T @ R_V)
             #
             # Fully expand:
-            #   P @ R_V = dt * M^-1/2 @ Q @ R^-T @ linalg.solve(I + dJ^T @ M^-1/2 @ Q @ R^-T * dt, dJ^T @ R_V)
+            #   * P @ R_V = RV - dt * M^-1/2 @ Q @ R^-T @ linalg.solve(I + dJ^T @ M^-1/2 @ Q @ R^-T * dt, dJ^T @ R_V)
 
             # #######################################################################3
             J_mid, y = self._jacobian(r_mid)  # (n_constr, n_atom * n_dim)

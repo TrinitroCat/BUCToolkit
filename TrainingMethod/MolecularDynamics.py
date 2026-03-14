@@ -17,6 +17,7 @@ from torch import nn
 from BM4Ckit.BatchMD import NVE, NVT
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.BatchStructures.StructuresIO import ArrayDumper, _ArrayDumperPlaceHolder
 
 
 class MolecularDynamics(_CONFIGS):
@@ -78,8 +79,8 @@ class MolecularDynamics(_CONFIGS):
                           'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
                           'device': self.DEVICE,
                           'verbose': self.VERBOSE}
-        if self.REDIRECT:
-            self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+        if self.SAVE_PREDICTIONS:
+            self.MD_config['output_file'] = self.PREDICTIONS_SAVE_FILE
         if self.MD['ENSEMBLE'] == 'NVT':
             self.MD_config['thermostat'] = self.MD.get('THERMOSTAT', 'CSVR')
             self.MD_config['thermostat_config'] = self.MD.get('THERMOSTAT_CONFIG', dict())
@@ -101,7 +102,7 @@ class MolecularDynamics(_CONFIGS):
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
-                'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
+                'WARNING: The model does not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
             )
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
@@ -118,6 +119,7 @@ class MolecularDynamics(_CONFIGS):
         self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
+        mole_dynam = None
         try:
             # I/O
             if self.VERBOSE > 0:
@@ -185,6 +187,13 @@ class MolecularDynamics(_CONFIGS):
                     return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
 
             mole_dynam = self.MDType(**self.MD_config)
+            if self.REDIRECT:
+                _file_handler = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+                mole_dynam.reset_logger_handler(_file_handler)
+            if self.SAVE_PREDICTIONS:
+                dmp = ArrayDumper(self.PREDICTIONS_SAVE_FILE, mode='a', cache_size=4096, use_mmap=False)
+                mole_dynam._HOLD_DUMPER = True
+                mole_dynam.reset_dumper(dmp)
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # running batch now
             for val_data, val_label in val_set:
@@ -194,12 +203,13 @@ class MolecularDynamics(_CONFIGS):
                         if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
                     # MD
+                    _cell = get_cell_vec(val_data)
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
                         self.logger.info(f'Running Batch {n_c}.')
                         self.logger.info('*' * 100)
                         cell_str = np.array2string(
-                            get_cell_vec(val_data), **FLOAT_ARRAY_FORMAT
+                            _cell, **FLOAT_ARRAY_FORMAT
                         ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
                         self.logger.info(f'Cell Vectors:\n{cell_str}')
 
@@ -216,14 +226,17 @@ class MolecularDynamics(_CONFIGS):
                     mole_dynam.run(
                         model_wrap.Energy,
                         X_init,  # TODO, Now it support pygData and DGLGraph.
-                        get_atomic_number(val_data),
+                        Element_list=get_atomic_number(val_data),
+                        Cell_vector=_cell,
                         V_init=None,  # TODO, Support user-defined initial velocities.
                         grad_func=model_wrap.Grad,
-                        func_args=(val_data,), grad_func_args=(val_data,),
+                        func_args=(val_data,),
+                        grad_func_args=(val_data,),
                         is_grad_func_contain_y=False,
-                        fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
                         require_grad=self.require_grad,
                         batch_indices=batch_indx,
+                        fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
+
                     )
 
                     # Print info
@@ -247,6 +260,8 @@ class MolecularDynamics(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
+            if mole_dynam is not None:
+                mole_dynam.dumper.close()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
