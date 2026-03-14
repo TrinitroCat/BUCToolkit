@@ -30,5 +30,3 @@ __all__ = [
     'utils'
 
 ]
-
-__version__ = '0.9a'

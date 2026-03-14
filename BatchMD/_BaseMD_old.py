@@ -1,4 +1,5 @@
 """ Molecular Dynamics via Verlet algo. """
+import os
 #  Copyright (c) 2024-2025.7.4, BM4Ckit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -6,6 +7,7 @@
 #  Environment: Python 3.12
 
 import sys
+import warnings
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 import time
 import logging
@@ -18,7 +20,6 @@ import numpy as np
 from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
-from BM4Ckit.utils.index_ops import index_reduce
 
 
 class _BaseMD:
@@ -35,15 +36,13 @@ class _BaseMD:
             verbose: int = 2
     ):
         """
-        Parameters:
-            time_step: float, time per step (fs).
+        Parameters: 
+            time_step: float, time per step (ps).
             max_step: maximum steps.
             T_init: initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
             output_structures_per_step: int, output structures per output_structures_per_step steps.
             device: device that program run on.
-            verbose: control the detailed degree of output information.
-                0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
-                Note: verbose > 1 will be very slow, especially for computation on GPU.
+            verbose: control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
         """
         self.time_step = time_step
         assert (max_step > 0) and isinstance(max_step, int), f'max_step must be a positive integer, but occurred {max_step}.'
@@ -62,7 +61,6 @@ class _BaseMD:
         self.batch_tensor = None  # tensor form of `batch_indices` if it was given.
         self.batch_scatter = None # tensor indices form of `batch_indices` if it was given
                                   # e.g., batch_indices = (3, 2, 1), thus self.scatter = tensor([0, 0, 0, 1, 1, 2])
-        self.free_degree = None
 
         # logging
         self.logger = logging.getLogger('Main.MD')
@@ -79,47 +77,50 @@ class _BaseMD:
                 log_handler.setFormatter(formatter)
             self.logger.addHandler(log_handler)
 
-    def _reduce_Ek_T(self, batch_indices, masses, V):
+    def reset_logger_handler(self, handler: str|logging.StreamHandler|logging.FileHandler):
+        for _hdl in list(self.logger.handlers):
+            self.logger.removeHandler(_hdl)
+            try:
+                _hdl.close()
+            except Exception as ehdl:
+                warnings.warn(f'Failed to close handler {_hdl}: {ehdl}', RuntimeWarning)
+        formatter = logging.Formatter('%(message)s')
+        if isinstance(handler, logging.StreamHandler):
+            self.log_handler = logging.StreamHandler(stream=handler)
+            self.log_handler.setLevel(logging.INFO)
+            self.log_handler.setFormatter(formatter)
+        else:
+            output_path = os.path.dirname(handler)
+            # check whether path exists
+            if not os.path.isdir(output_path): os.makedirs(output_path)
+            # set log handler
+            self.log_handler = logging.FileHandler(handler, 'w', delay=True)
+            self.log_handler.setLevel(logging.INFO)
+            self.log_handler.setFormatter(formatter)
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
+
+    def _reduce_Ek_T(self, batch_indices, masses, V, n_atom, n_dim):
         if batch_indices is not None:
             Ek = th.sum(
                 0.5 * scatter_reduce(
-                    masses * V * V,
+                    masses * V ** 2,
                     self.batch_scatter,
                     1
                 ) * 103.642696562621738,
                 dim=-1
             )  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
+
+            temperature = (2 * Ek) / (n_dim * (self.batch_tensor - 1 + 1e-20) * 8.617333262145e-5)
         else:
             Ek = 0.5 * th.sum(
-                masses * V * V,
+                masses * V ** 2,
                 dim=(-2, -1)
             ) * 103.642696562621738  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
-        temperature = (2 * Ek) / ((self.free_degree + 1e-20) * 8.617333262145e-5) # Boltzmann constant kB = 8.617333262145e-5 eV/K
+            temperature = (2 * Ek) / (
+                    n_dim * (n_atom - 1 + 1e-20) * 8.617333262145e-5
+            )  # Boltzmann constant kB = 8.617333262145e-5 eV/K
 
         return Ek, temperature
-
-    def calc_mass_center(self, mass, mass_short, Xr, ) -> th.Tensor:
-        """
-        calculate mass center based on mass_short and Xr.
-        Args:
-            mass:
-            mass_short:
-            Xr:
-
-        Returns:
-
-        """
-        if self.batch_scatter is None:
-            # initialize topologie
-            mass_sum = th.sum(mass_short, dim=1, keepdim=True).unsqueeze(-2)  # (n_batch, 1, 1)
-            mass_center = th.sum(Xr * mass, dim=1, keepdim=True) / mass_sum  # (n_batch, 1, n_dim)
-        else:
-            # initialize topologie
-            mass_sum = index_reduce(mass_short, self.batch_scatter, dim=1).unsqueeze(-1)  # (1, n_batch, 1)
-            mass_center = index_reduce(Xr * mass, self.batch_scatter, dim=1, ) / mass_sum  # (1, n_batch, n_dim)
-            mass_center = mass_center.index_select(1, self.batch_scatter)  # (1, sumN*A, n_dim)
-
-        return mass_center
 
     def run(
             self,
@@ -136,7 +137,7 @@ class _BaseMD:
             require_grad: bool = False,
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
-            move_to_center_freq: int = -1
+            is_fix_mass_center: bool = False
     ) -> None:
         """
 
@@ -156,8 +157,7 @@ class _BaseMD:
                 the format of batch_indices is the same as `split_size_or_sections` in torch.split:
                 batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
             fixed_atom_tensor: the indices of X that fixed.
-            move_to_center_freq: the period of translating coordinates and velocities of atoms into the mass center & 0.
-                if `move_to_center_freq` <= 0, the translation would not apply.
+            is_fix_mass_center: whether transition coordinates and velocities of atoms into the mass center.
 
         Returns:
             min func: Tensor(n_batch, ), the minimum of func.
@@ -169,12 +169,6 @@ class _BaseMD:
             X = X.unsqueeze(0)
         elif len(X.shape) != 3:
             raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
-        if not isinstance(move_to_center_freq, int):
-            raise TypeError(f'`move_to_center_freq` must be an integer, but got {type(move_to_center_freq)}.')
-        elif move_to_center_freq <= 0:
-            is_fix_mass_center = False
-        else:
-            is_fix_mass_center = True
         n_batch, n_atom, n_dim = X.shape
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
@@ -200,8 +194,8 @@ class _BaseMD:
         masses = list()
         for _Elem in Element_list:
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
-        masses_short = th.tensor(masses, dtype=th.float32, device=self.device)  # (n_batch, n_atom)
-        masses = masses_short.unsqueeze(-1).expand_as(X).contiguous()  # (n_batch, n_atom, n_dim)
+        masses = th.tensor(masses, dtype=th.float32, device=self.device)
+        masses = masses.unsqueeze(-1).expand_as(X)  # (n_batch, n_atom, n_dim)
         # grad_func
         if grad_func is None:
             is_grad_func_contain_y = True
@@ -212,7 +206,7 @@ class _BaseMD:
                 return g[0]
         else:
             grad_func_ = grad_func
-        # Selective dynamics
+        # Selective dynamics  TODO: fixed atom is not compatible with freedom degree. FIXME !!!
         if fixed_atom_tensor is None:
             atom_masks = th.ones_like(X, device=self.device)
         elif fixed_atom_tensor.shape == X.shape:
@@ -240,29 +234,6 @@ class _BaseMD:
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
         X = X.to(self.device)
-        # calc. freedom degree
-        if batch_indices is None:
-            _free_degree = X.shape[1] * n_dim
-            if is_fix_mass_center:
-                _free_degree -= 3
-                # initialize topologie
-                MASS_SUM = th.sum(masses_short, dim=1, keepdim=True).unsqueeze(-2)  # (n_batch, 1, 1)
-                MASS_CENTER = th.sum(X * masses, dim=1, keepdim=True)/MASS_SUM  # (n_batch, 1, n_dim)
-            self.free_degree = th.full((n_batch, ), _free_degree, dtype=th.int64, device=self.device)
-            n_reduce = th.where(th.abs(atom_masks) < 1e-6, 1, 0).sum(dim=(-2, -1))  # (n_batch, )
-            self.free_degree -= n_reduce
-        else:
-            self.free_degree = self.batch_tensor * n_dim  # (n_batch, )
-            if is_fix_mass_center:
-                self.free_degree -= 3
-                # initialize topologie
-                MASS_SUM = index_reduce(masses_short, self.batch_scatter, dim=1).unsqueeze(-1)  # (1, n_batch, 1)
-                MASS_CENTER = index_reduce(X * masses, self.batch_scatter, dim=1, )/MASS_SUM  # (1, n_batch, n_dim)
-                MASS_CENTER = MASS_CENTER.index_select(1, self.batch_scatter)  # (1, sumN*A, n_dim)
-            n_reduce_tensor = th.where(th.abs(atom_masks) < 1e-6, 1, 0).sum(dim=-1)
-            n_reduce = index_reduce(n_reduce_tensor, self.batch_scatter, dim=1).squeeze(0)  # (n_batch, )
-            self.free_degree -= n_reduce
-
         # Generate initial Velocities
         if V_init is not None:
             if V_init.shape != X.shape:
@@ -276,16 +247,20 @@ class _BaseMD:
                 0.,
                 th.sqrt(self.T_init * 8314.46261815324 / masses) * 1.e-5,  # Unit: Ang/fs, R = kB * L = 8.31446261815324 J/(mol * K)
             ) * atom_masks
-        # remove translation veloc.
-        if is_fix_mass_center:
-            V.sub_(self.calc_mass_center(masses, masses_short, V))
         # split by batch_indices
         if batch_indices is not None:
             masses_tup = th.split(masses, batch_indices, dim=1)
             V_tup = th.split(V, batch_indices, dim=1)
+            masses_sum = th.zeros((1, len(batch_indices), n_dim), device=self.device).scatter_reduce_(
+                1,
+                self.batch_scatter.view(1, -1, 1).expand_as(masses),
+                masses,
+                'sum'
+            )[:, self.batch_scatter, :]  # (1, n_batch*n_atom, n_dim)
         else:
             masses_tup = (masses,)
             V_tup = (V,)
+            masses_sum = th.sum(masses, dim=1, keepdim=True)  # (n_batch, 1, n_dim)
 
         # initialize thermostat parameters
         # (n_batch, ), eV/atom. The initial virtual Ek_t for CSVR.
@@ -302,20 +277,6 @@ class _BaseMD:
 
         # print Atoms Information
         if self.verbose > 0:
-            # initialize print information
-            if batch_indices is not None:
-                _print_temperature = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-                _print_Ek = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-                _print_Ep = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-            else:
-                _print_temperature = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-                _print_Ek = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-                _print_Ep = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-            if self.verbose > 1:
-                _print_X = th.empty_like(X, device='cpu', dtype=th.float32, pin_memory=True)
-                _print_V = th.empty_like(V, device='cpu', dtype=th.float32, pin_memory=True)
-
-            # elem info
             elem_list = list()
             _element_list = list()
             if batch_indices is not None:
@@ -366,122 +327,111 @@ class _BaseMD:
                     Forces = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
                     Forces = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-            _do_print = False
-            #copy_stream = th.cuda.Stream()
+            temperature_ = th.empty(len(V_tup), 1, device=self.device, dtype=Energy.dtype)
+            Ek_ = th.empty(len(V_tup), 1, device=self.device, dtype=th.float32)
+
             #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
             for i in range(self.max_step):
-                with th.profiler.record_function('Calc. E, T <<<<<'):
-                    Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V)
-                    self.Ek = Ek.squeeze()  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
-                # if self.verbose > 0:
-                with th.profiler.record_function('D2H COPY <<<<<'):
-                    if i % self.output_structures_per_step == 0:
-                        _do_print = True
-                        #with th.cuda.stream(copy_stream):
-                        if self.verbose > 1:
-                            _print_X.copy_(X, non_blocking=True)
-                            _print_V.copy_(V, non_blocking=True)
-                        #ptlist.append(X.numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-                        # Calc. Kinetic Energy, Temperature, etc.
-                        if self.verbose > 0:
-                            # H2D
-                            _tp = temperature.squeeze().contiguous()
-                            _ek = Ek.squeeze().contiguous()
-                            _ep = Energy.squeeze().contiguous()
-                            _print_temperature.copy_(_tp, non_blocking=True)
-                            _print_Ek.copy_(_ek, non_blocking=True)
-                            _print_Ep.copy_(_ep, non_blocking=True)
-                        #ev = th.cuda.Event()
-                        #ev.record(copy_stream)
-
-                # Update X, V
-                with th.profiler.record_function('MAIN UPDATE <<<<<'):
-                    X, V, Energy, Forces = self._updateXV(
-                        X, V, Forces,
-                        func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-                        masses, atom_masks, is_grad_func_contain_y, batch_indices
-                    )
-                # print
-                with th.profiler.record_function('PRINT <<<<<'):
-                    if _do_print:
-                        #ev.synchronize()
-                        if self.verbose > 0:
-                            # print format
-                            np.set_printoptions(
-                                precision=8,
-                                linewidth=1024,
-                                floatmode='fixed',
-                                suppress=True,
-                                formatter={'float': '{:> .2f}'.format},
-                                threshold=2000
-                            )
-                            self.logger.info(
-                                f'Step: {i:>12d}\n\t'
-                                f'T     = {_print_temperature.numpy(force=True)}\n\t'
-                                f'E_tol = {np.array2string((_print_Ek + _print_Ep).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                                f'Ek    = {np.array2string(_print_Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                                f'Ep    = {np.array2string(_print_Ep.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                                f'Time: {time.perf_counter() - t_in:>5.4f}'
-                            )
-                            t_in = time.perf_counter()
-                        if self.verbose > 1:
-                            # split to print
-                            if batch_indices is not None:
-                                X_tup = th.split(_print_X, batch_indices, dim=1)
-                                V_tup = th.split(_print_V, batch_indices, dim=1)
-                            else:
-                                X_tup = (_print_X,)
-                                V_tup = (_print_V,)
-                            np.set_printoptions(
-                                precision=8, floatmode='fixed', suppress=True, formatter={'float': '{:> 5.10f}'.format}, threshold=3000000
-                            )
-                            self.logger.info('_' * 100)
-                            self.logger.info(f'Configuration {i}:')
-                            for __x in X_tup:
-                                X_str = np.array2string(
-                                    __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                                ).replace("[", " ").replace("]", " ")
-                                self.logger.info(f'{X_str}\n')
-                            del X_str, X_tup
-                            if self.verbose > 2:
-                                self.logger.info(f'Velocities {i}:')
-                                for __x in V_tup:
-                                    V_str = np.array2string(
-                                        __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                                    ).replace("[", " ").replace("]", " ")
-                                    self.logger.info(f'{V_str}\n')
-                                del V_str
-                            self.logger.info('_' * 100)
-                        _do_print = False
-
-                # Correct barycentric transition
-                with th.profiler.record_function('MOVE TO CENTER <<<<<'):
-                    if is_fix_mass_center and (i % move_to_center_freq == 0):
-                        dX = MASS_CENTER - self.calc_mass_center(masses, masses_short, X)
-                        dV = - self.calc_mass_center(masses, masses_short, V)
-                        X.add_(dX)  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
-                        V.add_(dV)
-
-            # Finale step
-            if self.verbose > 0:
-                if X.is_cuda: th.cuda.synchronize()
-                Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V)
-                self.Ek = Ek  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
-                self.logger.info(
-                    f'Step: {i+1:>12d}\n\t'
-                    f'T     = {temperature.numpy(force=True)}\n\t'
-                    f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                    f'Ek    = {np.array2string(Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                    f'Ep    = {np.array2string(Energy.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                    f'Time: {time.perf_counter() - t_in:>5.4f}'
-                )
-                self.logger.info('_' * 100 + '\n' + f'Main Loop Done. Total Time: {time.perf_counter() - t_main:>.4f}')
-                # if self.verbose > 0:
+                # Print & Output file
                 if batch_indices is not None:
                     X_tup = th.split(X, batch_indices, dim=1)
+                    masses_tup = th.split(masses, batch_indices, dim=1)
                     V_tup = th.split(V, batch_indices, dim=1)
                 else:
                     X_tup = (X,)
+                    masses_tup = (masses,)
+                    V_tup = (V,)
+                # update Ek and temperature  TODO: optimize by scatter ops.
+                for _i, __x in enumerate(V_tup):
+                    Ek_[_i] = 0.5 * th.sum(
+                        masses_tup[_i] * __x ** 2,
+                        dim=(-2, -1)
+                    ) * 103.642696562621738  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
+                    temperature_[_i] = (2 * Ek_[_i]) / (
+                            n_dim * (__x.shape[1] - 1 + 1e-20) * 8.617333262145e-5
+                    )  # Boltzmann constant kB = 8.617333262145e-5 eV/K
+                Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V, n_atom, n_dim)
+                self.Ek = Ek.squeeze()  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
+                # if self.verbose > 0:
+                if i % self.output_structures_per_step == 0:
+                    if self.verbose > 1:
+                        np.set_printoptions(
+                            precision=8, floatmode='fixed', suppress=True, formatter={'float': '{:> 5.10f}'.format}, threshold=3000000
+                        )
+                        self.logger.info('_' * 100)
+                        self.logger.info(f'Configuration {i}:')
+                        for __x in X_tup:
+                            X_str = np.array2string(
+                                __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
+                            ).replace("[", " ").replace("]", " ")
+                            self.logger.info(f'{X_str}\n')
+                        del X_str, X_tup
+                        if self.verbose > 2:
+                            self.logger.info(f'Velocities {i}:')
+                            for __x in V_tup:
+                                V_str = np.array2string(
+                                    __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
+                                ).replace("[", " ").replace("]", " ")
+                                self.logger.info(f'{V_str}\n')
+                            del V_str
+                        self.logger.info('_' * 100)
+                    #ptlist.append(X.numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                    # Calc. Kinetic Energy, Temperature, etc.
+                    if self.verbose > 0:
+                        np.set_printoptions(
+                            precision = 8,
+                            linewidth = 1024,
+                            floatmode = 'fixed',
+                            suppress = True,
+                            formatter = {'float': '{:> .2f}'.format},
+                            threshold = 2000
+                        )
+                        self.logger.info(
+                            f'Step: {i:>12d}\n\t'
+                            f'T     = {temperature.squeeze().numpy(force=True)}\n\t'
+                            f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Ek    = {np.array2string(Ek.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Ep    = {np.array2string(Energy.squeeze().squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                            f'Time: {time.perf_counter() - t_in:>5.4f}'
+                        )
+                        t_in = time.perf_counter()
+
+                # Update X, V
+                X, V, Energy, Forces = self._updateXV(
+                    X, V, Forces,
+                    func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+                    masses, atom_masks, is_grad_func_contain_y, batch_indices
+                )
+                # Correct barycentric transition  TODO: solve the batch_indices problem
+                if is_fix_mass_center:
+                    if batch_indices is None:
+                        X = X - th.sum(masses * X, dim=1, keepdim=True)/masses_sum  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
+                        V = V - th.sum(masses * V, dim=1, keepdim=True)/masses_sum
+                    else:                                                           # (1, nb * n_atom, n_dim) - (1, nb * n_atom, n_dim)
+                        X = X - th.zeros(1, len(batch_indices), n_dim, device=self.device).scatter_reduce_(
+                            1,
+                            self.batch_scatter.view(1, -1, 1).expand_as(masses),
+                            (masses * X),
+                            'sum'
+                        )[:, self.batch_scatter, :]/masses_sum
+                        V = V - th.zeros(1, len(batch_indices), n_dim, device=self.device).scatter_reduce_(
+                            1,
+                            self.batch_scatter.view(1, -1, 1).expand_as(masses),
+                            (masses * V),
+                            'sum'
+                        )[:, self.batch_scatter, :]/masses_sum
+                        #raise NotImplementedError
+
+            # Finale step
+            if self.verbose > 0:
+                # if self.verbose > 0:
+                if batch_indices is not None:
+                    X_tup = th.split(X, batch_indices, dim=1)
+                    masses_tup = th.split(masses, batch_indices, dim=1)
+                    V_tup = th.split(V, batch_indices, dim=1)
+                else:
+                    X_tup = (X,)
+                    masses_tup = (masses,)
                     V_tup = (V,)
                 if self.verbose > 1:
                     np.set_printoptions(
@@ -500,6 +450,18 @@ class _BaseMD:
                             self.logger.info(f'{V_str}\n')
                         del V_str
                     self.logger.info('_' * 100)
+                th.cuda.synchronize()
+                Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V, n_atom, n_dim)
+                self.Ek = Ek #th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
+                self.logger.info(
+                    f'Step: {i:>12d}\n\t'
+                    f'T     = {temperature.numpy(force=True)}\n\t'
+                    f'E_tol = {np.array2string((Ek.squeeze() + Energy.squeeze()).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                    f'Ek    = {np.array2string(Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                    f'Ep    = {np.array2string(Energy.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                    f'Time: {time.perf_counter() - t_in:>5.4f}'
+                )
+                self.logger.info('_' * 100 + '\n' + f'Main Loop Done. Total Time: {time.perf_counter() - t_main:>.4f}')
 
         del self.Ekt_vir
         #return ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
