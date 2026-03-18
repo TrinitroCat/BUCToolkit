@@ -15,9 +15,8 @@ import time
 import traceback
 import warnings
 from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
-import joblib as jb
-import numpy as np
 
+import numpy as np
 import torch as th
 import yaml
 from torch import nn
@@ -31,6 +30,7 @@ from BM4Ckit.utils._CheckModules import check_module
 from BM4Ckit import Structures
 from BM4Ckit.utils.ElemListReduce import elem_list_reduce
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
+from BM4Ckit.BatchStructures.StructuresIO import structures_io_dumper
 
 
 class _LoggingEnd:
@@ -394,10 +394,9 @@ class _CONFIGS(object):
         if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
-            self.DUMP_FREQUENCY = self.config.get('DUMP_FREQUENCY', 10)
-            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, self.DUMP_FREQUENCY)
+            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
         else:
-            self.dumper = DumpStructures(None, 1)
+            self.dumper = DumpStructures(None, )
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
         if self.REDIRECT:
             self.OUTPUT_PATH = self.config.get('OUTPUT_PATH', './')
@@ -436,10 +435,7 @@ class _CONFIGS(object):
     @PREDICTIONS_SAVE_FILE.setter
     def PREDICTIONS_SAVE_FILE(self, value):
         self._PREDICTIONS_SAVE_FILE = value
-        if setattr(self, 'DUMP_FREQUENCY', None) is None:
-            self.DUMP_FREQUENCY = self.config.get('DUMP_FREQUENCY', 10)
-        self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, 10)
-
+        self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
 
 def compare_tensors(X1: th.Tensor, X2: th.Tensor):
     """Compare two tensors."""
@@ -500,6 +496,7 @@ class _Model_Wrapper_pyg:
             force = self.forces
             self.forces = None
             return - force.reshape(origin_shape).contiguous()
+
 
 class _Model_Wrapper_pyg_only_X:
     def __init__(self, model , graph) -> None:
@@ -706,67 +703,157 @@ class DumpStructures:
     """
     Dump structures calculated by `Predictor`, `StructureOptimization`, etc.
     """
-    def __init__(self, path:str|None=None, dump_freq: int=1):
+    def __init__(self, path:str|None=None):
         """
 
         Args:
             path: the path to dump structures. If None, structures will always store in memory.
-            dump_freq: the frequency of dump structures.
         """
-        self._structures = Structures()
-        self._structures.Mode = 'A'
-        #self._structures.change_mode('A')
-        self.save_path = path
-        self.parallelize = None
-        self.dump_freq = dump_freq
-        self.collect_count = 0
-        # initialize Structure
-        self.initialize()
+        self.dumper = structures_io_dumper(path, 'x', )
+        self._step = self._first_step
+        self._has_initialized = False
 
     def initialize(self):
-        self.idx: List = list()
-        # Batch info part
-        self.batch_indices_arr: List = list()  # storing the split point (ptr) in each array with n_atom length. It both concludes 0 and len(arr).
-        self.elem_batch: List = list()  # storing the split point (ptr) in each array with n_elem length. It both concludes 0 and len(arr).
-        # Structure part
-        self.cells: List = list()  # cell vectors
-        self.pos_type: List = list()  # coordinate type
-        self.pos: List = list()  # atomic coordinates
-        self.fixations: List = list()  # fixed atoms masks, 0 for fixed and 1 for free.
-        self.elem_arr: List = list()  # elements
-        self.num_arr: List = list()  # atom number of each element
-        # Properties part
-        self.energies: List = list()  # energies of structures. None | List[float]
-        self.forces: List = list()  # forces of structures. None | List[np.NdArray[N, 3]]
+        self.dumper.initialize()
 
     @staticmethod
     def _exit(errt = None, errv = None, tr = None):
         if errt is not None:
             raise errt(f'{errv}, {tr}')
 
-    def _check_data(self) -> int:
+    @staticmethod
+    def _reformat(
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
         """
-        Check structure numbers and return it.
-        Returns: the structure number.
+        Reformat input into dumping format.
+        Args:
+            batch_indices:
+            idx:
+            elements:
+            cells:
+            pos:
+            fixations:
+            energies:
+            forces:
+
+        Returns:
+            batch_indices, idx, cells, elements, pos, fixations, energies, forces
+        """
+        # Postprocessing & save TODO: reformat it in future to apply to all functions.
+        n_batch = len(batch_indices)
+        batch_indices = np.array(batch_indices, dtype=np.int64)
+        if cells.shape != (n_batch, 3, 3):
+            raise ValueError(f'`cells` is expected to have 3 dimensions (n_batch, 3, 3), but got {cells.shape}.')
+        cells = cells.numpy(force=True).astype(np.float32) if isinstance(cells, th.Tensor) else np.asarray(cells, dtype=np.float32)
+        if len(idx) != n_batch:
+            raise ValueError(f'The number of `idx` is expected to be batch size {n_batch}, but got {len(idx)}.')
+        idx = np.array(idx, dtype='<U128')
+        if elements.ndim == 2:
+            elements.squeeze_(0)
+        elif elements.ndim != 1:
+            raise ValueError(f'`elements` should be a 1D array, but got {elements.shape}')
+        elements = elements.numpy(force=True).astype(np.int64) if isinstance(elements, th.Tensor) else np.asarray(elements, dtype=np.int64)
+        # pos_type = np.array(pos_type)
+        if pos.ndim == 3:
+            pos.squeeze_(0)
+        elif pos.ndim != 2:
+            raise ValueError(f'`pos` should be a 2D array, but got {pos.shape}')
+        pos = pos.numpy(force=True).astype(np.float32) if isinstance(pos, th.Tensor) else np.asarray(pos, dtype=np.float32)
+        if forces.ndim == 3:
+            forces.squeeze_(0)
+        if forces.shape != pos.shape:
+            raise ValueError(f'`forces` should have the same shape as `pos`, but got {forces.shape} rather than {pos.shape}.')
+        forces = forces.numpy(force=True).astype(np.float32) if isinstance(forces, th.Tensor) else np.asarray(forces, dtype=np.float32)
+        if energies.ndim == 2:
+            energies.squeeze_(0)
+        elif energies.ndim != 1:
+            raise ValueError(f'`energies` should be a 1D array, but got {energies.shape}')
+        energies = energies.numpy(force=True)
+        if fixations.ndim == 3:
+            fixations.squeeze_(0)
+        if fixations.shape != pos.shape:
+            raise ValueError(f'`fixations` should have the same shape as `pos`, but got {fixations.shape} rather than {pos.shape}.')
+        fixations = fixations.numpy(force=True).astype(np.float32) if isinstance(fixations, th.Tensor) else np.asarray(fixations, dtype=np.float32)
+
+        return batch_indices, idx, cells, elements, pos, fixations, energies, forces
+
+    def _first_step(
+            self,
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
+        """
+        First step to initialize
+        Args:
+            batch_indices:
+            idx:
+            elements:
+            cells:
+            pos:
+            fixations:
+            energies:
+            forces:
+
+        Returns:
 
         """
-        length_list = [
-            len(self.batch_indices_arr),
-            len(self.elem_batch),
-            len(self.idx),
-            len(self.cells),
-            len(self.elem_arr),
-            len(self.num_arr),
-            len(self.pos_type),
-            len(self.pos),
-            len(self.fixations),
-            len(self.energies),
-            len(self.forces),
-        ]
-        if len(set(length_list)) != 1:
-            raise RuntimeError(f'structure numbers of some attributes are inconsistent.')
+        if self._has_initialized:
+            self.initialize()
+        batch_indices, idx, cells, elements, pos, fixations, energies, forces = self._reformat(
+            batch_indices,
+            idx,
+            elements,
+            cells,
+            pos,
+            fixations,
+            energies,
+            forces,
+        )
+        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.step(
+            batch_indices, idx, cells, elements, pos, fixations, energies, forces
+        )
+        self._step = self._continue_step
 
-        return length_list[0]
+    def _continue_step(
+            self,
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
+        batch_indices, idx, cells, elements, pos, fixations, energies, forces = self._reformat(
+            batch_indices,
+            idx,
+            elements,
+            cells,
+            pos,
+            fixations,
+            energies,
+            forces,
+        )
+        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.step(
+            batch_indices, idx, cells, elements, pos, fixations, energies, forces
+        )
 
     def collect(
             self,
@@ -774,7 +861,6 @@ class DumpStructures:
             idx: List[str],
             elements: th.Tensor,
             cells: th.Tensor | np.ndarray,
-            pos_type: List[str],
             pos: th.Tensor,
             fixations: th.Tensor,
             energies: th.Tensor,
@@ -787,7 +873,6 @@ class DumpStructures:
             idx: List[str],
             elements: th.Tensor[int] | List[List[int]], the atom-wise elements sequence
             cells: th.Tensor | np.ndarray,
-            pos_type: List[str],
             pos: th.Tensor,
             fixations: th.Tensor,
             energies: th.Tensor,
@@ -798,61 +883,19 @@ class DumpStructures:
         """
         try:
             # Postprocessing & save TODO: reformat it in future to apply to all functions.
-            batch_indices_arr = np.array(batch_indices)
-            cells = cells.cpu().numpy(force = True) if isinstance(cells, th.Tensor) else cells
-            pos_type = np.array(pos_type)
-            pos = pos.cpu().squeeze(0).numpy(force=True)
-            forces = forces.cpu().squeeze(0).numpy(force=True)
-            energies = energies.cpu().numpy(force=True)
-            fixations = fixations.cpu().squeeze(0).numpy(force=True)
-            # check elements type
-            if isinstance(elements, th.Tensor):
-                elem_list = th.split(elements.squeeze(0), batch_indices)
-                elem_list = [_.tolist() for _ in elem_list]
-            elif isinstance(elements, list):
-                elem_list = list(elements)
-            else:
-                raise TypeError(f'`elements` should be a tensor or a list, but got {type(elements)}.')
-            elem_comp_list = list()
-            numb_comp_list = list()
-            elem_batch_indices = list()
-            #if self.parallelize is not None:
-            #    _res = self.parallelize(jb.delayed(elem_list_reduce)(_element_list) for _element_list in elem_list)
-            #    for _element_list in _res:
-            #        _elem_comp_list, _, _number_list = _element_list
-            #        elem_comp_list.extend(_elem_comp_list)
-            #        numb_comp_list.extend(_number_list)
-            #        elem_batch_indices.append(len(_element_list))
-            #else:
-            for _element_list in elem_list:
-                _elem_comp_list, _, _number_list = elem_list_reduce(_element_list)
-                elem_comp_list.extend(_elem_comp_list)
-                numb_comp_list.extend(_number_list)
-                elem_batch_indices.append(len(_number_list))
-            elem_batch = np.asarray(elem_batch_indices)
-            elem_arr = np.asarray(elem_comp_list)
-            num_arr = np.asarray(numb_comp_list)
-
-            self.batch_indices_arr.append(batch_indices_arr)
-            self.elem_batch.append(elem_batch)
-            self.idx.append(idx)
-            self.cells.append(cells)
-            self.elem_arr.append(elem_arr)
-            self.num_arr.append(num_arr)
-            self.pos_type.append(pos_type)
-            self.pos.append(pos)
-            self.fixations.append(fixations)
-            self.energies.append(energies)
-            self.forces.append(forces)
-
-            # dump saved structures
-            self.collect_count += 1
-            if self.save_path is not None:
-                if self.collect_count % self.dump_freq == 0:
-                    self.flush()
+            self._step(
+                batch_indices,
+                idx,
+                elements,
+                cells,
+                pos,
+                fixations,
+                energies,
+                forces,
+            )
 
         except Exception as e:
-            self._exit(Exception, e, traceback.format_exc())
+            warnings.warn(f'Failed to collect structures due to ERROR: {e}')
 
     def flush(self):
         """
@@ -861,48 +904,12 @@ class DumpStructures:
 
         """
         try:
-            if self._check_data() <= 0:
-                return None
-
-            batch_indices_arr = np.concatenate(self.batch_indices_arr)
-            elem_batch = np.concatenate(self.elem_batch)
-            idx = np.concatenate(self.idx)
-            cells = np.concatenate(self.cells)
-            elem_arr = np.concatenate(self.elem_arr)
-            num_arr = np.concatenate(self.num_arr)
-            pos_type = np.concatenate(self.pos_type)
-            pos = np.concatenate(self.pos)
-            fixations = np.concatenate(self.fixations)
-            energies = np.concatenate(self.energies)
-            forces = np.concatenate(self.forces)
-            self.initialize()
-
-            self._structures.append_from_array(
-                batch_indices_arr,
-                elem_batch,
-                idx,
-                cells,
-                elem_arr,
-                num_arr,
-                pos_type,
-                pos,
-                fixations,
-                energies,
-                forces
-            )
-
-            if (self.save_path is not None) and (len(self._structures) > 0):
-                self._structures.save(self.save_path, 'a')
-            del self._structures
-            self._structures = Structures()
-            self._structures.Mode = 'A'
+            self.dumper.flush()
         except Exception as e:
-            self._exit(Exception, e, traceback.format_exc())
+            warnings.warn(f'Failed to flush structures due to ERROR: {e}')
 
-    def __del__(self):
-        if self.save_path is not None: self.flush()
-        self._exit()
-        gc.collect()
+    def close(self):
+        self.dumper.close()
 
 
 class PygBatchUpdater:
@@ -953,4 +960,3 @@ class PygBatchUpdater:
             return (self.__g_old,), func_kwargs, (self.__g_old,), grad_func_kwargs
         else:
             return self._reallocate(converge_check, func_args, func_kwargs, grad_func_args, grad_func_kwargs)
-
