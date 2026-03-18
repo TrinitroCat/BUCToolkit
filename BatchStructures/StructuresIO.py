@@ -9,9 +9,14 @@ Contiguous dumping and reading arrays data by memory mapping.
 #  Environment: Python 3.12
 from typing import Dict, List, Literal, Tuple, ByteString
 from io import BufferedRandom
-import numpy as np
 import warnings, os, mmap, copy, gc, math
-import multiprocessing as mp
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
+
+import numpy as np
+import torch as th
+from torch import nn
+
 from BM4Ckit._version import __version__
 from BM4Ckit.BatchStructures.BatchStructuresBase import BatchStructures
 from BM4Ckit.utils.ElemListReduce import elem_list_reduce
@@ -38,35 +43,6 @@ class ArrayDumper:
             head_order: the head order of the array head information. '<' is the little order, and '>' is the big order.
             use_mmap: whether to use memory map to save arrays.
         """
-        # check input
-        self.path = str(path)
-        self.cache_size = int(cache_size) * 1024  # convert to bytes
-        if not self.cache_size > 0: raise ValueError(f"cache_size must be greater than 0, but got {cache_size}")
-        self.use_mmap = use_mmap
-        if mode in ('w', 'x', 'a'):
-            self.mode = mode
-        else:
-            raise ValueError(f"mode must be 'w', 'x', or 'a', but got {mode}")
-        if os.path.isdir(self.path):
-            raise IOError(f"The path '{self.path}' has already exist as a directory.")
-        if (not os.path.isfile(self.path)) and (self.mode == 'a'):
-            #warnings.warn(f'The mode is "a" but file {self.path} does not exist. Hence, mode has been reset to "w".')
-            self.mode = 'w'
-
-        __ORDER1 = {'<': 'utf-16-le', '>': 'utf-16-be'}
-        if not head_order in __ORDER1: raise ValueError(f'head_order must be "<" or ">", but got {head_order}.')
-        self.head_order = head_order
-        self._str_fmt = __ORDER1[head_order]
-        __ORDER2: Dict[Literal['<', '>'], Literal['little', 'big']] = {'<': 'little', '>': 'big'}
-        self._num_fmt: Literal['little', 'big'] = __ORDER2[head_order]
-        # test BOM
-        if len('a'.encode(self._str_fmt)) != 2:
-            raise NotImplementedError(
-                f'You may check here whether the encode format {self._str_fmt} is correct. '
-                f'Normally it would not be added BOM at the start of bytes, thus resulting 2 bytes, but here string "a" '
-                f'is encoded into {len("a".encode(self._str_fmt))} bytes instead.'
-            )
-
         # init vars
         self._dump_file = None  # the TextIOWrapper of the file
         self._mmp_f: BufferedRandom|mmap.mmap|None = None  # the mmap obj of the file
@@ -82,6 +58,58 @@ class ArrayDumper:
         self._current_group_head_position: int|None = None  # the start position of the current group head
         self._use_dynamic_steps = False  # whether to use dynamic steps. False is to use fixed steps.
         #self.initialize()
+        # check input
+        self.reset_args(
+            path=path,
+            mode=mode,
+            cache_size=cache_size,
+            head_order=head_order,
+            use_mmap=use_mmap,
+        )
+        # test BOM
+        if len('a'.encode(self._str_fmt)) != 2:
+            raise NotImplementedError(
+                f'You may check here whether the encode format {self._str_fmt} is correct. '
+                f'Normally it would not be added BOM at the start of bytes, thus resulting 2 bytes, but here string "a" '
+                f'is encoded into {len("a".encode(self._str_fmt))} bytes instead.'
+            )
+
+    def reset_args(
+            self,
+            path: str,
+            mode: Literal['w', 'x', 'a'] = 'x',
+            cache_size: int = 4096,
+            head_order: Literal['<', '>'] = '<',
+            use_mmap: bool = False,
+    ):
+        """
+        Reset args values BEFORE initializing.
+        Returns: None
+
+        """
+        if self._has_initialized:
+            warnings.warn(f'The dumper has been initialized already. Resetting args is unavailable.')
+            return None
+        self.path = str(path)
+        self.cache_size = int(cache_size) * 1024  # convert to bytes
+        if not self.cache_size > 0: raise ValueError(f"cache_size must be greater than 0, but got {cache_size}")
+        self.use_mmap = use_mmap
+        if mode in ('w', 'x', 'a'):
+            self.mode = mode
+        else:
+            raise ValueError(f"mode must be 'w', 'x', or 'a', but got {mode}")
+        if os.path.isdir(self.path):
+            raise IOError(f"The path '{self.path}' has already exist as a directory.")
+        if (not os.path.isfile(self.path)) and (self.mode == 'a'):
+            # warnings.warn(f'The mode is "a" but file {self.path} does not exist. Hence, mode has been reset to "w".')
+            self.mode = 'w'
+
+        __ORDER1 = {'<': 'utf-16-le', '>': 'utf-16-be'}
+        if not head_order in __ORDER1: raise ValueError(f'head_order must be "<" or ">", but got {head_order}.')
+        self.head_order = head_order
+        self._str_fmt = __ORDER1[head_order]
+        __ORDER2: Dict[Literal['<', '>'], Literal['little', 'big']] = {'<': 'little', '>': 'big'}
+        self._num_fmt: Literal['little', 'big'] = __ORDER2[head_order]
 
     def initialize(self, ):
         r"""
@@ -397,6 +425,9 @@ class ArrayDumper:
                 head_len_list.append(_l)
                 _dtype = dtype_list[i]  # `order``type``len`
                 nbytes = int(_dtype[2:])
+                # for Unicode in numpy, each char has 4 bytes rather than 1 byte.
+                if str(_dtype[1]) == 'U':
+                    nbytes *= 4
                 arr_type_list.append((str(_dtype[0]), str(_dtype[1]), nbytes))
                 # calc. the arrays size
                 tol_nbytes = nbytes * math.prod(shape_list[i])
@@ -545,6 +576,14 @@ class ArrayDumper:
         """
         self._mmp_f.flush()
 
+    def flush(self):
+        """
+        Alias for `self.dump`.
+        Returns:
+
+        """
+        self._mmp_f.flush()
+
     def _tmp_close(self):
         """
         temporarily close the mmap file
@@ -597,6 +636,17 @@ class _ArrayDumperPlaceHolder:
     def __init__(self, path: None, *args, **kwargs) -> None:
         if path is not None:
             raise ValueError(f"This is a placeholder, which only receives path = None, but got {path}.")
+
+    def reset_args(
+            self,
+            path: str,
+            mode: Literal['w', 'x', 'a'] = 'x',
+            cache_size: int = 4096,
+            head_order: Literal['<', '>'] = '<',
+            use_mmap: bool = False,
+            *args, **kwargs
+    ):
+        pass
 
     def initialize(self):
         pass
@@ -869,6 +919,11 @@ class ArrayDumpReader:
                 _dtp_ot = self._mmp_f.read(4).decode(self._str_fmt)  # order and type without length
                 _dtp_len = int.from_bytes(self._mmp_f.read(4), self._num_fmt, signed=False)  # the byte length of each elem in arr.
                 _dtype = f'{_dtp_ot}{_dtp_len}'
+                # Special for Unicode char in numpy which applied utf-32 of 4 bytes.
+                if _dtp_ot[1] == 'U':
+                    elem_size = _dtp_len * 4
+                else:
+                    elem_size = _dtp_len
                 dtype_list.append(_dtype)
                 _shape = list()
                 while True:
@@ -877,7 +932,7 @@ class ArrayDumpReader:
                         break
                     _shape.append(_sp_num)
                 shape_list.append(tuple(_shape))
-                stride_list.append(_dtp_len * math.prod(_shape))
+                stride_list.append(elem_size * math.prod(_shape))
             self._ptr = self._mmp_f.tell()
 
             return n_cycles, n_arrays, dtype_list, shape_list, stride_list
@@ -941,15 +996,280 @@ class ArrayDumpReader:
             )
 
 
-class _BaseStructureIO:
+class StandardModel(ABC):
     """
-    Base class for structure IO. It will be added into Batch* methods as a general dumper.
+    An abstract base class that convert arbitrary function into BUCToolkit supported format to structure opt, MD, and MC, etc.
+    It can receive any user-defined Callable object `model` which returns torch.Tensors, and convert it to the standard dict format
+        {'energy': energy, 'forces': forces} by user-override `initialize_model` (optional), `calc_energy`, and `calc_forces` with
+        input `args` and `kwargs`.
+    DO NOT SUPPORT FOR TRAINING.
+
     """
-    def __init__(self, path: str, mode: Literal['w', 'x', 'a'] = 'x'):
-        self._path = path
-        self.dumper = ArrayDumper(path, mode=mode, cache_size=4096, use_mmap=False)
+    def __init__(
+            self,
+            model,
+            args_for_init: Tuple = tuple(),
+            kwargs_for_init: Dict | None = None,
+            device: str = 'cpu',
+            *args,
+            **kwargs
+    ):
+        """
+        The original PyTorch model with (hyper-)parameters args and kwargs.
+        Args:
+            model: the main function
+            args_for_init: arguments passed to model
+            kwargs_for_init: keyword arguments passed to model
+            args: additional positional arguments for calc_energy or calc_forces, if necessary
+            kwargs: additional keyword arguments for calc_energy or calc_forces, if necessary
+        """
+        if kwargs_for_init is None: kwargs_for_init = {}
+        super().__init__()
+        self.model = model
+        self.args = args
+        self.kwargs = kwargs
+        self.device = th.device(device)
+
+        self.initialize_model(*args_for_init, **kwargs_for_init)
+
+    def initialize_model(self, *args, **kwargs):
+        """
+        Initialize & config the model, if necessary.
+        Args:
+            *args:
+            **kwargs:
+
+        Returns:
+
+        """
+        pass
+
+    @abstractmethod
+    def calc_energy(self, x) -> th.Tensor:
+        """
+        The method that calculates the energy of given x.
+        One may use input args/kwargs in __init__
+        Args:
+            x: input variable
+
+        Returns: energy
+
+        """
+        pass
+
+    @abstractmethod
+    def calc_forces(self, x) -> th.Tensor:
+        """
+        The method that calculates the forces of given x.
+        One may use input args/kwargs in __init__
+        Args:
+            x: input variable
+
+        Returns: forces
+
+        """
+        pass
+
+    def __call__(self, x):
+        with th.no_grad():
+            ener = th.as_tensor(self.calc_energy(x), device=self.device)
+            forc = th.as_tensor(self.calc_forces(x), device=self.device)
+            return {'energy': ener, 'forces': forc}
 
 
+class StandardInput(ABC):
+    """
+    An abstract container as the standard input of advanced API `TrainingMethod`,
+     which have properties that can be inquired by follow methods as the input arg `data`:
+
+        def get_batch_size(data):
+            # total batch size
+            return len(data)
+
+        def get_cell_vec(data):
+            # `batch_size` cell vectors stacked at the 1st dim.
+            return data.cell.numpy(force=True)
+
+        def get_atomic_number(data):
+            # `batch_size` atomic numbers tensor(int64) concatenated at the 1st dim.
+            return data.atomic_numbers.unsqueeze(0)
+
+        def get_indx(data):
+            # Python list object with `batch_size` elements of each sample's name.
+            # each name must have less than 128 bytes.
+            _indx: Dict = getattr(data, 'idx', None)
+            return _indx
+
+        def get_pos(data):
+            # Atomic coordinates tensor in dtype float32 concatenated at the 1st dim.
+            return data.pos.unsqueeze(0)
+
+        def get_fixed_mask(data):
+            # the same shape as `pos` with dtype int8. Exactly, only 0, 1.
+            # Optional. default is all ones.
+            mask = getattr(data, 'fixed', None)
+            if mask is not None:
+                mask = mask.unsqueeze(0)
+            return mask
+
+        def get_batch_indx(data):
+            # batch_indices in the form of 1d int64 th.Tensor [0, 0, 0, ..., 1, 1, ..., n]
+            # where the same number means the indexed data of the same sample.
+            return [len(dat.pos) for dat in data.to_data_list()] # or can directly store this attr and return `data.batch`
+
+        def get_init_dX(data):
+            # used for Dimer & other algo. requiring finite difference. Have the same shape & dtype as `pos`
+            # Optional.
+            return getattr(data, self.x_diff_attr, None)
+
+        def get_init_veloc(data):
+            # used for MD. The initial velocities that have the same shape & dtype as `pos`
+            # Optional.
+            veloc = getattr(data, 'velocity', None)
+            if veloc is not None:
+                veloc = veloc.unsqueeze(0)
+            return veloc
+
+    They are fully compatible with `torch_geometric.data.batch` object.
+    """
+    _ATTR_TYPE = {
+        'idx': '<U128',
+        'batch': '<i8',
+        'cell': '<f4',
+        'pos': '<f4',
+        'mask': '|i1',
+        'atomic_numbers': '<i4',
+        'x_diff': '<f4',
+        'velocity': '<f4',
+    }
+
+    # the following properties are must have implemented.
+
+    @abstractmethod
+    def __len__(self) -> int:
+        """ return the sample number in one batch """
+        pass
+
+    @property
+    @abstractmethod
+    def batch(self) -> Optional[th.Tensor]:
+        """
+        batch indices tensor in the form of 1-D int64 th.Tensor [0, 0, 0, ..., 1, 1, ..., n]
+            where the same number means the indexed data of the same sample.
+        """
+        pass
+
+    @batch.setter
+    @abstractmethod
+    def batch(self, value: Optional[th.Tensor]) -> None:
+        pass
+
+    @property
+    @abstractmethod
+    def pos(self) -> th.Tensor:
+        """
+        Atomic coordinates tensor in dtype float32 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
+        """
+        pass
+
+    @pos.setter
+    @abstractmethod
+    def pos(self, value: th.Tensor) -> None:
+        pass
+
+    @property
+    @abstractmethod
+    def cell(self) -> th.Tensor:
+        """
+        cell tensor in dtype float32 concatenated at the 1st dim. shape: (n_batch, 3, 3)
+        """
+        pass
+
+    @cell.setter
+    @abstractmethod
+    def cell(self, value: th.Tensor) -> None:
+        pass
+
+    @property
+    @abstractmethod
+    def atomic_numbers(self) -> th.Tensor:
+        """
+        Atomic number tensor in dtype int64 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, ).
+        """
+        pass
+
+    @atomic_numbers.setter
+    @abstractmethod
+    def atomic_numbers(self, value: th.Tensor) -> None:
+        pass
+
+    @property
+    def idx(self) -> Optional[List[str]]:
+        """
+        Optional. The sample name list. Each name must have less than 128 bytes.
+        """
+        return None
+
+    @idx.setter
+    def idx(self, value: Optional[List[str]]) -> None:
+        pass
+
+    @property
+    def fixed(self) -> Optional[th.Tensor]:
+        """
+        Optional. The atomic fixation tensor in dtype int8 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
+        element can only be 0 (fixed) or 1 (free).
+        """
+        return None
+
+    @fixed.setter
+    def fixed(self, value: Optional[th.Tensor]) -> None:
+        pass
+
+    @property
+    def velocity(self) -> Optional[th.Tensor]:
+        """
+        Optional. The atom velocity tensor in dtype float32 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
+        Only used for MD.
+        """
+        return None
+
+    @velocity.setter
+    def velocity(self, value: Optional[th.Tensor]) -> None:
+        pass
+
+    @property
+    def x_diff(self) -> Optional[th.Tensor]:
+        """
+        Optional. The atom difference tensor in dtype float32 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
+        Only used for Dimer or other algorithms which require finite differences.
+        """
+        return None
+
+    @x_diff.setter
+    def x_diff(self, value: Optional[th.Tensor]) -> None:
+        pass
+
+    def to_data_list(self) -> List[Any]:
+        """
+        Split batched data into the List of each sample.
+        Similar to torch_geometric.data.Batch.
+        Optional to override.
+        """
+        raise NotImplementedError(f'Please implement `self.to_data_list()` by overriding in the subclass.')
+
+def structures_io_dumper(path: str|None, mode: Literal['w', 'x', 'a'] = 'x', disable: bool = False):
+    """
+    Auxiliary function for structure IO. It will be added into Batch* methods as a general dumper.
+    if `path` is None, or `disable` is True,
+     a placeholder which contains all methods of ArrayDumper but does nothing when called will be assigned.
+    """
+    if (not disable) and (path is not None):
+        dumper = ArrayDumper(path, mode=mode, cache_size=4096, use_mmap=False)
+    else:
+        dumper = _ArrayDumperPlaceHolder(path)
+
+    return dumper
 
 def read_md_traj(
         path,
@@ -1072,6 +1392,111 @@ def read_md_traj(
                 kk += 1
         else:
             raise ValueError(f"Invalid file format: {path}. It may be not a MD dump file.")
+
+    bs = BatchStructures()
+    bs.append_from_lists(
+        smp_ids,
+        cell_list,
+        element_list,
+        numbers_list,
+        coo_t_list,
+        coo_list,
+        fixed_list,
+        energy_list,
+        force_list,
+    )
+    bs._check_id()
+    bs._check_len()
+
+    return bs
+
+def read_opt_structures(
+        path,
+        indices: List[int]|slice|int = -1,
+        is_copy: bool = True
+):
+    """
+    A specialized reader for dump files generated by Structure Optimization.
+    For `StructureOptimization` class, the information is as follows
+    with denoting shape [1, sumNi, n_atom] (irregular batch) as "sX":
+        group 1: 1-step
+            batch_indices[n_batch, ]
+            idx[n_batch, ], dtype='<U128', the name of structures.
+            cells[n_batch, 3, 3]
+            elements[sumNi]
+            pos[sX]
+            fixations[sX]
+            energies[sumNi]
+            forces[sX]
+    The coordinates type is forever 'Cartesian'.
+
+    Args:
+        path: the path to the dump file.
+        indices: the indices in each group of the arrays to read. A negative number means read all.
+        is_copy: whether to copy the arrays from the mmap file.
+            Note: if `is_copy` is False, the mmap file cannot be closed due to the exported pointers used by read arrays.
+             One must release all references to the mmap file first to close the memory map file.
+    Returns:
+        BatchStructures
+
+    """
+    reader = ArrayDumpReader(path)
+    raw_results = reader.read(groups=-1, indices=indices, is_copy=is_copy)
+    n_grp = len(raw_results)
+
+    smp_ids = list()
+    cell_list = list()
+    element_list = list()
+    numbers_list = list()
+    coo_t_list = list()
+    coo_list = list()
+    fixed_list = list()
+    energy_list = list()
+    force_list = list()
+
+    for i in range(n_grp):
+        if len(raw_results[f'group{i}'][0]) != 8:  # irregular situation
+            raise ValueError(f"Invalid file format: {path}. It may be not a Structure Optimization dumped file.")
+        (
+            batch_indices,
+            idx,
+            cells,
+            elements,
+            pos,
+            fixations,
+            energies,
+            forces
+        ) = raw_results[f'group{i}'][0]
+
+        n_batch = len(batch_indices)
+        _split_indices = np.cumsum(batch_indices)[:-1]
+        _cells = [_ for _ in cells]
+        _tol_atm_list = np.split(elements, _split_indices, axis=0)
+        _elements = list()
+        _numbers = list()
+        _id_per_frame = list()
+        for ii, _atml in enumerate(_tol_atm_list):
+            elements, _, numbers = elem_list_reduce(_atml)
+            _elements.append(elements)
+            _numbers.append(numbers)
+            _id_per_frame.append(ii)
+        _fixed = np.split(fixations, _split_indices, axis=0)
+        # main data
+        kk = 0
+        n_cyc = len(raw_results[f'group{i}'])
+        if n_cyc != 1:
+            raise RuntimeError(f'??? BUG: why is not the cycle number of structure optimization 1, but {n_cyc} cycles? Report us please! ???')
+        cell_list.extend(_cells)
+        element_list.extend(_elements)
+        numbers_list.extend(_numbers)
+        coo_t_list.extend(['C'] * n_batch)
+        fixed_list.extend(_fixed)
+        _x = np.split(pos, _split_indices, axis=0)
+        _f = np.split(forces, _split_indices, axis=0)
+        smp_ids.extend(idx.tolist())
+        coo_list.extend(_x)
+        energy_list.extend(energies.tolist())
+        force_list.extend(_f)
 
     bs = BatchStructures()
     bs.append_from_lists(

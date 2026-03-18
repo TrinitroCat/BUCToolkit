@@ -17,7 +17,7 @@ from BM4Ckit import BatchOptim
 from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
 from BM4Ckit.BatchOptim.TS.Dimer import Dimer
 from BM4Ckit.BatchOptim.TS.Dimer_linseach_momt import DimerLinsMomt
-from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl, DumpStructures
+from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
 from BM4Ckit.utils._CheckModules import check_module
@@ -100,8 +100,6 @@ class StructureOptimization(_CONFIGS):
         else:
             self.pygData = None
         self.data_type = data_type
-
-        self.reload_config(config_file)
 
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
@@ -462,7 +460,6 @@ class StructureOptimization(_CONFIGS):
                             idx,
                             get_atomic_number(val_data).squeeze(0),
                             CELL,
-                            ['C'] * len(idx),
                             fin_x,
                             fixed_mask[0],
                             fin_ener,
@@ -488,10 +485,6 @@ class StructureOptimization(_CONFIGS):
                     if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
                 self.dumper.flush()
                 if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
-            else:
-                structures = self.dumper._structures
-                structures.change_mode('L')
-                return structures
 
         except Exception as e:
             th.cuda.synchronize()

@@ -21,7 +21,7 @@ import numpy as np
 from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BM4Ckit.utils.index_ops import index_reduce
-from BM4Ckit.BatchStructures.StructuresIO import ArrayDumper, _ArrayDumperPlaceHolder
+from BM4Ckit.BatchStructures.StructuresIO import structures_io_dumper
 
 
 class _BaseMD:
@@ -75,6 +75,13 @@ class _BaseMD:
         # Adv. API `MolecularDynamics` turns on it.
         self._HOLD_DUMPER = False
 
+        # set dumper
+        # Note: cache_size: NOW it be hard coded as 4 MB / 4096 bytes
+        self.dumper = structures_io_dumper(
+            path=output_file,
+            mode='x',
+        )
+
         # logging
         self.logger = logging.getLogger('Main.MD')
         self.logger.setLevel(logging.INFO)
@@ -86,13 +93,6 @@ class _BaseMD:
             self.logger.addHandler(self.log_handler)
         else:
             self.log_handler = self.logger.handlers[0]
-        # set dumper
-        # Note: cache_size: NOW it be hard coded as 4 MB
-        if self.output_file is not None:
-            self.dumper = ArrayDumper(self.output_file, cache_size=4096, use_mmap=False)
-        else:
-            self.logger.warning("No output file specified. Will not dump trajectory.")
-            self.dumper = _ArrayDumperPlaceHolder(self.output_file)
 
     def reset_logger_handler(self, handler: str|logging.StreamHandler|logging.FileHandler):
         for _hdl in list(self.logger.handlers):
