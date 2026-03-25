@@ -14,7 +14,7 @@ import warnings
 import numpy as np
 import torch as th
 from torch import nn
-from BM4Ckit.BatchOptim._utils._warnings import FaildToConvergeWarning
+from BM4Ckit.BatchOptim._utils._warnings import NotConvergeWarning
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
 
@@ -43,7 +43,7 @@ class _BaseMC:
         self.batch_tensor = None
         self.atom_masks = None
         self.T_now = None
-        warnings.filterwarnings('always', category=FaildToConvergeWarning)
+        warnings.filterwarnings('always', category=NotConvergeWarning)
         warnings.filterwarnings('always', )
 
         self.iterform = iter_scheme

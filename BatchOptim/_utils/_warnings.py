@@ -6,6 +6,6 @@
 #  File: _warnings.py
 #  Environment: Python 3.12
 
-class FaildToConvergeWarning(Warning):
+class NotConvergeWarning(Warning):
     def __init__(self, *args: object) -> None:
         super().__init__(*args)
