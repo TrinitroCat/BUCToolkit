@@ -16,7 +16,6 @@ from torch import nn
 from BM4Ckit import BatchOptim
 from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
 from BM4Ckit.BatchOptim.TS.Dimer import Dimer
-from BM4Ckit.BatchOptim.TS.Dimer_linseach_momt import DimerLinsMomt
 from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
@@ -106,7 +105,7 @@ class StructureOptimization(_CONFIGS):
         self._has_load_data = False
         self._data_loader = None
 
-        __relax_dict = {'CG': CG, 'BFGS': QN, 'FIRE': FIRE, 'DIMER': Dimer, 'DIMER_LS': DimerLinsMomt}
+        __relax_dict = {'CG': CG, 'BFGS': QN, 'FIRE': FIRE, 'DIMER': Dimer}
         if self.RELAXATION is not None:
             if self.TRANSITION_STATE is not None:
                 self.logger.warning(
@@ -315,10 +314,7 @@ class StructureOptimization(_CONFIGS):
 
                 self.__check_old: th.Tensor|None = None
                 update_batch = PygBatchUpdater()
-                if mode == 'ts':
-                    update_batch_rot = PygBatchUpdater()
-                else:
-                    update_batch_rot = None
+                update_batch_rot = PygBatchUpdater()
 
             else:
                 model_wrap = _Model_Wrapper_dgl(_model)
@@ -422,7 +418,7 @@ class StructureOptimization(_CONFIGS):
                         update_batch.initialize()
                         if mode == 'minimize':
                             optimizer: BatchOptim.FIRE
-                            optimizer.set_update_batch(update_batch)
+                            optimizer.set_batch_updater(update_batch, update_batch_rot)
                             fin_ener, fin_x, fin_grad = optimizer.run(
                                 func=model_wrap.Energy,
                                 X=X_init,
@@ -437,7 +433,7 @@ class StructureOptimization(_CONFIGS):
                             )
                         else:  # i.e., mode == 'ts'
                             optimizer: BatchOptim.Dimer
-                            optimizer.set_update_batch(update_batch, update_batch_rot)
+                            optimizer.set_batch_updater(update_batch, update_batch_rot)
                             fin_ener, fin_x, fin_grad = optimizer.run(
                                 func=model_wrap.Energy,
                                 X=X_init,

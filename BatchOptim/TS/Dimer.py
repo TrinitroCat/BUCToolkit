@@ -166,7 +166,7 @@ class FindMinEigen:
         """
         return func_args, func_kwargs, grad_func_args, grad_func_kwargs
 
-    def set_update_batch(
+    def set_batch_updater(
             self,
             method: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]]
     ) -> None:
@@ -348,6 +348,8 @@ class FindMinEigen:
         gT = Hv - vHv.index_select(1, self.batch_scatter) * v
         gT_norm = th.sqrt(th.sum(index_ops.index_inner_product(gT, gT, 1, self.batch_scatter), dim=-1, keepdim=True))
         w = gT / (gT_norm.index_select(1, self.batch_scatter) + 1e-20)  # (1, sumB*A, N)
+        # cache for dynamically changed batch indices due to convergence, avoiding reallocate mem.
+        batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
         for i in range(self.maxiter_rot):
             # threshold. Only need v in the negative cone, i.e., vHv < 0.
             converge_mask_curve = (vHv < self.Curve_thres)
@@ -390,7 +392,7 @@ class FindMinEigen:
                 atom_masks_ = atom_masks[:, select_mask, :]
                 batch_tensor_ = self.batch_tensor[select_mask_short]
                 batch_scatter_ = th.repeat_interleave(
-                    th.arange(0, len(batch_tensor_), dtype=th.int64, device=self.device),
+                    batch_tensor_indx_cache[:len(batch_tensor_)],
                     batch_tensor_,
                     dim=0
                 )
@@ -599,7 +601,7 @@ class Dimer:
         pass
 
 
-    def set_update_batch(
+    def set_batch_updater(
             self,
             method_trans: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]],
             method_rot: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]] | None = None,
@@ -622,7 +624,7 @@ the method of updating function arguments for a mask.
         Returns: None
         """
         if method_rot is not None:
-            self.Rotator.set_update_batch(method_rot)
+            self.Rotator.set_batch_updater(method_rot)
         else:
             self.Rotator._hold_samples = True
         self._update_batch = method_trans
@@ -756,6 +758,7 @@ the method of updating function arguments for a mask.
         y_old = th.full_like(y, th.inf, device=self.device)
         eig_thres_neg = - 0.01
         eig_thres_pos = 0.01
+        batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
         t_st = time.perf_counter()
         with th.no_grad():
             for i in range(self.maxiter_trans):
@@ -832,7 +835,7 @@ the method of updating function arguments for a mask.
                 atom_masks_ = atom_masks[:, select_mask, :]
                 batch_tensor_ = self.batch_tensor[select_mask_short]
                 batch_scatter_ = th.repeat_interleave(
-                    th.arange(0, len(batch_tensor_), dtype=th.int64, device=self.device),
+                    batch_tensor_indx_cache[:len(batch_tensor_)],
                     batch_tensor_,
                     dim=0
                 )
