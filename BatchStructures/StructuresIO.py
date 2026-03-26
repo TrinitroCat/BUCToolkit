@@ -574,7 +574,10 @@ class ArrayDumper:
         Returns:
 
         """
-        self._mmp_f.flush()
+        if (self._mmp_f is None) or self._mmp_f.closed:
+            warnings.warn(f"The dumper does not open yet. Please call `self.start(...)/start_from_arrays(...)` first.")
+        else:
+            self._mmp_f.flush()
 
     def flush(self):
         """
@@ -582,7 +585,7 @@ class ArrayDumper:
         Returns:
 
         """
-        self._mmp_f.flush()
+        self.dump()
 
     def _tmp_close(self):
         """
@@ -1250,6 +1253,7 @@ class StandardInput(ABC):
     def x_diff(self, value: Optional[th.Tensor]) -> None:
         pass
 
+    @abstractmethod
     def to_data_list(self) -> List[Any]:
         """
         Split batched data into the List of each sample.

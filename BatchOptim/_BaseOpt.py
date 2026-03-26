@@ -16,6 +16,7 @@ import torch as th
 from torch import nn
 from BM4Ckit.BatchOptim._utils._line_search import LineSearch
 from BM4Ckit.BatchOptim._utils._warnings import NotConvergeWarning
+from BM4Ckit.utils.setup_loggers import has_any_handler
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BM4Ckit.utils.index_ops import index_reduce, index_inner_product
 
@@ -102,7 +103,7 @@ class _BaseOpt(ABC):
         self.logger = logging.getLogger('Main.OPT')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(message)s')
-        if len(self.logger.handlers) == 0:
+        if not has_any_handler(self.logger):
             log_handler = logging.StreamHandler(sys.stdout, )
             log_handler.setLevel(logging.INFO)
             log_handler.setFormatter(formatter)
@@ -280,7 +281,6 @@ the method of updating function arguments for a mask.
         # of each iteration to update data.
         #
         ####################################################################################
-        energies_old = th.inf
         is_main_loop_converge = False
         t_st = time.perf_counter()
         # Section: initialize
@@ -303,9 +303,7 @@ the method of updating function arguments for a mask.
                         )
                     if energies.shape[0] != n_true_batch:
                         raise ValueError(f"shape of output ({energies.shape}) does not match given batch indices")
-                    self.is_concat_X = True
-                else:
-                    self.is_concat_X = False
+                self.is_concat_X = (batch_indices is not None)
                 # calc. grad
                 if is_grad_func_contain_y:
                     X_grad = grad_func_(energies, X, *grad_func_args, **grad_func_kwargs)
@@ -314,6 +312,7 @@ the method of updating function arguments for a mask.
                 if X_grad.shape != X.shape:
                     raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
             energies = energies.detach()
+            energies_old = th.full_like(energies, th.inf)
             X_grad = X_grad.detach()
             X_grad.mul_(atom_masks)
             X = X.detach()
@@ -325,7 +324,7 @@ the method of updating function arguments for a mask.
                 # Calc. Criteria
                 E_diff = energies - energies_old
                 E_eps = th.abs(E_diff)  # (n_batch, )
-                energies_old = energies
+                energies_old.copy_(energies)
                 # manage the irregular tensors
                 if self.is_concat_X:
                     # (1, n_batch*n_atom, 3)

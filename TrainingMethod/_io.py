@@ -29,6 +29,7 @@ from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 from BM4Ckit.utils._CheckModules import check_module
 from BM4Ckit import Structures
 from BM4Ckit.utils.ElemListReduce import elem_list_reduce
+from BM4Ckit.utils.setup_loggers import has_any_handler
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BM4Ckit.BatchStructures.StructuresIO import structures_io_dumper
 
@@ -295,7 +296,7 @@ class _CONFIGS(object):
             self.log_handler = logging.StreamHandler(stream=sys.stdout)
             self.log_handler.setLevel(logging.INFO)
             self.log_handler.setFormatter(formatter)
-        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
+        if not has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
 
     def reload_config(self, config_file_path: str| None = None) -> None:
         """
@@ -434,11 +435,17 @@ class _CONFIGS(object):
 
     @PREDICTIONS_SAVE_FILE.setter
     def PREDICTIONS_SAVE_FILE(self, value):
+        if not self.SAVE_PREDICTIONS:
+            self.logger.warning(
+                f'WARNING: You are setting a new predictions save file, while `SAVE_PREDICTIONS` is still False.\n'
+                f'Hence, NOTHING WILL HAPPEN. BYE!'
+            )
+            return
         self._PREDICTIONS_SAVE_FILE = value
         self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
 
 def compare_tensors(X1: th.Tensor, X2: th.Tensor):
-    """Compare two tensors."""
+    """Compare two tensors. Return True if they are the same, False otherwise."""
     char1 = (X1.untyped_storage().data_ptr(),
              X1.storage_offset(),
              tuple(X1.shape),
@@ -456,6 +463,9 @@ def compare_tensors(X1: th.Tensor, X2: th.Tensor):
 
 
 class _Model_Wrapper_pyg:
+
+    __slots__ = ('_model', 'forces', 'X', )
+
     def __init__(self, model) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
@@ -757,28 +767,28 @@ class DumpStructures:
             raise ValueError(f'The number of `idx` is expected to be batch size {n_batch}, but got {len(idx)}.')
         idx = np.array(idx, dtype='<U128')
         if elements.ndim == 2:
-            elements.squeeze_(0)
+            elements = elements.squeeze(0)
         elif elements.ndim != 1:
             raise ValueError(f'`elements` should be a 1D array, but got {elements.shape}')
         elements = elements.numpy(force=True).astype(np.int64) if isinstance(elements, th.Tensor) else np.asarray(elements, dtype=np.int64)
         # pos_type = np.array(pos_type)
         if pos.ndim == 3:
-            pos.squeeze_(0)
+            pos = pos.squeeze(0)
         elif pos.ndim != 2:
             raise ValueError(f'`pos` should be a 2D array, but got {pos.shape}')
         pos = pos.numpy(force=True).astype(np.float32) if isinstance(pos, th.Tensor) else np.asarray(pos, dtype=np.float32)
         if forces.ndim == 3:
-            forces.squeeze_(0)
+            forces = forces.squeeze(0)
         if forces.shape != pos.shape:
             raise ValueError(f'`forces` should have the same shape as `pos`, but got {forces.shape} rather than {pos.shape}.')
         forces = forces.numpy(force=True).astype(np.float32) if isinstance(forces, th.Tensor) else np.asarray(forces, dtype=np.float32)
         if energies.ndim == 2:
-            energies.squeeze_(0)
+            energies = energies.squeeze(0)
         elif energies.ndim != 1:
             raise ValueError(f'`energies` should be a 1D array, but got {energies.shape}')
         energies = energies.numpy(force=True)
         if fixations.ndim == 3:
-            fixations.squeeze_(0)
+            fixations = fixations.squeeze(0)
         if fixations.shape != pos.shape:
             raise ValueError(f'`fixations` should have the same shape as `pos`, but got {fixations.shape} rather than {pos.shape}.')
         fixations = fixations.numpy(force=True).astype(np.float32) if isinstance(fixations, th.Tensor) else np.asarray(fixations, dtype=np.float32)
@@ -949,11 +959,12 @@ class PygBatchUpdater:
         # adding a buffer
         is_new = (self.__check_old is None) or (converge_check.shape != self.__check_old.shape)
         if is_new:
-            self.__check_old = converge_check
-            self.__g_old = func_args[0]
             if th.all(converge_check):  # if all are unconverged. usually occurred for new ones.
+                self.__check_old = None
                 return func_args, func_kwargs, grad_func_args, grad_func_kwargs
             else:
+                self.__check_old = converge_check
+                self.__g_old = func_args[0]
                 return self._reallocate(converge_check, func_args, func_kwargs, grad_func_args, grad_func_kwargs)
 
         elif th.all(th.eq(self.__check_old, converge_check)):
