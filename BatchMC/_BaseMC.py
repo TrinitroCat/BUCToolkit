@@ -17,6 +17,7 @@ from torch import nn
 from BM4Ckit.BatchOptim._utils._warnings import NotConvergeWarning
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BM4Ckit.utils.scatter_reduce import scatter_reduce
+from BM4Ckit.utils.setup_loggers import has_any_handler
 
 
 class _BaseMC:
@@ -58,7 +59,7 @@ class _BaseMC:
         self.logger = logging.getLogger('Main.OPT')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(message)s')
-        if not self.logger.hasHandlers():
+        if not has_any_handler(self.logger):
             log_handler = logging.StreamHandler(sys.stdout, )
             log_handler.setLevel(logging.INFO)
             log_handler.setFormatter(formatter)

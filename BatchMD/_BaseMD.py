@@ -22,6 +22,7 @@ from BM4Ckit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMB
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BM4Ckit.utils.index_ops import index_reduce
 from BM4Ckit.BatchStructures.StructuresIO import structures_io_dumper
+from BM4Ckit.utils.setup_loggers import has_any_handler, clear_all_handlers
 
 
 class _BaseMD:
@@ -86,21 +87,22 @@ class _BaseMD:
         self.logger = logging.getLogger('Main.MD')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(message)s')
-        if len(self.logger.handlers) <= 0:
+        if not has_any_handler(self.logger):
             self.log_handler = logging.StreamHandler(sys.stdout)
             self.log_handler.setLevel(logging.INFO)
             self.log_handler.setFormatter(formatter)
             self.logger.addHandler(self.log_handler)
-        else:
-            self.log_handler = self.logger.handlers[0]
 
     def reset_logger_handler(self, handler: str|logging.StreamHandler|logging.FileHandler):
-        for _hdl in list(self.logger.handlers):
-            self.logger.removeHandler(_hdl)
-            try:
-                _hdl.close()
-            except Exception as ehdl:
-                warnings.warn(f'Failed to close handler {_hdl}: {ehdl}', RuntimeWarning)
+        """
+        Clear all logging handlers including current logger and its ancestors, and reset one.
+        Args:
+            handler: the new handler.
+
+        Returns:
+
+        """
+        clear_all_handlers(self.logger)
         formatter = logging.Formatter('%(message)s')
         if isinstance(handler, logging.StreamHandler):
             self.log_handler = logging.StreamHandler(stream=handler)

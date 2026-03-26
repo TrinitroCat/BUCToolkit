@@ -16,12 +16,12 @@ from torch import nn
 from BM4Ckit import BatchOptim
 from BM4Ckit.BatchOptim.minimize import CG, QN, FIRE
 from BM4Ckit.BatchOptim.TS.Dimer import Dimer
-from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from BM4Ckit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl, PygBatchUpdater
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER
 from BM4Ckit.utils._CheckModules import check_module
 from BM4Ckit.utils.ElemListReduce import elem_list_reduce
-from BM4Ckit.TrainingMethod._io import PygBatchUpdater
+from BM4Ckit.utils.setup_loggers import has_any_handler
 
 
 class StructureOptimization(_CONFIGS):
@@ -200,7 +200,7 @@ class StructureOptimization(_CONFIGS):
             mode: choose whether `minimize` or `ts`.
         """
         # check logger
-        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
+        if has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
@@ -370,9 +370,11 @@ class StructureOptimization(_CONFIGS):
                     batch_indx:List = get_batch_indx(val_data)
                     # initial atom coordinates
                     if self.data_type == 'pyg':
-                        X_init = val_data.pos.unsqueeze(0)
+                        X_init = val_data.pos.unsqueeze(0) if val_data.pos.dim() == 2 else val_data.pos
                     else:
-                        X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
+                        _ = val_data.nodes['atom'].data['pos']
+                        X_init = _.unsqueeze(0) if _.dim() == 2 else _
+                        del _
                     # initialize X_diff
                     if mode == 'ts':
                         X_diff = get_init_dX(val_data)
@@ -416,6 +418,7 @@ class StructureOptimization(_CONFIGS):
                     # relax
                     with th.no_grad():
                         update_batch.initialize()
+                        update_batch_rot.initialize()
                         if mode == 'minimize':
                             optimizer: BatchOptim.FIRE
                             optimizer.set_batch_updater(update_batch, update_batch_rot)
@@ -492,6 +495,7 @@ class StructureOptimization(_CONFIGS):
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
+            self.dumper.close()
 
     def relax(self, model):
         """

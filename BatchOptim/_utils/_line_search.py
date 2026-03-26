@@ -17,6 +17,7 @@ import torch as th
 from torch import nn
 
 from BM4Ckit.utils.index_ops import index_reduce, index_inner_product
+from BM4Ckit.utils.setup_loggers import has_any_handler
 
 
 class LineSearch:
@@ -81,13 +82,11 @@ class LineSearch:
         self.logger = logging.getLogger('Main.OPT.LineSearch')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(message)s')
-        if len(self.logger.handlers) < 1:
+        if not has_any_handler(self.logger):
             log_handler = logging.StreamHandler(sys.stdout, )
             log_handler.setLevel(logging.INFO)
             log_handler.setFormatter(formatter)
             self.logger.addHandler(log_handler)
-        self.logger.propagate = False
-        pass
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -330,7 +329,8 @@ the method of updating function arguments for a mask.
             g_l: function directional gradient of the low endpoint
         Returns:
             neg_Delta_mask: the mask shows where Delta (b^2 - 4 * a * c) < 0, leading to imag. root.
-            s1, s2: the 2 stationary points, corresponding to the 2 roots of 2nd order equation of derivation.
+            s1: the shorter stationary points corresponding to the smaller root of 2nd order equation of derivation.
+            s2: the longer stationary points corresponding to the larger root of 2nd order equation of derivation.
 
         """
         _h = x_h - x_l
@@ -519,7 +519,7 @@ the method of updating function arguments for a mask.
 
         _steplength.clamp_min_(self._min_steplength_cache)
         if not is_converge:
-            warnings.warn(f'linear search did not converge in {self.maxiter} steps.', RuntimeWarning)
+            self.logger.warning(f'WARNING: linear search did not converge in {self.maxiter} steps.')
         return _steplength  # (1, B, 1)/(B, 1, 1)
 
     def _exact(
@@ -620,14 +620,20 @@ the method of updating function arguments for a mask.
             return _max_steplength
         elif th.all(armijo_mask) and _is_grad_neg:
             self.logger.warning(
-                f'WARNING: the function sufficiently descents even at the max steplength {_max_steplength}. '
+                f'WARNING: the function sufficiently descents even at the max steplength {_max_steplength.numpy(force=True).item()}. '
                 f'The neighborhood of current point may be too flat. The max steplength will be used.'
             )
             return _max_steplength
         converge_mask = (armijo_mask & (curve_mask | _is_grad_neg))  # (1, B, 1)
         converge_check = th.atleast_1d(converge_mask.squeeze())  # a short version of conv. mask
+        cumulative_mask = th.full_like(_steplength, False, dtype=th.bool)
+        backup_steplength = th.full_like(_steplength, 1.e-4)
         _y_right = _y_right.reshape(_long_shape)
         for i in range(self.maxiter):
+            # back up the steplength that at least met Armijo cond.
+            first_time_mask = armijo_mask & (~cumulative_mask)  # the mask of first time meet Armijo
+            backup_steplength = th.where(first_time_mask, _steplength, backup_steplength)
+            cumulative_mask.bitwise_or_(armijo_mask)
             # Section: select unconverged samples
             if not self._hold_samples:
                 func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
@@ -814,11 +820,11 @@ the method of updating function arguments for a mask.
                 _neg_D_mask,
                 _low_order_choice,
                 th.where(
-                    (interp3_1 > _left_ * 1.1) & (interp3_1 < _right_ * 0.9),
-                    interp3_1,
+                    (interp3_2 > _left_ * 1.1) & (interp3_2 < _right_ * 0.9),   # firstly use longer steplength to avoid too short interval
+                    interp3_2,
                     th.where(
-                        (interp3_2 > _left_ * 1.1) & (interp3_2 < _right_ * 0.9),
-                        interp3_2,
+                        (interp3_1 > _left_ * 1.1) & (interp3_1 < _right_ * 0.9),
+                        interp3_1,
                         _low_order_choice
                     )
                 )
@@ -858,9 +864,11 @@ the method of updating function arguments for a mask.
             # reinsurance
             if th.max(th.abs(_steplength - _steplength_old)) < 1.e-3:
                 self.logger.warning(
-                    f'WARNING: linear search did not converge but steplength has fixed at '
-                    f'{' '.join([f'{_: 6.4f}' for _ in th.atleast_1d(_steplength.squeeze()).tolist()])}.'
+                    f'WARNING: linear search did not converge but steplength has fixed '
+                    f'after {i + 1} steps. Try to use Armijo steplength...'
                 )
+                backup_steplength = th.where(backup_steplength < 1.2e-4, _steplength, backup_steplength)  # to avoid too short steplen
+                _steplength = th.where(converge_check.reshape(_long_shape), _steplength, backup_steplength)
                 is_converge = True
                 break
             _steplength_old.copy_(_steplength)
@@ -878,7 +886,7 @@ the method of updating function arguments for a mask.
 
         if not is_converge:
             self.logger.warning(f'WARNING: linear search did not converge in {self.maxiter} steps.')
-            #warnings.warn(f'linear search did not converge in {self.maxiter} steps.', RuntimeWarning)
+            _steplength = th.where(converge_check.reshape(_long_shape), _steplength, backup_steplength)
         _steplength.clamp_min_(self._min_steplength_cache)
         return _steplength  # (n_batch, 1, 1)
 

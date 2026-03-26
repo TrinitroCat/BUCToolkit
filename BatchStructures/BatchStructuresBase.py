@@ -27,6 +27,7 @@ import numpy as np
 
 from BM4Ckit.utils._para_flatt_list import flatten
 from BM4Ckit.Preprocessing.write_files import WritePOSCARs, write_xyz, write_cif
+from BM4Ckit.utils.setup_loggers import has_any_handler
 
 
 class BatchStructures(object):
@@ -135,7 +136,7 @@ class BatchStructures(object):
         self.logger = logging.getLogger('Main.BS')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(message)s')
-        if not self.logger.hasHandlers():
+        if not has_any_handler(self.logger):
             log_handler = logging.StreamHandler(sys.stdout, )
             log_handler.setLevel(logging.INFO)
             log_handler.setFormatter(formatter)
