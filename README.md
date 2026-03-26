@@ -1,12 +1,13 @@
-![image](logo.png)
-# BM4Ckit
-## Batched Machine-learning for Catalysts kit
+![image](logo_cut.jpg)
+# BUCToolkit
+## Batch-upscaled Catalysis Toolkit
 A Python-based package containing various tools for machine learning applied in catalytic chemistry, 
-including reading, writing, filtering, modifying, and format conversion of batched structure files, training ML models, model predictions, ML-potential-based batched structure optimization and molecular dynamics, etc.
+including reading, writing, filtering, modifying, and format conversion of batched structure files, 
+training deep learning (DL) models based on the PyTorch, model predictions, DL-potential-based batched structure optimization and molecular dynamics, etc.
 
-Manuals would be completed soon. You can find the current manuals in [Manual](Manual/), and the Wiki: [Wiki](https://hectopasca1.github.io/BM4Ckit_wiki/).
+Manuals would be completed soon. You can find the current manuals in [Manual](Manual/).
 
-The project is still in an early version and may change significantly in the future.
+The project is still a beta version and may change in the future.
 
 These following third-party libraries are used:
 - **PyTorch** (BSD-3-Clause License), Copyright © 2016-present Facebook Inc.  

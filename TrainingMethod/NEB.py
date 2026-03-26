@@ -197,7 +197,10 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     return data.atomic_numbers.unsqueeze(0)
 
                 def get_fixed_mask(data):
-                    return data.fixed
+                    mask = getattr(data, 'fixed', None)
+                    if mask is not None:
+                        mask = mask.unsqueeze(0)
+                    return mask
 
                 def rebatched_graph(single_graph, N_images):
                     """ expand batches """
@@ -316,11 +319,10 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                         idx,
                         get_atomic_number(dataIS).squeeze(0),
                         get_cell_vec(dataIS),
-                        ['C'] * len(idx),
                         _X.flatten(0, 1),
-                        th.ones_like(_X.flatten(0, 1), dtype=th.int8),
+                        fixed_atom_tensor,
                         _energy,
-                        out_grad.flatten(0, 1),
+                        - out_grad.flatten(0, 1),
                     )
 
                     # Print info
@@ -333,10 +335,6 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                             if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
                         self.dumper.flush()
                         if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
-                    else:
-                        structures = self.dumper._structures
-                        structures.change_mode('L')
-                        return structures
 
                 except Exception as e:
                     self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')

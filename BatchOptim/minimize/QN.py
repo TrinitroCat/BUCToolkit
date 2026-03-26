@@ -8,9 +8,13 @@ Quasi-Newton Algorithm for optimization.
 #  Environment: Python 3.12
 
 from typing import Literal
+import os
+
+import torch as th
 
 from BM4Ckit.BatchOptim._BaseOpt import _BaseOpt
-import torch as th
+
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 
 class QN(_BaseOpt):
@@ -38,11 +42,11 @@ class QN(_BaseOpt):
     """
     def __init__(
             self,
-            iter_scheme: Literal['BFGS', 'Newton'],
+            iter_scheme: Literal['BFGS', ],
             E_threshold: float = 1e-3,
             F_threshold: float = 0.05,
             maxiter: int = 100,
-            linesearch: Literal['Backtrack', 'Wolfe', 'NWolfe', '2PT', '3PT', 'Golden', 'Newton', 'None'] = 'Backtrack',
+            linesearch: Literal['Backtrack', 'B', 'Wolfe', 'W', 'MT', 'EXACT', 'None', 'N'] = 'Backtrack',
             linesearch_maxiter: int = 10,
             linesearch_thres: float = 0.02,
             linesearch_factor: float = 0.6,
@@ -98,7 +102,14 @@ class QN(_BaseOpt):
         self.Ident = (th.eye(self.n_atom * self.n_dim, device=self.device).unsqueeze(0)).expand(self.n_batch, -1, -1)
         self.Ident = self.Ident.reshape(self.n_batch, self.n_atom, self.n_dim, self.n_atom, self.n_dim).contiguous()
 
-    def _update_direction(self, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, X: th.Tensor) -> th.Tensor:
+    def _update_direction(
+            self,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
+            X: th.Tensor,
+            batch_scatter_indices: th.Tensor | None,
+    ) -> th.Tensor:
         """
         Override this method to implement X update algorithm.
         Args:
@@ -119,29 +130,19 @@ class QN(_BaseOpt):
             p = - th.einsum('ijklm, ilm -> ijk', H_inv_now, g)  # (n_batch, n_atom*3, n_atom*3) @ (n_batch, n_atom*3, 1)
             return p
 
-        elif self.iterform == 'Newton':
-            # Hessian
-            H = th.zeros((self.n_batch, self.n_atom * self.n_dim, self.n_atom * self.n_dim), device=self.device)
-            hess_mask = th.zeros(self.n_batch, self.n_atom * self.n_dim, 1, device=self.device)
-            for i in range(self.n_atom * self.n_dim):
-                hess_mask[:, i] = 1.
-                H_line = th.where(
-                    self.converge_mask[:, :1, :1],
-                    hess_mask,
-                    th.autograd.grad(g, X, hess_mask, retain_graph=True)[0]
-                )  # (n_batch, n_atom*n_dim, 1)
-                H[:, :, i] = H_line.squeeze(-1)
-                hess_mask[:, i] = 0.
-            del H_line
-            H = H.detach()
-            g = g.detach()
-            p = - th.linalg.solve(H, g)
-            return p.reshape(_shape).contiguous()
-
         else:
             raise NotImplementedError
 
-    def _update_algo_param(self, select_mask: th.Tensor, g: th.Tensor, g_old: th.Tensor, p: th.Tensor, displace: th.Tensor) -> None:
+    def _update_algo_param(
+            self,
+            select_mask: th.Tensor,
+            select_mask_short,
+            batch_scatter_indices,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
+            displace: th.Tensor
+    ) -> None:
         """
         Override this method to update the parameters of X update algorithm i.e., self.iterform.
 
@@ -191,7 +192,9 @@ class QN(_BaseOpt):
         ) + gamma * th.einsum('ijk, ilm-> ijklm', displace, displace)
 
         if self.is_concat_X:
-            self.H_inv[:, select_mask][..., select_mask, :] = H_inv_now
+            tmp = self.H_inv[:, select_mask]
+            tmp[..., select_mask, :] = H_inv_now
+            self.H_inv[:, select_mask] = tmp
         else:
             self.H_inv[select_mask] = H_inv_now
 

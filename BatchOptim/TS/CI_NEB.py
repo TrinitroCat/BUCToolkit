@@ -270,7 +270,7 @@ class CI_NEB:
             if output_grad:
                 _energy, _X, out_grad = oup
             else:
-                _energy, _X, plst = oup
+                _energy, _X = oup
         # final print
         if self.verbose:
             max_ener, max_indx = th.max(_energy, dim=0)

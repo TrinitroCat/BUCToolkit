@@ -264,6 +264,7 @@ class ConstrNVT(_rConstrBase):
                     * th.normal(0., sigma, size=(n_batch,), device=self.device)
             )  # Unit: eV/Ang
             # Rescaling factor
+            self.Ekt_vir.clamp_(1e-20, )
             alpha = th.sqrt(self.Ekt_vir / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
             V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
             #print(f'constr_val_now: {self.constr_val_now}')

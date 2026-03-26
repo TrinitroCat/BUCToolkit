@@ -15,9 +15,8 @@ import time
 import traceback
 import warnings
 from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
-import joblib as jb
-import numpy as np
 
+import numpy as np
 import torch as th
 import yaml
 from torch import nn
@@ -30,7 +29,9 @@ from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 from BM4Ckit.utils._CheckModules import check_module
 from BM4Ckit import Structures
 from BM4Ckit.utils.ElemListReduce import elem_list_reduce
+from BM4Ckit.utils.setup_loggers import has_any_handler
 from BM4Ckit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
+from BM4Ckit.BatchStructures.StructuresIO import structures_io_dumper
 
 
 class _LoggingEnd:
@@ -61,6 +62,8 @@ class _CONFIGS(object):
 
     def __init__(self, config_file: str) -> None:
         self.config_file = config_file
+        self.logger = None
+        self.config = dict()
         self.DEVICE = 'cpu'
         self._OPTIM_DICT = {'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
                             'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'custom': None}
@@ -73,6 +76,8 @@ class _CONFIGS(object):
         self.param = None
         self._has_load_data = False
         self._data_loader = None
+        self.reload_config(config_file)
+        self.reset_logger()
 
     def set_device(self, device: str | th.device) -> None:
         """ reset the device that model would train on """
@@ -260,6 +265,39 @@ class _CONFIGS(object):
 
         return fix_mode_list
 
+    def reset_logger(self):
+        """
+        Reset logger & its handlers.
+        Returns: None
+
+        """
+        # logging
+        # logging.getLogger().disabled = True
+        self.logger = logging.getLogger('Main')
+        self.logger.propagate = False
+        self.logger.setLevel(logging.INFO)
+        # remove existing handlers
+        for _hdl in list(self.logger.handlers):
+            self.logger.removeHandler(_hdl)
+            try:
+                _hdl.close()
+            except Exception as ehdl:
+                warnings.warn(f'Failed to close handler {_hdl}: {ehdl}', RuntimeWarning)
+        formatter = logging.Formatter('%(message)s')
+        if self.REDIRECT:
+            output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+            # check whether path exists
+            if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
+            # set log handler
+            self.log_handler = logging.FileHandler(output_file, 'w', delay=True)
+            self.log_handler.setLevel(logging.INFO)
+            self.log_handler.setFormatter(formatter)
+        else:
+            self.log_handler = logging.StreamHandler(stream=sys.stdout)
+            self.log_handler.setLevel(logging.INFO)
+            self.log_handler.setFormatter(formatter)
+        if not has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
+
     def reload_config(self, config_file_path: str| None = None) -> None:
         """
         Reload the yaml configs file.
@@ -346,20 +384,20 @@ class _CONFIGS(object):
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
-        self.PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
-        while os.path.exists(self.PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
+        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
+        while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
             warnings.warn(
-                f'`PREDICTIONS_SAVE_FILE`: "{self.PREDICTIONS_SAVE_FILE}" already exists. '
-                f'It will be renamed as "{self.PREDICTIONS_SAVE_FILE}_1".',
+                f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
+                f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
                 RuntimeWarning
             )
-            self.PREDICTIONS_SAVE_FILE += '_1'
-        if (self.SAVE_PREDICTIONS) and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
+            self._PREDICTIONS_SAVE_FILE += '_1'
+        if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
-            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE, 10)
+            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
         else:
-            self.dumper = DumpStructures(None, 1)
+            self.dumper = DumpStructures(None, )
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
         if self.REDIRECT:
             self.OUTPUT_PATH = self.config.get('OUTPUT_PATH', './')
@@ -374,26 +412,6 @@ class _CONFIGS(object):
         if not isinstance(self.DEBUG_MODE, bool): raise TypeError('DEBUG_MODE must be a boolean.')
         self.CHECK_NAN = self.config.get('CHECK_NAN', True)
         if not isinstance(self.CHECK_NAN, bool): raise TypeError('CHECK_NAN must be a boolean.')
-
-        # logging
-        # logging.getLogger().disabled = True
-        self.logger = logging.getLogger('Main')
-        self.logger.propagate = False
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if self.REDIRECT:
-            output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-            # check whether path exists
-            if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
-            # set log handler
-            self.log_handler = logging.FileHandler(output_file, 'w', delay=True)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        else:
-            self.log_handler = logging.StreamHandler(stream=sys.stdout)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
 
         # loading atoms fixation info.
         self.FIXATIONS = self.config.get('FIXATIONS', None)
@@ -411,9 +429,23 @@ class _CONFIGS(object):
         # If Vibration Calc.
         self.VIBRATION = self.config.get('VIBRATION', None)
 
+    @property
+    def PREDICTIONS_SAVE_FILE(self):
+        return self._PREDICTIONS_SAVE_FILE
+
+    @PREDICTIONS_SAVE_FILE.setter
+    def PREDICTIONS_SAVE_FILE(self, value):
+        if not self.SAVE_PREDICTIONS:
+            self.logger.warning(
+                f'WARNING: You are setting a new predictions save file, while `SAVE_PREDICTIONS` is still False.\n'
+                f'Hence, NOTHING WILL HAPPEN. BYE!'
+            )
+            return
+        self._PREDICTIONS_SAVE_FILE = value
+        self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
 
 def compare_tensors(X1: th.Tensor, X2: th.Tensor):
-    """Compare two tensors."""
+    """Compare two tensors. Return True if they are the same, False otherwise."""
     char1 = (X1.untyped_storage().data_ptr(),
              X1.storage_offset(),
              tuple(X1.shape),
@@ -431,6 +463,9 @@ def compare_tensors(X1: th.Tensor, X2: th.Tensor):
 
 
 class _Model_Wrapper_pyg:
+
+    __slots__ = ('_model', 'forces', 'X', )
+
     def __init__(self, model) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
@@ -453,7 +488,7 @@ class _Model_Wrapper_pyg:
 
     def Energy(self, X, graph):
         self.X = X
-        graph.pos = self.X.reshape(-1,3)
+        graph.pos = self.X.reshape(-1,3).contiguous()
         y = self._model(graph)
         energy = y['energy']
         self.forces = y['forces']
@@ -470,7 +505,8 @@ class _Model_Wrapper_pyg:
         else:
             force = self.forces
             self.forces = None
-            return - force.reshape(origin_shape)
+            return - force.reshape(origin_shape).contiguous()
+
 
 class _Model_Wrapper_pyg_only_X:
     def __init__(self, model , graph) -> None:
@@ -677,67 +713,157 @@ class DumpStructures:
     """
     Dump structures calculated by `Predictor`, `StructureOptimization`, etc.
     """
-    def __init__(self, path:str|None=None, dump_freq: int=1):
+    def __init__(self, path:str|None=None):
         """
 
         Args:
             path: the path to dump structures. If None, structures will always store in memory.
-            dump_freq: the frequency of dump structures.
         """
-        self._structures = Structures()
-        self._structures.Mode = 'A'
-        #self._structures.change_mode('A')
-        self.save_path = path
-        self.parallelize = None
-        self.dump_freq = dump_freq
-        self.collect_count = 0
-        # initialize Structure
-        self.initialize()
+        self.dumper = structures_io_dumper(path, 'x', )
+        self._step = self._first_step
+        self._has_initialized = False
 
     def initialize(self):
-        self.idx: List = list()
-        # Batch info part
-        self.batch_indices_arr: List = list()  # storing the split point (ptr) in each array with n_atom length. It both concludes 0 and len(arr).
-        self.elem_batch: List = list()  # storing the split point (ptr) in each array with n_elem length. It both concludes 0 and len(arr).
-        # Structure part
-        self.cells: List = list()  # cell vectors
-        self.pos_type: List = list()  # coordinate type
-        self.pos: List = list()  # atomic coordinates
-        self.fixations: List = list()  # fixed atoms masks, 0 for fixed and 1 for free.
-        self.elem_arr: List = list()  # elements
-        self.num_arr: List = list()  # atom number of each element
-        # Properties part
-        self.energies: List = list()  # energies of structures. None | List[float]
-        self.forces: List = list()  # forces of structures. None | List[np.NdArray[N, 3]]
+        self.dumper.initialize()
 
     @staticmethod
     def _exit(errt = None, errv = None, tr = None):
         if errt is not None:
             raise errt(f'{errv}, {tr}')
 
-    def _check_data(self) -> int:
+    @staticmethod
+    def _reformat(
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
         """
-        Check structure numbers and return it.
-        Returns: the structure number.
+        Reformat input into dumping format.
+        Args:
+            batch_indices:
+            idx:
+            elements:
+            cells:
+            pos:
+            fixations:
+            energies:
+            forces:
+
+        Returns:
+            batch_indices, idx, cells, elements, pos, fixations, energies, forces
+        """
+        # Postprocessing & save TODO: reformat it in future to apply to all functions.
+        n_batch = len(batch_indices)
+        batch_indices = np.array(batch_indices, dtype=np.int64)
+        if cells.shape != (n_batch, 3, 3):
+            raise ValueError(f'`cells` is expected to have 3 dimensions (n_batch, 3, 3), but got {cells.shape}.')
+        cells = cells.numpy(force=True).astype(np.float32) if isinstance(cells, th.Tensor) else np.asarray(cells, dtype=np.float32)
+        if len(idx) != n_batch:
+            raise ValueError(f'The number of `idx` is expected to be batch size {n_batch}, but got {len(idx)}.')
+        idx = np.array(idx, dtype='<U128')
+        if elements.ndim == 2:
+            elements = elements.squeeze(0)
+        elif elements.ndim != 1:
+            raise ValueError(f'`elements` should be a 1D array, but got {elements.shape}')
+        elements = elements.numpy(force=True).astype(np.int64) if isinstance(elements, th.Tensor) else np.asarray(elements, dtype=np.int64)
+        # pos_type = np.array(pos_type)
+        if pos.ndim == 3:
+            pos = pos.squeeze(0)
+        elif pos.ndim != 2:
+            raise ValueError(f'`pos` should be a 2D array, but got {pos.shape}')
+        pos = pos.numpy(force=True).astype(np.float32) if isinstance(pos, th.Tensor) else np.asarray(pos, dtype=np.float32)
+        if forces.ndim == 3:
+            forces = forces.squeeze(0)
+        if forces.shape != pos.shape:
+            raise ValueError(f'`forces` should have the same shape as `pos`, but got {forces.shape} rather than {pos.shape}.')
+        forces = forces.numpy(force=True).astype(np.float32) if isinstance(forces, th.Tensor) else np.asarray(forces, dtype=np.float32)
+        if energies.ndim == 2:
+            energies = energies.squeeze(0)
+        elif energies.ndim != 1:
+            raise ValueError(f'`energies` should be a 1D array, but got {energies.shape}')
+        energies = energies.numpy(force=True)
+        if fixations.ndim == 3:
+            fixations = fixations.squeeze(0)
+        if fixations.shape != pos.shape:
+            raise ValueError(f'`fixations` should have the same shape as `pos`, but got {fixations.shape} rather than {pos.shape}.')
+        fixations = fixations.numpy(force=True).astype(np.float32) if isinstance(fixations, th.Tensor) else np.asarray(fixations, dtype=np.float32)
+
+        return batch_indices, idx, cells, elements, pos, fixations, energies, forces
+
+    def _first_step(
+            self,
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
+        """
+        First step to initialize
+        Args:
+            batch_indices:
+            idx:
+            elements:
+            cells:
+            pos:
+            fixations:
+            energies:
+            forces:
+
+        Returns:
 
         """
-        length_list = [
-            len(self.batch_indices_arr),
-            len(self.elem_batch),
-            len(self.idx),
-            len(self.cells),
-            len(self.elem_arr),
-            len(self.num_arr),
-            len(self.pos_type),
-            len(self.pos),
-            len(self.fixations),
-            len(self.energies),
-            len(self.forces),
-        ]
-        if len(set(length_list)) != 1:
-            raise RuntimeError(f'structure numbers of some attributes are inconsistent.')
+        if self._has_initialized:
+            self.initialize()
+        batch_indices, idx, cells, elements, pos, fixations, energies, forces = self._reformat(
+            batch_indices,
+            idx,
+            elements,
+            cells,
+            pos,
+            fixations,
+            energies,
+            forces,
+        )
+        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.step(
+            batch_indices, idx, cells, elements, pos, fixations, energies, forces
+        )
+        self._step = self._continue_step
 
-        return length_list[0]
+    def _continue_step(
+            self,
+            batch_indices: List,
+            idx: List[str],
+            elements: th.Tensor,
+            cells: th.Tensor | np.ndarray,
+            pos: th.Tensor,
+            fixations: th.Tensor,
+            energies: th.Tensor,
+            forces: th.Tensor,
+    ):
+        batch_indices, idx, cells, elements, pos, fixations, energies, forces = self._reformat(
+            batch_indices,
+            idx,
+            elements,
+            cells,
+            pos,
+            fixations,
+            energies,
+            forces,
+        )
+        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.step(
+            batch_indices, idx, cells, elements, pos, fixations, energies, forces
+        )
 
     def collect(
             self,
@@ -745,7 +871,6 @@ class DumpStructures:
             idx: List[str],
             elements: th.Tensor,
             cells: th.Tensor | np.ndarray,
-            pos_type: List[str],
             pos: th.Tensor,
             fixations: th.Tensor,
             energies: th.Tensor,
@@ -758,7 +883,6 @@ class DumpStructures:
             idx: List[str],
             elements: th.Tensor[int] | List[List[int]], the atom-wise elements sequence
             cells: th.Tensor | np.ndarray,
-            pos_type: List[str],
             pos: th.Tensor,
             fixations: th.Tensor,
             energies: th.Tensor,
@@ -769,61 +893,19 @@ class DumpStructures:
         """
         try:
             # Postprocessing & save TODO: reformat it in future to apply to all functions.
-            batch_indices_arr = np.array(batch_indices)
-            cells = cells.cpu().numpy(force = True) if isinstance(cells, th.Tensor) else cells
-            pos_type = np.array(pos_type)
-            pos = pos.cpu().squeeze(0).numpy(force=True)
-            forces = forces.cpu().squeeze(0).numpy(force=True)
-            energies = energies.cpu().numpy(force=True)
-            fixations = fixations.cpu().squeeze(0).numpy(force=True)
-            # check elements type
-            if isinstance(elements, th.Tensor):
-                elem_list = th.split(elements.squeeze(0), batch_indices)
-                elem_list = [_.tolist() for _ in elem_list]
-            elif isinstance(elements, list):
-                elem_list = list(elements)
-            else:
-                raise TypeError(f'`elements` should be a tensor or a list, but got {type(elements)}.')
-            elem_comp_list = list()
-            numb_comp_list = list()
-            elem_batch_indices = list()
-            #if self.parallelize is not None:
-            #    _res = self.parallelize(jb.delayed(elem_list_reduce)(_element_list) for _element_list in elem_list)
-            #    for _element_list in _res:
-            #        _elem_comp_list, _, _number_list = _element_list
-            #        elem_comp_list.extend(_elem_comp_list)
-            #        numb_comp_list.extend(_number_list)
-            #        elem_batch_indices.append(len(_element_list))
-            #else:
-            for _element_list in elem_list:
-                _elem_comp_list, _, _number_list = elem_list_reduce(_element_list)
-                elem_comp_list.extend(_elem_comp_list)
-                numb_comp_list.extend(_number_list)
-                elem_batch_indices.append(len(_number_list))
-            elem_batch = np.asarray(elem_batch_indices)
-            elem_arr = np.asarray(elem_comp_list)
-            num_arr = np.asarray(numb_comp_list)
-
-            self.batch_indices_arr.append(batch_indices_arr)
-            self.elem_batch.append(elem_batch)
-            self.idx.append(idx)
-            self.cells.append(cells)
-            self.elem_arr.append(elem_arr)
-            self.num_arr.append(num_arr)
-            self.pos_type.append(pos_type)
-            self.pos.append(pos)
-            self.fixations.append(fixations)
-            self.energies.append(energies)
-            self.forces.append(forces)
-
-            # dump saved structures
-            self.collect_count += 1
-            if self.save_path is not None:
-                if self.collect_count % self.dump_freq == 0:
-                    self.flush()
+            self._step(
+                batch_indices,
+                idx,
+                elements,
+                cells,
+                pos,
+                fixations,
+                energies,
+                forces,
+            )
 
         except Exception as e:
-            self._exit(Exception, e, traceback.format_exc())
+            warnings.warn(f'Failed to collect structures due to ERROR: {e}')
 
     def flush(self):
         """
@@ -832,378 +914,12 @@ class DumpStructures:
 
         """
         try:
-            if self._check_data() <= 0:
-                return None
-
-            batch_indices_arr = np.concatenate(self.batch_indices_arr)
-            elem_batch = np.concatenate(self.elem_batch)
-            idx = np.concatenate(self.idx)
-            cells = np.concatenate(self.cells)
-            elem_arr = np.concatenate(self.elem_arr)
-            num_arr = np.concatenate(self.num_arr)
-            pos_type = np.concatenate(self.pos_type)
-            pos = np.concatenate(self.pos)
-            fixations = np.concatenate(self.fixations)
-            energies = np.concatenate(self.energies)
-            forces = np.concatenate(self.forces)
-            self.initialize()
-
-            self._structures.append_from_array(
-                batch_indices_arr,
-                elem_batch,
-                idx,
-                cells,
-                elem_arr,
-                num_arr,
-                pos_type,
-                pos,
-                fixations,
-                energies,
-                forces
-            )
-
-            if (self.save_path is not None) and (len(self._structures) > 0):
-                self._structures.save(self.save_path, 'a')
-            del self._structures
-            self._structures = Structures()
-            self._structures.Mode = 'A'
+            self.dumper.flush()
         except Exception as e:
-            self._exit(Exception, e, traceback.format_exc())
+            warnings.warn(f'Failed to flush structures due to ERROR: {e}')
 
-    def __del__(self):
-        if self.save_path is not None: self.flush()
-        self._exit()
-        gc.collect()
-
-
-class DumpStructuresAsync:
-    """
-    异步版本：主线程负责把 CUDA 张量异步搬到 pinned CPU buffer 并 enqueue；
-    后台线程负责 numpy 化、elem_list_reduce、append、flush/save。
-    """
-
-    def __init__(self, path: str | None = None, dump_freq: int = 1, queue_size: int = 32):
-        self.save_path = path
-        self.dump_freq = dump_freq
-
-        self._structures = Structures()
-        self._structures.Mode = "A"
-
-        self.collect_count = 0
-        self._closed = False
-
-        # 后台线程专用缓冲（只在 worker 线程读写）
-        self.initialize()
-
-        # CUDA stream/event: copy stream 专门做 D2H
-        self.copy_stream = th.cuda.Stream() if th.cuda.is_available() else None
-
-        # 任务队列
-        self.q = queue.Queue(maxsize=queue_size)
-        self._stop = object()
-        self.worker = threading.Thread(target=self._worker_loop, daemon=True)
-        self.worker.start()
-
-    def initialize(self):
-        self.idx: List = list()
-        self.batch_indices_arr: List = list()
-        self.elem_batch: List = list()
-        self.cells: List = list()
-        self.pos_type: List = list()
-        self.pos: List = list()
-        self.fixations: List = list()
-        self.elem_arr: List = list()
-        self.num_arr: List = list()
-        self.energies: List = list()
-        self.forces: List = list()
-
-    @staticmethod
-    def _exit(errt=None, errv=None, tr=None):
-        if errt is not None:
-            raise errt(f"{errv}, {tr}")
-
-    def _check_data(self) -> int:
-        length_list = [
-            len(self.batch_indices_arr),
-            len(self.elem_batch),
-            len(self.idx),
-            len(self.cells),
-            len(self.elem_arr),
-            len(self.num_arr),
-            len(self.pos_type),
-            len(self.pos),
-            len(self.fixations),
-            len(self.energies),
-            len(self.forces),
-        ]
-        if set(length_list) != 1:
-            raise RuntimeError("structure numbers of some attributes are inconsistent.")
-        return length_list[0]
-
-    # ---------------------------
-    # 主线程入口：collect（异步）
-    # ---------------------------
-    def collect(
-        self,
-        batch_indices: List,
-        idx: List[str],
-        elements: th.Tensor,
-        cells: th.Tensor | np.ndarray,
-        pos_type: List[str],
-        pos: th.Tensor,
-        fixations: th.Tensor,
-        energies: th.Tensor,
-        forces: th.Tensor,
-    ):
-        """
-        主线程只做：
-          - 把 inputs 打包
-          - 对 CUDA 张量发起异步 D2H 到 pinned CPU buffer
-          - enqueue 给写线程
-        """
-        if self._closed:
-            return
-
-        try:
-            # 轻量 Python 数据直接复制/转 numpy（不涉及 GPU）
-            batch_indices_arr = np.array(batch_indices, dtype=np.int64)
-            pos_type_arr = np.array(pos_type)
-
-            # elements: 尽量不要在主线程做 th.split+tolist（可能很慢）
-            # 把 elements 也做异步 D2H，交给 worker 再 split
-            # 注：elements 一般是 int64/long
-            if not isinstance(elements, th.Tensor):
-                raise TypeError(f"`elements` should be a tensor, but got {type(elements)} in async mode.")
-            if not elements.is_cuda:
-                # 如果 elements 已在 CPU，也可以直接传 numpy/list；这里统一为 CPU tensor
-                elements_cpu_tensor = elements.contiguous()
-                evt = None
-                payload = {
-                    "batch_indices_arr": batch_indices_arr,
-                    "idx": np.array(idx),
-                    "pos_type": pos_type_arr,
-                    "cells_np": cells if isinstance(cells, np.ndarray) else cells.detach().cpu().numpy(),
-                    "elements_cpu": elements_cpu_tensor,
-                    "pos_cpu": pos.detach().cpu().squeeze(0).numpy(),
-                    "forces_cpu": forces.detach().cpu().squeeze(0).numpy(),
-                    "energies_cpu": energies.detach().cpu().numpy(),
-                    "fixations_cpu": fixations.detach().cpu().squeeze(0).numpy(),
-                    "evt": evt,
-                }
-                self.q.put(payload)
-                return
-
-            # cells 可能是 CUDA tensor 也可能 ndarray
-            # 为避免主线程同步，把 cells 若在 CUDA 也走 D2H pinned；若是 ndarray 直接传
-            cells_is_cuda = isinstance(cells, th.Tensor) and cells.is_cuda
-
-            # --- 分配 pinned CPU buffers（按本步 shape） ---
-            # 注意 squeeze(0) 在 GPU 上不会同步，但可能产生 view；copy_ 需要 shape 对齐
-            pos_gpu = pos.squeeze(0).contiguous()
-            forces_gpu = forces.squeeze(0).contiguous()
-            fix_gpu = fixations.squeeze(0).contiguous()
-            ener_gpu = energies.contiguous()
-            elem_gpu = elements.squeeze(0).contiguous()
-            cells_gpu = cells.contiguous() if cells_is_cuda else None
-
-            pos_cpu = th.empty(pos_gpu.shape, device="cpu", pin_memory=True, dtype=pos_gpu.dtype)
-            forces_cpu = th.empty(forces_gpu.shape, device="cpu", pin_memory=True, dtype=forces_gpu.dtype)
-            fix_cpu = th.empty(fix_gpu.shape, device="cpu", pin_memory=True, dtype=fix_gpu.dtype)
-            ener_cpu = th.empty(ener_gpu.shape, device="cpu", pin_memory=True, dtype=ener_gpu.dtype)
-            elem_cpu = th.empty(elem_gpu.shape, device="cpu", pin_memory=True, dtype=elem_gpu.dtype)
-
-            if cells_is_cuda:
-                cells_cpu = th.empty(cells_gpu.shape, device="cpu", pin_memory=True, dtype=cells_gpu.dtype)
-            else:
-                cells_cpu = None
-
-            # --- 用 event+copy stream 建依赖：等待当前计算 stream 完成，再做 D2H ---
-            # “当前 stream”是调用 collect() 时活跃的 CUDA stream（通常是 default 或你自己的 compute stream）
-            cur_stream = th.cuda.current_stream()
-            evt_compute = th.cuda.Event()
-            evt_compute.record(cur_stream)
-
-            evt_d2h = th.cuda.Event()
-            with th.cuda.stream(self.copy_stream):
-                self.copy_stream.wait_event(evt_compute)
-
-                pos_cpu.copy_(pos_gpu, non_blocking=True)
-                forces_cpu.copy_(forces_gpu, non_blocking=True)
-                fix_cpu.copy_(fix_gpu, non_blocking=True)
-                ener_cpu.copy_(ener_gpu, non_blocking=True)
-                elem_cpu.copy_(elem_gpu, non_blocking=True)
-                if cells_is_cuda:
-                    cells_cpu.copy_(cells_gpu, non_blocking=True)
-
-                evt_d2h.record(self.copy_stream)
-
-            payload = {
-                "batch_indices_arr": batch_indices_arr,
-                "idx": np.array(idx),
-                "pos_type": pos_type_arr,
-                "cells_cpu": cells_cpu,          # pinned CPU tensor or None
-                "cells_np": cells if isinstance(cells, np.ndarray) else None,
-                "elements_cpu": elem_cpu,        # pinned CPU tensor
-                "pos_cpu": pos_cpu,              # pinned CPU tensor
-                "forces_cpu": forces_cpu,        # pinned CPU tensor
-                "energies_cpu": ener_cpu,        # pinned CPU tensor
-                "fixations_cpu": fix_cpu,        # pinned CPU tensor
-                "evt": evt_d2h,
-            }
-
-            # enqueue（可能在队列满时阻塞，这是你唯一的“背压”点）
-            self.q.put(payload)
-
-        except Exception as e:
-            self._exit(Exception, e, traceback.format_exc())
-
-    # ---------------------------
-    # worker：numpy化、elem reduce、append、flush/save
-    # ---------------------------
-    def _worker_loop(self):
-        try:
-            while True:
-                item = self.q.get()
-                if item is self._stop:
-                    self.q.task_done()
-                    break
-
-                evt = item.get("evt", None)
-                if evt is not None:
-                    # 只等待本步 D2H 完成（局部等待）
-                    evt.synchronize()
-
-                # cells
-                if item.get("cells_np", None) is not None:
-                    cells_np = item["cells_np"]
-                else:
-                    cells_cpu = item.get("cells_cpu", None)
-                    cells_np = cells_cpu.numpy() if cells_cpu is not None else None
-
-                # pinned CPU tensor -> numpy view（零拷贝 view）
-                pos_np = item["pos_cpu"].numpy()
-                forces_np = item["forces_cpu"].numpy()
-                energies_np = item["energies_cpu"].numpy()
-                fix_np = item["fixations_cpu"].numpy()
-                elem_cpu = item["elements_cpu"]  # CPU tensor
-
-                # elements split + elem_list_reduce（CPU 侧做）
-                batch_indices_arr = item["batch_indices_arr"]
-                batch_indices_list = batch_indices_arr.tolist()
-                # elem_cpu shape: [sum_atoms] 或 [1,sum_atoms] 已 squeeze(0)
-                # 转到 list 的成本较高，但你原实现也要；这里放 worker 线程
-                elem_list = th.split(elem_cpu, batch_indices_list)
-                elem_list = [_.tolist() for _ in elem_list]
-
-                elem_comp_list = []
-                numb_comp_list = []
-                elem_batch_indices = []
-                for _element_list in elem_list:
-                    _elem_comp_list, _, _number_list = elem_list_reduce(_element_list)
-                    elem_comp_list.extend(_elem_comp_list)
-                    numb_comp_list.extend(_number_list)
-                    elem_batch_indices.append(len(_number_list))
-
-                elem_batch = np.asarray(elem_batch_indices)
-                elem_arr = np.asarray(elem_comp_list)
-                num_arr = np.asarray(numb_comp_list)
-
-                # append 到 worker 专用 lists
-                self.batch_indices_arr.append(batch_indices_arr)
-                self.elem_batch.append(elem_batch)
-                self.idx.append(item["idx"])
-                self.cells.append(cells_np)
-                self.elem_arr.append(elem_arr)
-                self.num_arr.append(num_arr)
-                self.pos_type.append(item["pos_type"])
-                self.pos.append(pos_np)
-                self.fixations.append(fix_np)
-                self.energies.append(energies_np)
-                self.forces.append(forces_np)
-
-                self.collect_count += 1
-                if self.save_path is not None and (self.collect_count % self.dump_freq == 0):
-                    self.flush()  # flush 也在 worker 里做，避免主线程阻塞
-
-                self.q.task_done()
-
-        except Exception as e:
-            # worker 里异常尽量明确抛出（也可记录日志）
-            self._exit(Exception, e, traceback.format_exc())
-
-    # ---------------------------
-    # flush：保持你原来的逻辑，只是现在只会在 worker 调用
-    # ---------------------------
-    def flush(self):
-        try:
-            if self._check_data() <= 0:
-                return None
-
-            batch_indices_arr = np.concatenate(self.batch_indices_arr)
-            elem_batch = np.concatenate(self.elem_batch)
-            idx = np.concatenate(self.idx)
-            cells = np.concatenate(self.cells)
-            elem_arr = np.concatenate(self.elem_arr)
-            num_arr = np.concatenate(self.num_arr)
-            pos_type = np.concatenate(self.pos_type)
-            pos = np.concatenate(self.pos)
-            fixations = np.concatenate(self.fixations)
-            energies = np.concatenate(self.energies)
-            forces = np.concatenate(self.forces)
-
-            self.initialize()
-
-            self._structures.append_from_array(
-                batch_indices_arr,
-                elem_batch,
-                idx,
-                cells,
-                elem_arr,
-                num_arr,
-                pos_type,
-                pos,
-                fixations,
-                energies,
-                forces,
-            )
-
-            if (self.save_path is not None) and (len(self._structures) > 0):
-                self._structures.save(self.save_path, "a")
-
-            del self._structures
-            self._structures = Structures()
-            self._structures.Mode = "A"
-
-        except Exception as e:
-            self._exit(Exception, e, traceback.format_exc())
-
-    def close(self, wait: bool = True):
-        """显式关闭：建议在训练/仿真结束时调用"""
-        if self._closed:
-            return
-        self._closed = True
-
-        if wait:
-            # 等队列消费完，再 stop
-            self.q.join()
-
-        self.q.put(self._stop)
-        self.worker.join()
-
-        # 最后 flush（worker 已停，主线程调用也安全；但此时不会有 GPU 等待）
-        if self.save_path is not None:
-            self.flush()
-
-        gc.collect()
-
-    def __del__(self):
-        try:
-            if not self._closed:
-                self.close(wait=True)
-        except Exception:
-            # 析构期间避免再抛异常
-            pass
-
+    def close(self):
+        self.dumper.close()
 
 
 class PygBatchUpdater:
@@ -1243,15 +959,15 @@ class PygBatchUpdater:
         # adding a buffer
         is_new = (self.__check_old is None) or (converge_check.shape != self.__check_old.shape)
         if is_new:
-            self.__check_old = converge_check
-            self.__g_old = func_args[0]
             if th.all(converge_check):  # if all are unconverged. usually occurred for new ones.
+                self.__check_old = None
                 return func_args, func_kwargs, grad_func_args, grad_func_kwargs
             else:
+                self.__check_old = converge_check
+                self.__g_old = func_args[0]
                 return self._reallocate(converge_check, func_args, func_kwargs, grad_func_args, grad_func_kwargs)
 
         elif th.all(th.eq(self.__check_old, converge_check)):
             return (self.__g_old,), func_kwargs, (self.__g_old,), grad_func_kwargs
         else:
             return self._reallocate(converge_check, func_args, func_kwargs, grad_func_args, grad_func_kwargs)
-
