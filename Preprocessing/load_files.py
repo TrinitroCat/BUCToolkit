@@ -862,7 +862,7 @@ class Xyz2Feat(BatchStructures):
         atom_list = [
             int(re.findall(r'\s+[0-9]+\n', d)[0]) for d in data if len(re.findall(r'\s+[0-9]+\n', d)) != 0
         ]
-        energy_list = [data[1 + (atom_list[i] + 2) * i].split()[-1] for i in range(len(line_of_energy))]
+        energy_list = [float(data[1 + (atom_list[i] + 2) * i].split()[-1]) for i in range(len(line_of_energy))]
         element_position_list = [
             data[2 + (atom_list[i] + 2) * i: (atom_list[i] + 2) * (i + 1)] for i in range(len(line_of_energy))
         ]
@@ -922,7 +922,7 @@ class Xyz2Feat(BatchStructures):
                 self.Numbers.extend(temp[5])
                 self.Coords.extend(temp[6])
                 self.Coords_type.extend(temp[7])
-                self.Fixed.extend([np.ones_like(_) for _ in temp[6]])
+                self.Fixed.extend([np.ones_like(_, dtype='|i1') for _ in temp[6]])
 
             except Exception as e:
                 err += 1
@@ -962,8 +962,8 @@ class ExtXyz2Feat(BatchStructures):
             column_info_tag: str = 'properties',
             element_tag: str = 'species',
             coordinates_tag: str = 'pos',
-            forces_tag: str|None = 'forces',
-            fixed_atom_tag: str|None = 'move_mask'
+            forces_tag: str|None = None,
+            fixed_atom_tag: str|None = None
     ) -> Tuple[List[str], List, List, List, List[List], List[List], List[np.ndarray], List, List]:
         """
         read single extxyz file.
@@ -1055,10 +1055,12 @@ class ExtXyz2Feat(BatchStructures):
                     forces = main_info[:, forces_info[1]:forces_info[2]].astype(np.float32)
                 else:
                     forces = None
-                    warnings.warn('`forces_tag` was set, while it cannot be found in the column information.')
+                    if forces_tag is not None:
+                        warnings.warn('`forces_tag` was set, while it cannot be found in the column information.', RuntimeWarning)
                 # fixed masks
-                if fixed_atom_tag is not None:
-                    fixed = main_info[:, col_content[f'{fixed_atom_tag}'][1]:col_content[f'{fixed_atom_tag}'][2]]
+                mask_info = col_content.get(f'{fixed_atom_tag}', None) if fixed_atom_tag is not None else None
+                if mask_info is not None:
+                    fixed = main_info[:, mask_info[1]:mask_info[2]]
                     fixed: np.ndarray = self.fix_mask_trans_func(fixed, self.FIXED_DICT)
                     if fixed.ndim != 2: raise RuntimeError('Unsupported format of atom fixing.')
                     if fixed.shape[1:2] != (3, ):
@@ -1066,6 +1068,12 @@ class ExtXyz2Feat(BatchStructures):
                     fixed.astype(np.int8)
                 else:
                     fixed = np.ones_like(coords, dtype=np.int8)
+                    if fixed_atom_tag is not None:
+                        warnings.warn(
+                            '`mask_info` was set, while it cannot be found in the column information.'
+                            ' All atoms will be viewed as free',
+                            RuntimeWarning
+                        )
 
                 # write data
                 idx.append(f'{os.path.splitext(file_name)[0]}_{i_structure}')
@@ -1096,8 +1104,8 @@ class ExtXyz2Feat(BatchStructures):
             column_info_tag: str = 'properties',
             element_tag: str = 'species',
             coordinates_tag: str = 'pos',
-            forces_tag: str | None = 'forces',
-            fixed_atom_tag: str | None = 'move_mask'
+            forces_tag: str | None = None,
+            fixed_atom_tag: str | None = None
     ):
         """
         Read *.extxyz files to BatchStructures.

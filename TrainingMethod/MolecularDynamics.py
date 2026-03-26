@@ -17,6 +17,7 @@ from torch import nn
 from BM4Ckit.BatchMD import NVE, NVT
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BM4Ckit.utils._print_formatter import FLOAT_ARRAY_FORMAT
+from BM4Ckit.BatchMD._BaseMD import _BaseMD
 
 
 class MolecularDynamics(_CONFIGS):
@@ -78,8 +79,8 @@ class MolecularDynamics(_CONFIGS):
                           'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
                           'device': self.DEVICE,
                           'verbose': self.VERBOSE}
-        if self.REDIRECT:
-            self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+        if self.SAVE_PREDICTIONS:
+            self.MD_config['output_file'] = self.PREDICTIONS_SAVE_FILE
         if self.MD['ENSEMBLE'] == 'NVT':
             self.MD_config['thermostat'] = self.MD.get('THERMOSTAT', 'CSVR')
             self.MD_config['thermostat_config'] = self.MD.get('THERMOSTAT_CONFIG', dict())
@@ -101,7 +102,7 @@ class MolecularDynamics(_CONFIGS):
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
-                'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
+                'WARNING: The model does not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
             )
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
@@ -118,6 +119,7 @@ class MolecularDynamics(_CONFIGS):
         self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
+        mole_dynam = None
         try:
             # I/O
             if self.VERBOSE > 0:
@@ -173,6 +175,25 @@ class MolecularDynamics(_CONFIGS):
                 def get_atomic_number(data):
                     return data.atomic_numbers.unsqueeze(0).tolist()
 
+                def get_fixed_mask(data):
+                    mask = getattr(data, 'fixed', None)
+                    if mask is not None:
+                        mask = mask.unsqueeze(0)
+                    return mask
+
+                def get_batch_indx(data):
+                    return [len(dat.pos) for dat in data.to_data_list()]
+
+                def get_init_veloc(data):
+                    veloc = getattr(data, 'velocity', None)
+                    if veloc is not None:
+                        veloc = veloc.unsqueeze(0)
+                    return veloc
+
+                def get_indx(data):
+                    _indx: Dict = getattr(data, 'idx', None)
+                    return _indx
+
             else:
                 model_wrap = _Model_Wrapper_dgl(_model)
                 def get_batch_size(data):
@@ -184,9 +205,36 @@ class MolecularDynamics(_CONFIGS):
                 def get_atomic_number(data):
                     return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
 
+                def get_fixed_mask(data):
+                    mask = data.nodes['atom'].data.get('fix', None)
+                    if mask is not None:
+                        mask = mask.unsqueeze(0)
+                    return mask
+
+                def get_batch_indx(data):
+                    return val_data.batch_num_nodes('atom')
+
+                def get_init_veloc(data):
+                    veloc = data.nodes['atom'].data.get('velocity', None)
+                    if veloc is not None:
+                        veloc = veloc.unsqueeze(0)
+                    return veloc
+
+                def get_indx(data):
+                    _indx: Dict = data.nodes['atom'].data
+                    return _indx.get('idx', None)
+
             mole_dynam = self.MDType(**self.MD_config)
+            if self.REDIRECT:
+                _file_handler = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+                mole_dynam.reset_logger_handler(_file_handler)
+            if self.SAVE_PREDICTIONS:
+                mole_dynam._HOLD_DUMPER = True
+                # change dumping mode to 'a' to contiguously dumper within the whole for-loop
+                mole_dynam.dumper.reset_args(self.PREDICTIONS_SAVE_FILE, mode='a', cache_size=4096, )
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # running batch now
+            n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             for val_data, val_label in val_set:
                 try:
                     # to avoid get an empty batch
@@ -194,19 +242,26 @@ class MolecularDynamics(_CONFIGS):
                         if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
                     # MD
+                    # cells & fixations
+                    _cell = get_cell_vec(val_data)
+                    fixed_mask = get_fixed_mask(val_data)
+                    # get id
+                    idx = get_indx(val_data)
+                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
+                    n_s += len(batch_indx)
+                    element_tensor = get_atomic_number(val_data)
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 100)
                         self.logger.info(f'Running Batch {n_c}.')
-                        self.logger.info('*' * 100)
                         cell_str = np.array2string(
-                            get_cell_vec(val_data), **FLOAT_ARRAY_FORMAT
-                        ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
-                        self.logger.info(f'Cell Vectors:\n{cell_str}')
+                            _cell, **FLOAT_ARRAY_FORMAT
+                        ).replace("[", " ").replace("]", " ")
+                        self.logger.info(f'Structure names: {idx}\n')
+                        self.logger.info(f'Cell Vectors:\n{cell_str}\n')
+                        # print structures titles with elements
+                        self.logout_element_information(element_tensor, batch_indx)
 
-                    if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
-                    else:
-                        batch_indx = val_data.batch_num_nodes('atom')
+                    batch_indx = get_batch_indx(val_data)
                     # initial atom coordinates
                     if self.data_type == 'pyg':
                         X_init = val_data.pos.unsqueeze(0)
@@ -215,15 +270,17 @@ class MolecularDynamics(_CONFIGS):
 
                     mole_dynam.run(
                         model_wrap.Energy,
-                        X_init,  # TODO, Now it support pygData and DGLGraph.
-                        get_atomic_number(val_data),
-                        V_init=None,  # TODO, Support user-defined initial velocities.
+                        X_init,
+                        Element_list=get_atomic_number(val_data),
+                        Cell_vector=_cell,
+                        V_init=get_init_veloc(val_data),  # user-defined initial velocities.
                         grad_func=model_wrap.Grad,
-                        func_args=(val_data,), grad_func_args=(val_data,),
+                        func_args=(val_data,),
+                        grad_func_args=(val_data,),
                         is_grad_func_contain_y=False,
-                        fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
                         require_grad=self.require_grad,
                         batch_indices=batch_indx,
+                        fixed_atom_tensor=fixed_mask,  # The Selective Dynamics.
                     )
 
                     # Print info
@@ -247,6 +304,8 @@ class MolecularDynamics(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
+            if mole_dynam is not None:
+                mole_dynam.dumper.close()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()

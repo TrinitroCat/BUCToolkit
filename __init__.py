@@ -11,18 +11,21 @@ from BM4Ckit.Preprocessing import load_files
 from BM4Ckit.Preprocessing.load_files import load_from_structures as load
 from BM4Ckit.Preprocessing import preprocessing
 from BM4Ckit.TrainingMethod import Trainer, Predictor
-from BM4Ckit.TrainingMethod import StructureOptimization as Opt
-from BM4Ckit.TrainingMethod import MolecularDynamics as MD
+from BM4Ckit.TrainingMethod import StructureOptimization
+from BM4Ckit.TrainingMethod import MolecularDynamics
+from BM4Ckit.BatchStructures.StructuresIO import read_opt_structures, read_md_traj
 
 __all__ = [
     'Structures',
     'load',
     'load_files',
+    'read_opt_structures',
+    'read_md_traj',
     'preprocessing',
     'Trainer',
     'Predictor',
-    'Opt',
-    'MD',
+    'StructureOptimization',
+    'MolecularDynamics',
     'TRANSITION_METALS',
     'TRANSITION_P_METALS',
     'NOBLE_METALS',
@@ -30,5 +33,3 @@ __all__ = [
     'utils'
 
 ]
-
-__version__ = '0.9a'

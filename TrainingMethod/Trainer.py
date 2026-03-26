@@ -14,6 +14,7 @@ import time
 from math import ceil
 from typing import Dict, Tuple, Literal, List, Any
 import traceback
+from inspect import isclass
 
 import numpy as np
 import torch as th
@@ -61,6 +62,8 @@ class Trainer(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
+        if not isclass(model):
+            raise TypeError('`model` must be a class. You may not instantiate it.')
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START != 'from_scratch' and self.START != 0:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
@@ -292,152 +295,172 @@ class Trainer(_CONFIGS):
                 num_step = 1
                 accum_loss = 0.  # the accumulation of loss within gradient accumulation steps.
                 accum_step = 0   # the actual steps that accumulated. normally `accum_step` == `self.ACCUMULATE_STEP`, except the last
+                n_err = 0        # error number during training.
                 time_gp = time.perf_counter()
                 for batch_data, batch_label in trn_set:
-                    _model.train()
-                    # to avoid get an empty batch
-                    if not isinstance(batch_data, (th.Tensor, )):
-                        len_data = batch_data.batch_size
-                    else:
-                        len_data = len(batch_data)
-                    if len_data <= 0:
-                        if self.VERBOSE: self.logger.info(f'An empty batch occurred in step {num_step}. Skipped.')
-                        continue
-                    # batch device
-                    batch_data = batch_data.to(self.DEVICE)
-                    #batch_label = batch_label.to(self.DEVICE)
+                    try:
+                        _model.train()
+                        # to avoid get an empty batch
+                        if not isinstance(batch_data, (th.Tensor, )):
+                            len_data = batch_data.batch_size
+                        else:
+                            len_data = len(batch_data)
+                        if len_data <= 0:
+                            if self.VERBOSE: self.logger.info(f'An empty batch occurred in step {num_step}. Skipped.')
+                            continue
+                        # batch device
+                        batch_data = batch_data.to(self.DEVICE)
+                        #batch_label = batch_label.to(self.DEVICE)
 
-                    # pred & loss, pred must be a Dict.
-                    pred_y = _model(batch_data)
-                    # check nan
-                    if self.CHECK_NAN:
-                        for key in pred_y.keys():
-                            if isinstance(pred_y[key], th.Tensor):
-                                is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
-                            elif isinstance(pred_y[key], list):  # for ensemble wrapper model
-                                is_nan = sum([th.isnan(_p) + th.isinf(_p) for _p in pred_y[key]])
-                            else:
-                                break
-                            if th.any(is_nan):
-                                nan_count += 1
-                                pred_y[key] = th.where(th.isnan(pred_y[key]), 0., pred_y[key])
-                                self.logger.warning(f'NaN occurred in model output, and has been set to 0. Total NaN number: {nan_count}')
-                                if nan_count > 100:
-                                    raise RuntimeError(f'Too many NaNs occurred in the model output (>= 100).')
-                                if self.DEBUG_MODE: self.logger.warning(f'batch_data:\n {batch_data}\n\nlabels:\n {batch_label}')
-                    # backward
-                    raw_loss:th.Tensor = LOSS(pred_y, batch_label)  # loss before grad. accum.
-                    loss = raw_loss / self.ACCUMULATE_STEP
-                    loss.backward()
-                    accum_loss += raw_loss.item()
-                    accum_step += 1
+                        # pred & loss, pred must be a Dict.
+                        pred_y = _model(batch_data)
+                        # check nan
+                        if self.CHECK_NAN:
+                            for key in pred_y.keys():
+                                if isinstance(pred_y[key], th.Tensor):
+                                    is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
+                                elif isinstance(pred_y[key], list):  # for ensemble wrapper model
+                                    is_nan = sum([th.isnan(_p) + th.isinf(_p) for _p in pred_y[key]])
+                                else:
+                                    break
+                                if th.any(is_nan):
+                                    nan_count += 1
+                                    pred_y[key] = th.where(th.isnan(pred_y[key]), 0., pred_y[key])
+                                    self.logger.warning(f'NaN occurred in model output, and has been set to 0. Total NaN number: {nan_count}')
+                                    if nan_count > 100:
+                                        raise RuntimeError(f'Too many NaNs occurred in the model output (>= 100).')
+                                    if self.DEBUG_MODE: self.logger.warning(f'batch_data:\n {batch_data}\n\nlabels:\n {batch_label}')
+                        # backward
+                        raw_loss:th.Tensor = LOSS(pred_y, batch_label)  # loss before grad. accum.
+                        loss = raw_loss / self.ACCUMULATE_STEP
+                        loss.backward()
+                        accum_loss += raw_loss.item()
+                        accum_step += 1
 
-                    _is_update_params = ((num_step % self.ACCUMULATE_STEP == 0) or (num_step == n_batch)) # reached the accum. step or last step
-                    # Debug Mode -----------------------------------------------------------------------------------------------------------
-                    if self.DEBUG_MODE and _is_update_params:
-                        i__ = 0
-                        para_arr_old_temp = list()
-                        self.logger.info(f'\n{"Debug"*24}\nDEBUG IN STEP NUMBER: {num_step}\n{"Debug"*24}')
-                        for para_name, para in _model.named_parameters():
-                            para_arr = para.numpy(force=True)
-                            para_arr_old_temp.append(para_arr)
-                            self.logger.info('PARAMETER  %s : %.3e ~ %.3e' % (para_name, np.min(para_arr), np.max(para_arr)))
-                            if para.grad is not None:
-                                para_grad_arr = para.grad.numpy(force=True)
-                                self.logger.info('PARA_GRAD  %s : %.3e ~ %.3e' % (para_name, np.min(para_grad_arr), np.max(para_grad_arr)))
-                            else:
-                                self.logger.warning(f'PARAMETER `{para_name}` does not have grad. <<<')
-                            self.logger.info(f'PARAMETER RMSD: {np.sqrt(np.mean((para_arr - para_arr_old_list[i__]) ** 2)):<4.3e}')
-                            i__ += 1
-                        para_arr_old_list = para_arr_old_temp
-                        if loss != loss:
-                            self.logger.exception(f'ERROR: NaN occurred in loss.\n\nModel outputs:\n{pred_y}\n\nTraining labels:\n{batch_label}')
-                            raise Exception('ERROR: NaN occurred in loss.\n\nModel outputs:\n%s\n\nTraining labels:\n%s' % (pred_y, batch_label))
-                    # Debug Mode END-----------------------------------------------------------------------------------------------------------
+                        _is_update_params = ((num_step % self.ACCUMULATE_STEP == 0) or (num_step == n_batch)) # reached the accum. step or last step
+                        # Debug Mode -----------------------------------------------------------------------------------------------------------
+                        if self.DEBUG_MODE and _is_update_params:
+                            i__ = 0
+                            para_arr_old_temp = list()
+                            self.logger.info(f'\n{"Debug"*24}\nDEBUG IN STEP NUMBER: {num_step}\n{"Debug"*24}')
+                            for para_name, para in _model.named_parameters():
+                                para_arr = para.numpy(force=True)
+                                para_arr_old_temp.append(para_arr)
+                                self.logger.info('PARAMETER  %s : %.3e ~ %.3e' % (para_name, np.min(para_arr), np.max(para_arr)))
+                                if para.grad is not None:
+                                    para_grad_arr = para.grad.numpy(force=True)
+                                    self.logger.info('PARA_GRAD  %s : %.3e ~ %.3e' % (para_name, np.min(para_grad_arr), np.max(para_grad_arr)))
+                                else:
+                                    self.logger.warning(f'PARAMETER `{para_name}` does not have grad. <<<')
+                                self.logger.info(f'PARAMETER RMSD: {np.sqrt(np.mean((para_arr - para_arr_old_list[i__]) ** 2)):<4.3e}')
+                                i__ += 1
+                            para_arr_old_list = para_arr_old_temp
+                            if loss != loss:
+                                self.logger.exception(f'ERROR: NaN occurred in loss.\n\nModel outputs:\n{pred_y}\n\nTraining labels:\n{batch_label}')
+                                raise Exception('ERROR: NaN occurred in loss.\n\nModel outputs:\n%s\n\nTraining labels:\n%s' % (pred_y, batch_label))
+                        # Debug Mode END-----------------------------------------------------------------------------------------------------------
 
-                    # update & metrics & output
-                    real_n_samp += len_data  # sample number count
-                    if _is_update_params:
-                        # grad clip
-                        if self.GRAD_CLIP:
-                            nn.utils.clip_grad_norm_(
-                                parameters=parameter_iterator,
-                                max_norm=self.GRAD_CLIP_MAX_NORM,
-                                **self.GRAD_CLIP_CONFIG
-                            )
-                        # update
-                        OPTIMIZER.step()
-                        OPTIMIZER.zero_grad()
-                        if scheduler is not None: scheduler.step()
-                        if self.EMA: ema.step()
+                        # update & metrics & output
+                        real_n_samp += len_data  # sample number count
+                        if _is_update_params:
+                            # grad clip
+                            if self.GRAD_CLIP:
+                                nn.utils.clip_grad_norm_(
+                                    parameters=parameter_iterator,
+                                    max_norm=self.GRAD_CLIP_MAX_NORM,
+                                    **self.GRAD_CLIP_CONFIG
+                                )
+                            # update
+                            OPTIMIZER.step()
+                            OPTIMIZER.zero_grad()
+                            if scheduler is not None: scheduler.step()
+                            if self.EMA: ema.step()
 
-                        # metrics
-                        with th.no_grad():
-                            if len(self.METRICS) > 0:
-                                _metr_list = dict()
-                                _model.eval()
-                                for _name, _metr_func in self.METRICS.items():
-                                    _metr = _metr_func(pred_y, batch_label, **self.METRICS_CONFIG[_name])
-                                    _metr_list[_name] = _metr.item()
-                            __loss = accum_loss / accum_step
-                        history['train_loss'].append(__loss)
-                        accum_loss = 0.
-                        accum_step = 0
-                        num_update += 1
-                        _can_valid = True
-                        # print per step
-                        if self.VERBOSE:
-                            with _LoggingEnd(self.log_handler):
-                                self.logger.info(f'epoch: {i + 1:>6}, ({real_n_samp:>8d}/{n_trn_samp:>8d}), train_loss: {__loss:> 4.4e}')
+                            # metrics
+                            with th.no_grad():
                                 if len(self.METRICS) > 0:
-                                    for _name, _metr in _metr_list.items():  # type: ignore
-                                        self.logger.info(f', {_name}: {_metr:> 4.4e}')
-                                if scheduler is not None: self.logger.info(f', lr: {' '.join([f'{_:< 4.2e}' for _ in scheduler.get_last_lr()])}')
-                            self.logger.info(f', time: {time.perf_counter() - time_gp:>10.4f}, [UPDATE GRAD]')
-
-                    # validation
-                    _is_start_val = (__loss < self.VAL_IF_TRN_LOSS_BELOW)
-                    _is_step_to_val = (num_update % self.VAL_PER_STEP == 0)
-                    #_is_at_least_val = (num_step < self.VAL_PER_STEP and num_step == n_batch)  # if not val. in the whole epoch, val.
-                    if _is_start_val and _is_step_to_val and _can_valid:
-                        time_val = time.perf_counter()
-                        with _LoggingEnd(self.log_handler):
-                            if self.VERBOSE: self.logger.info('VALIDATION...')
-                        with th.no_grad():
-                            if self.EMA: ema.apply()
-                            _val_loss, _metr_list = self._val(_model, LOSS)
-                            # print val results
-                            if _val_loss is not None:
-                                history['val_loss'].append(_val_loss)
-                                if self.VERBOSE:
-                                    self.logger.info('Done.')
-                                    with _LoggingEnd(self.log_handler):
-                                        self.logger.info(f'Validation loss: {_val_loss:> 4.4e}')
-                                        for _name, _metr in _metr_list.items():
+                                    _metr_list = dict()
+                                    _model.eval()
+                                    for _name, _metr_func in self.METRICS.items():
+                                        _metr = _metr_func(pred_y, batch_label, **self.METRICS_CONFIG[_name])
+                                        _metr_list[_name] = _metr.item()
+                                __loss = accum_loss / accum_step
+                            history['train_loss'].append(__loss)
+                            accum_loss = 0.
+                            accum_step = 0
+                            num_update += 1
+                            _can_valid = True
+                            # print per step
+                            if self.VERBOSE:
+                                with _LoggingEnd(self.log_handler):
+                                    self.logger.info(f'epoch: {i + 1:>6}, ({real_n_samp:>8d}/{n_trn_samp:>8d}), train_loss: {__loss:> 4.4e}')
+                                    if len(self.METRICS) > 0:
+                                        for _name, _metr in _metr_list.items():  # type: ignore
                                             self.logger.info(f', {_name}: {_metr:> 4.4e}')
-                                    self.logger.info(f', time: {time.perf_counter() - time_val:<.4f}')
+                                    if scheduler is not None: self.logger.info(f', lr: {' '.join([f'{_:< 4.2e}' for _ in scheduler.get_last_lr()])}')
+                                self.logger.info(f', time: {time.perf_counter() - time_gp:>10.4f}, [UPDATE GRAD]')
 
-                                if self.SAVE_CHK:
-                                    if _val_loss < val_loss_old:
+                        # validation
+                        _is_start_val = (__loss < self.VAL_IF_TRN_LOSS_BELOW)
+                        _is_step_to_val = (num_update % self.VAL_PER_STEP == 0)
+                        #_is_at_least_val = (num_step < self.VAL_PER_STEP and num_step == n_batch)  # if not val. in the whole epoch, val.
+                        if _is_start_val and _is_step_to_val and _can_valid:
+                            time_val = time.perf_counter()
+                            with _LoggingEnd(self.log_handler):
+                                if self.VERBOSE: self.logger.info('VALIDATION...')
+                            with th.no_grad():
+                                if self.EMA: ema.apply()
+                                _val_loss, _metr_list = self._val(_model, LOSS)
+                                # print val results
+                                if _val_loss is not None:
+                                    history['val_loss'].append(_val_loss)
+                                    if self.VERBOSE:
+                                        self.logger.info('Done.')
                                         with _LoggingEnd(self.log_handler):
-                                            if self.VERBOSE: self.logger.info('Validation loss descent. Saving checkpoint file...')
-                                        val_loss_old = copy.deepcopy(_val_loss)
-                                        states = {
-                                            'epoch': i,
-                                            'model_state_dict': _model.state_dict(),
-                                            'optimizer_state_dict': OPTIMIZER.state_dict(),
-                                            'val_loss': _val_loss,
-                                        }
-                                        if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
-                                        th.save(states, os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
-                                        if self.VERBOSE: self.logger.info('Done.')
-                                    else:
-                                        if self.VERBOSE: self.logger.info(f'Validation loss NOT descent. Minimum loss: {val_loss_old:< 4.4e}.')
-                            if self.EMA: ema.restore()
-                        _can_valid = False
+                                            self.logger.info(f'Validation loss: {_val_loss:> 4.4e}')
+                                            for _name, _metr in _metr_list.items():
+                                                self.logger.info(f', {_name}: {_metr:> 4.4e}')
+                                        self.logger.info(f', time: {time.perf_counter() - time_val:<.4f}')
 
-                    time_gp = time.perf_counter()
-                    num_step += 1
+                                    if self.SAVE_CHK:
+                                        if _val_loss < val_loss_old:
+                                            with _LoggingEnd(self.log_handler):
+                                                if self.VERBOSE: self.logger.info('Validation loss descent. Saving checkpoint file...')
+                                            val_loss_old = copy.deepcopy(_val_loss)
+                                            states = {
+                                                'epoch': i,
+                                                'model_state_dict': _model.state_dict(),
+                                                'optimizer_state_dict': OPTIMIZER.state_dict(),
+                                                'val_loss': _val_loss,
+                                            }
+                                            if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
+                                            th.save(states, os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
+                                            if self.VERBOSE: self.logger.info('Done.')
+                                        else:
+                                            if self.VERBOSE: self.logger.info(f'Validation loss NOT descent. Minimum loss: {val_loss_old:< 4.4e}.')
+                                if self.EMA: ema.restore()
+                            _can_valid = False
+
+                        time_gp = time.perf_counter()
+                        num_step += 1
+
+                    except Exception as e:
+                        _can_valid = False
+                        time_gp = time.perf_counter()
+                        num_step += 1
+                        n_err += 1
+                        if n_err <= 200:
+                            self.logger.error(
+                                f'An error occurred in the step {num_step} of epoch {i+1}: {e}; idx: {batch_data.idx}.\n'
+                                f'Total ERROR NUMBER: {n_err}.\n'
+                                f'Training will continue, but metrics and losses in this step may not be accurate.'
+                            )
+                        else:
+                            self.logger.fatal(
+                                f'An error occurred in the step {num_step} of epoch {i+1}: {e}. Total ERROR NUMBER: {n_err}.\n'
+                                f'TOO MANY ERRORS OCCURRED DURING TRAINING. I REFUSE TO CONTINUE SUCH A SICK JOB. BYE!'
+                            )
+                            exit(1)
                 # print per epoch
                 self.logger.info(f'\n*** EPOCH {i + 1:>6} Done.  LOOP TIME: {time.perf_counter() - time_ep}')
             self.logger.info('-' * 60 + f'MAIN LOOP DONE' + '-' * 60 + f'\nTOTAL TIME: {time.perf_counter() - time_tol}')

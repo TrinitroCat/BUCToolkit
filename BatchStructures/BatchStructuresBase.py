@@ -27,12 +27,26 @@ import numpy as np
 
 from BM4Ckit.utils._para_flatt_list import flatten
 from BM4Ckit.Preprocessing.write_files import WritePOSCARs, write_xyz, write_cif
+from BM4Ckit.utils.setup_loggers import has_any_handler
 
 
 class BatchStructures(object):
     r"""
     The base class of batch structures.
     """
+
+    LIST_ATTR_NAME = (
+        '_Sample_ids',
+        'Cells',
+        'Coords_type',
+        'Coords',
+        'Fixed',
+        'Elements',
+        'Numbers',
+        'Energies',
+        'Forces',
+        'Labels'
+    )
 
     def __init__(self) -> None:
         self._ALL_ELEMENTS = ('H', 'He',
@@ -122,7 +136,7 @@ class BatchStructures(object):
         self.logger = logging.getLogger('Main.BS')
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(message)s')
-        if not self.logger.hasHandlers():
+        if not has_any_handler(self.logger):
             log_handler = logging.StreamHandler(sys.stdout, )
             log_handler.setLevel(logging.INFO)
             log_handler.setFormatter(formatter)
@@ -348,6 +362,48 @@ class BatchStructures(object):
         )
         if is_convert:
             self._list2np()
+
+    def check_full(self, ):
+        """
+        Fully check all data's information
+        Returns:
+
+        """
+        for ii, _data in enumerate(self):
+            try:
+                lcoo = _data.Coords[0].shape
+                lfix = _data.Fixed[0].shape
+                lelem = len(_data.Elements[0])
+                lnumb = len(_data.Numbers[0])
+                natm = sum(_data.Numbers[0])
+                # check coo
+                if lcoo[1] != 3 or len(lcoo) != 2:
+                    self.logger.warning(f"Wrong coordinates shape of {ii}-th data ({_data.Sample_ids[0]}): {lcoo}. It should be (N, 3).")
+                    continue
+                if lcoo != lfix:
+                    self.logger.warning(
+                        f"The {ii}-th data ({_data.Sample_ids[0]}) has inconsistent shape of coordinates and fixations: {lcoo} != {lfix}. "
+                    )
+                    continue
+                if lelem != lnumb:
+                    self.logger.warning(
+                        f"The {ii}-th data ({_data.Sample_ids[0]}) has inconsistent shape of elements and element numbers: {lelem} != {lnumb}. "
+                    )
+                    continue
+                if lcoo[0] != natm:
+                    self.logger.warning(
+                        f"The {ii}-th data ({_data.Sample_ids[0]}) has inconsistent atom number of coordinates and elements: {lcoo[0]} != {natm}. "
+                    )
+                    continue
+                if (_data.Forces is not None) and (_data.Forces[0].shape != lcoo):
+                    self.logger.warning(
+                        f"The {ii}-th data ({_data.Sample_ids[0]}) has inconsistent atom number of coordinates and forces: "
+                        f"{lcoo} != {_data.Forces.shape}. "
+                    )
+                    continue
+
+            except Exception as e:
+                self.logger.warning(f"Unknown error occurred while checking {ii}-th data ({_data.Sample_ids[0]}): {e}.")
 
     def save(self, path: str, mode: Literal['w', 'a'] = 'w'):
         """
@@ -895,6 +951,29 @@ class BatchStructures(object):
                 cell = self.Cells[i]
                 self.Coords[i] @= cell
                 self.Coords_type[i] = 'C'
+
+    def sort_ids(self, ref_attr: str = 'Sample_ids', reverse: bool = False):
+        """
+        Sort structures by their Sample_ids order.
+        Args:
+            ref_attr: str, the attribute to be the reference for structure sort.
+            reverse: bool. if True, the sort order is reversed, i.e., the descending order.
+        Returns: None
+
+        """
+        if self.Mode == 'A':
+            raise NotImplementedError(f"Sort for Array mode is not implemented yet.")
+        lst = getattr(self, ref_attr, None)
+        if lst is None:
+            raise ValueError(f"Attribute '{ref_attr}' not found.")
+        _sort_idx = sorted(range(len(lst)), key=lambda i: lst[i], reverse=reverse)
+
+        for attr_name in self.LIST_ATTR_NAME:
+            orig_attr = getattr(self, attr_name)
+            if orig_attr is None:
+                continue
+            setattr(self, attr_name, [orig_attr[_] for _ in _sort_idx])
+
 
     def standardize(self, ):
         """
@@ -2021,6 +2100,60 @@ class BatchStructures(object):
                         elem_distribution_dict[elem_] += 1
         return elem_distribution_dict
 
+    def eq(self, other, rtol: float = 1e-6, atol: float = 1e-6, verbose: bool = False):
+        """
+        Check if two BatchStructures are equivalent.
+        Args:
+            other: the BatchStructures to compare.
+            rtol: relative tolerance for comparing float number data.
+            atol: absolute tolerance for comparing float number data.
+            verbose: To control the verbosity. if True, the equality of each attribute will be printed.
+
+        Returns: bool
+
+        """
+        other._check_len()
+        self._check_len()
+        try:
+            if len(self) != len(other): return False
+            Qid = (self.Sample_ids == other.Sample_ids)
+            Qcoo = all([np.allclose(self.Coords[_], other.Coords[_], rtol=rtol, atol=atol) for _ in range(len(self))])
+            Qct = (self.Coords_type == other.Coords_type)
+            Qcel = all([np.allclose(self.Cells[_], other.Cells[_], rtol=rtol, atol=atol) for _ in range(len(self))])
+            Qelm = all([np.all(self.Elements[_] == other.Elements[_]) for _ in range(len(self))])
+            Qnum = all([np.all(self.Numbers[_] == other.Numbers[_]) for _ in range(len(self))])
+            Qfix = all([np.allclose(self.Fixed[_], other.Fixed[_], rtol=rtol, atol=atol) for _ in range(len(self))])
+            Qe = True
+            Qf = True
+            Ql = True
+            if self.Energies is not None:
+                Qe = (self.Energies == other.Energies)
+            if self.Forces is not None:
+                Qf = all([np.allclose(self.Forces[_], other.Forces[_], rtol=rtol, atol=atol) for _ in range(len(self))])
+            if self.Labels is not None:
+                Ql = (self.Labels == other.Label)
+            qq = (Qid & Qcoo & Qct & Qcel & Qelm & Qnum & Qfix & Qe & Qf & Ql)
+            if verbose:
+                self.logger.info(
+                    f'Sample_ids: {Qid}\n'
+                    f'Cells: {Qcel}\n'
+                    f'Elements: {Qelm}\n'
+                    f'Numbers: {Qnum}\n'
+                    f'Coords: {Qcoo}\n'
+                    f'Fixed: {Qfix}\n'
+                    f'Energies: {Qe}\n'
+                    f'Forces: {Qf}\n'
+                    f'Labels: {Ql}'
+                )
+            return qq
+        except Exception as e:
+            if verbose:
+                self.logger.warning(
+                    f"An Error occurred while comparing self and other: {e}\n"
+                    f"Hence, `False` is returned as the result."
+                )
+            return False
+
     def __len__(self, ) -> int:
         if self.Mode == 'L':
             return len(self._Sample_ids)
@@ -2045,27 +2178,7 @@ class BatchStructures(object):
             return False
 
     def __eq__(self, other):
-        other._check_len()
-        self._check_len()
-        if len(self) != len(other): return False
-        Qid = (self.Sample_ids == other.Sample_ids)
-        Qcoo = all([np.allclose(self.Coords[_], other.Coords[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
-        Qct = (self.Coords_type == other.Coords_type)
-        Qcel = all([np.allclose(self.Cells[_], other.Cells[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
-        Qelm = all([np.all(self.Elements[_] == other.Elements[_]) for _ in range(len(self))])
-        Qnum = all([np.all(self.Numbers[_] == other.Numbers[_]) for _ in range(len(self))])
-        Qfix = all([np.allclose(self.Fixed[_], other.Fixed[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
-        Qe = True
-        Qf = True
-        Ql = True
-        if self.Energies is not None:
-            Qe = (self.Energies == other.Energies)
-        if self.Forces is not None:
-            Qf = all([np.allclose(self.Forces[_], other.Forces[_], rtol=1e-6, atol=1e-6) for _ in range(len(self))])
-        if self.Labels is not None:
-            Ql = (self.Labels == other.Label)
-        qq = (Qid & Qcoo & Qct & Qcel & Qelm & Qnum & Qfix & Qe & Qf & Ql)
-        return qq
+        return self.eq(other)
 
     def __getitem__(self, key: int | str | slice | Iterable):  # tips: this method was not efficient and used to occasionally inquire information
         """
