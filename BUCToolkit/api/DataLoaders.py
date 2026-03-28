@@ -246,6 +246,7 @@ class BatchStructuresDataLoader:
         self._index = 0
         self.device = device
         # TODO <<<
+        raise NotImplementedError
 
 
 class ISFSPyGDataLoader:

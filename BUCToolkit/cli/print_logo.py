@@ -1,77 +1,80 @@
 
+from BUCToolkit._version import __version__
+import time
+
 def generate_display_art() -> str:
     letters = {
         'B': [
-            " ###   ",
-            "#   #  ",
-            "#   #  ",
-            "####   ",
-            "#   #  ",
-            "#   #  ",
-            "####   "
+            " BBBBB ",
+            "B     B",
+            "B     B",
+            "BBBBBB ",
+            "B     B",
+            "B     B",
+            "BBBBBBB"
         ],
         'U': [
-            "#   #  ",
-            "#   #  ",
-            "#   #  ",
-            "#   #  ",
-            "#   #  ",
-            "#   #  ",
-            " ###   "
+            "U     U",
+            "U     U",
+            "U     U",
+            "U     U",
+            "U     U",
+            "U     U",
+            " UUUUU "
         ],
         'C': [
-            " ####  ",
-            "#    # ",
-            "#      ",
-            "#      ",
-            "#      ",
-            "#    # ",
-            " ####  "
+            " CCCCC ",
+            "C     C",
+            "C      ",
+            "C      ",
+            "C      ",
+            "C     C",
+            " CCCCC "
         ],
         'T': [
-            "#######",
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   "
+            "TTTTTTT",
+            "   T   ",
+            "   T   ",
+            "   T   ",
+            "   T   ",
+            "   T   ",
+            "   T   "
         ],
         'O': [
-            " ####  ",
-            "#    # ",
-            "#    # ",
-            "#    # ",
-            "#    # ",
-            "#    # ",
-            " ####  "
+            " OOOOO ",
+            "O     O",
+            "O     O",
+            "O     O",
+            "O     O",
+            "O     O",
+            " OOOOO "
         ],
         'L': [
-            "#      ",
-            "#      ",
-            "#      ",
-            "#      ",
-            "#      ",
-            "#      ",
-            "#######"
+            "LL     ",
+            "LL     ",
+            "LL     ",
+            "LL     ",
+            "LL     ",
+            "LL     ",
+            "LLLLLLL"
         ],
         'K': [
-            "#   #  ",
-            "#  #   ",
-            "# #    ",
-            "##     ",
-            "# #    ",
-            "#  #   ",
-            "#   #  "
+            "K     K",
+            "K   K  ",
+            "K K    ",
+            "KK     ",
+            "K K    ",
+            "K   K  ",
+            "K     K"
         ],
         'I': [
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   "
+            "   II  ",
+            "   II  ",
+            "   II  ",
+            "   II  ",
+            "   II  ",
+            "   II  ",
+            "   II  "
         ]
     }
 
@@ -111,9 +114,13 @@ def generate_display_art() -> str:
 
     screen_content = ["".join(row) for row in screen_lines]
 
+    copyright_lines = (f"  BUCToolkit {__version__}. Copyright (c) 2024-{time.strftime("%Y")} "
+                       f"Authors: Pu Pengxin, Song Xin, etc." + " "*8)
+    screen_content.append(copyright_lines)
+
     # Monitor Edges
-    top_border = "+" + "-" * internal_width + "+"
-    bottom_border = "+" + "-" * internal_width + "+"
+    top_border = "+" + "=" * internal_width + "+"
+    bottom_border = "+" + "=" * internal_width + "+"
     bordered_lines = [top_border]
     for line in screen_content:
         bordered_lines.append("|" + line + "|")
@@ -123,13 +130,17 @@ def generate_display_art() -> str:
     base_width = internal_width - 4
     if base_width < 6:
         base_width = 6
-    base_pad = (internal_width - base_width) // 2
+    base_pad = (internal_width - base_width) // 2 + 1
     base_line = " " * base_pad + "|" + "_" * (base_width - 2) + "|" + " " * (internal_width - base_pad - base_width)
     bordered_lines.append(base_line)
     foot_width = base_width + 2
-    foot_pad = (internal_width - foot_width) // 2
+    foot_pad = (internal_width - foot_width) // 2 + 1
     foot_line = " " * foot_pad + "|" + "_" * (foot_width - 2) + "|" + " " * (internal_width - foot_pad - foot_width)
     bordered_lines.append(foot_line)
+
+    # Copyright info
+    #copyright_lines = f"   BUCToolkit {__version__}. Copyright (c) 2024-{time.strftime("%Y")} Authors: Pu Pengxin, Song Xin, etc."
+    #bordered_lines.append(copyright_lines)
 
     return "\n".join(bordered_lines)
 

@@ -303,7 +303,7 @@ class _rConstrBase(_rBaseMD):
         return Px
 
     def _project2(self, X:th.Tensor) -> th.Tensor:
-        """
+        r"""
         Continuously project the Jacobian of all constrains to the exact manifold (by Newton-like iteration).
         Update X in-place.
         Args:

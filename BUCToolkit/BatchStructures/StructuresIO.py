@@ -1082,7 +1082,7 @@ class StandardModel(ABC):
 
 class StandardInput(ABC):
     """
-    An abstract container as the standard input of advanced API `TrainingMethod`,
+    An abstract container as the standard input of advanced API `api`,
      which have properties that can be inquired by follow methods as the input arg `data`:
 
         def get_batch_size(data):

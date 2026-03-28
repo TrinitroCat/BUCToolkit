@@ -73,12 +73,14 @@ class MolecularDynamics(_CONFIGS):
         except KeyError:
             raise NotImplementedError(f'Unknown Ensemble {self.MD["ENSEMBLE"]}.')
         self.require_grad = self.MD.get('REQUIRE_GRAD', False)
-        self.MD_config = {'time_step': self.MD.get('TIME_STEP', 1),
-                          'max_step': self.MD.get('MAX_STEP'),
-                          'T_init': self.MD.get('T_INIT', 298.15),
-                          'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
-                          'device': self.DEVICE,
-                          'verbose': self.VERBOSE}
+        self.MD_config = {
+            'time_step': self.MD.get('TIME_STEP', 1),
+            'max_step': self.MD.get('MAX_STEP'),
+            'T_init': self.MD.get('T_INIT', 298.15),
+            'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
+            'device': self.DEVICE,
+            'verbose': self.VERBOSE
+        }
         if self.SAVE_PREDICTIONS:
             self.MD_config['output_file'] = self.PREDICTIONS_SAVE_FILE
         if self.MD['ENSEMBLE'] == 'NVT':
@@ -123,42 +125,7 @@ class MolecularDynamics(_CONFIGS):
         try:
             # I/O
             if self.VERBOSE > 0:
-                __time = time.strftime("%Y%m%d_%H:%M:%S")
-                para_count = sum(p.numel() for p in _model.parameters() if p.requires_grad)
-                self.logger.info('*' * 60 + f'\n TIME: {__time}')
-                self.logger.info(' TASK: Molecular Dynamics <<')
-                if (self.START == 0) or (self.START == 'from_scratch'):
-                    self.logger.info(' FROM_SCRATCH <<')
-                else:
-                    self.logger.info(' RESUME <<')
-                self.logger.info(f' COMMENTS: {self.COMMENTS}')
-                self.logger.info(f' I/O INFORMATION:')
-                self.logger.info(f'\tVERBOSITY LEVEL: {self.VERBOSE}')
-                if not self.REDIRECT:
-                    self.logger.info('\tPREDICTION LOG OUTPUT TO SCREEN')
-                else:
-                    output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-                    self.logger.info(f'\tPREDICTION LOG OUTPUT TO {output_file}')  # type: ignore
-                if (self.START != 0) and (self.START != 'from_scratch'):
-                    self.logger.info(f'\tMODEL PARAMETERS LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
-                self.logger.info(f' MODEL NAME: {self.MODEL_NAME}')
-                self.logger.info(f' MODEL INFORMATION:')
-                self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
-                if self.VERBOSE > 1:
-                    for hp, hpv in self.MODEL_CONFIG.items():
-                        self.logger.info(f'\t\t{hp}: {hpv}')
-                self.logger.info(f' MODEL WILL RUN ON {self.DEVICE}')
-                if self.SAVE_PREDICTIONS:
-                    self.logger.info(f' PREDICTIONS WILL SAVE TO {self.PREDICTIONS_SAVE_FILE}')
-                else:
-                    self.logger.info(f' PREDICTIONS WILL SAVE IN MEMORY AND RETURN AS A VARIABLE.')
-                self.logger.info(f' ITERATION INFORMATION:')
-                self.logger.info(f'\tENSEMBLE: {self.MD["ENSEMBLE"]}')
-                for _algo_conf_name, _algo_conf in self.MD_config.items():
-                    self.logger.info(f'\t{_algo_conf_name}: {_algo_conf}')
-                self.logger.info(f'\tBATCH SIZE: {self.BATCH_SIZE}' +
-                                 f'\n\tTOTAL SAMPLE NUMBER: {self.n_samp}\n' +
-                                 '*' * 60 + '\n' + 'ENTERING MAIN LOOP...')
+                self.logout_task_information(_model, 'MD', self.MD_config, self.n_samp)
 
             time_tol = time.perf_counter()
             _model.eval()
@@ -225,9 +192,9 @@ class MolecularDynamics(_CONFIGS):
                     return _indx.get('idx', None)
 
             mole_dynam = self.MDType(**self.MD_config)
-            if self.REDIRECT:
-                _file_handler = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-                mole_dynam.reset_logger_handler(_file_handler)
+            #if self.REDIRECT:
+            #    _file_handler = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+            #    mole_dynam.reset_logger_handler(_file_handler)
             if self.SAVE_PREDICTIONS:
                 mole_dynam._HOLD_DUMPER = True
                 # change dumping mode to 'a' to contiguously dumper within the whole for-loop
@@ -245,13 +212,15 @@ class MolecularDynamics(_CONFIGS):
                     # cells & fixations
                     _cell = get_cell_vec(val_data)
                     fixed_mask = get_fixed_mask(val_data)
+                    # get batch
+                    batch_indx = get_batch_indx(val_data)
                     # get id
                     idx = get_indx(val_data)
                     idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
                     n_s += len(batch_indx)
                     element_tensor = get_atomic_number(val_data)
                     if self.VERBOSE > 0:
-                        self.logger.info('*' * 100)
+                        self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
                         cell_str = np.array2string(
                             _cell, **FLOAT_ARRAY_FORMAT
@@ -261,7 +230,6 @@ class MolecularDynamics(_CONFIGS):
                         # print structures titles with elements
                         self.logout_element_information(element_tensor, batch_indx)
 
-                    batch_indx = get_batch_indx(val_data)
                     # initial atom coordinates
                     if self.data_type == 'pyg':
                         X_init = val_data.pos.unsqueeze(0)

@@ -7,17 +7,28 @@
 from .Trainer import Trainer
 from .Predictor import Predictor
 from .MolecularDynamics import MolecularDynamics
+from .ConstrainedMolecularDynamics import ConstrainedMolecularDynamics
 from .StructureOptimization import StructureOptimization
 from .VibrationAnalysis import VibrationAnalysis
+from .NEB import ClimbingImageNudgedElasticBand
+from .MonteCarlo import MonteCarlo
 from . import Losses
 from . import DataLoaders
 from . import Metrics
+
+CINEB = ClimbingImageNudgedElasticBand
+CONSTR_MD = ConstrainedMolecularDynamics
 
 __all__ = [
     'Trainer',
     'Predictor',
     'StructureOptimization',
+    'ClimbingImageNudgedElasticBand',
+    'CINEB',
     'MolecularDynamics',
+    'ConstrainedMolecularDynamics',
+    'CONSTR_MD',
+    'MonteCarlo',
     'VibrationAnalysis',
     'Losses',
     'DataLoaders',

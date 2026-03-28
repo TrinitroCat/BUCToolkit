@@ -10,9 +10,9 @@ from BUCToolkit.utils._Element_info import TRANSITION_METALS, TRANSITION_P_METAL
 from BUCToolkit.Preprocessing import load_files
 from BUCToolkit.Preprocessing.load_files import load_from_structures as load
 from BUCToolkit.Preprocessing import preprocessing
-from BUCToolkit.TrainingMethod import Trainer, Predictor
-from BUCToolkit.TrainingMethod import StructureOptimization
-from BUCToolkit.TrainingMethod import MolecularDynamics
+from BUCToolkit.api import Trainer, Predictor
+from BUCToolkit.api import StructureOptimization
+from BUCToolkit.api import MolecularDynamics
 from BUCToolkit.BatchStructures.StructuresIO import read_opt_structures, read_md_traj
 
 __all__ = [
