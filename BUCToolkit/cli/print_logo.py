@@ -5,13 +5,13 @@ import time
 def generate_display_art() -> str:
     letters = {
         'B': [
-            " BBBBB ",
+            "BBBBBB ",
             "B     B",
             "B     B",
             "BBBBBB ",
             "B     B",
             "B     B",
-            "BBBBBBB"
+            "BBBBBB "
         ],
         'U': [
             "U     U",

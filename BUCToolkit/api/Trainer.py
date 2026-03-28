@@ -402,7 +402,7 @@ class Trainer(_CONFIGS):
             # If the program stopped, recording checkpoints.
             if self.EMA: ema.restore()
             if i != self.EPOCH - 1:
-                self.logger.info('*' * 100)
+                self.logger.info('*' * 89)
                 self.logger.info(f'*** STOPPED AT {time.strftime("%Y%m%d_%H:%M:%S")} ***')
                 if self.SAVE_CHK:
                     states = {
