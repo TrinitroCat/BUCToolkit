@@ -366,7 +366,7 @@ class StructureOptimization(_CONFIGS):
                     n_s += len(batch_indx)
                     element_tensor = get_atomic_number(val_data)
                     if self.VERBOSE > 0:
-                        self.logger.info('*' * 100)
+                        self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
                         cell_str = np.array2string(
                             CELL, **FLOAT_ARRAY_FORMAT

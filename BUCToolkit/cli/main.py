@@ -20,6 +20,7 @@ import hashlib
 import yaml
 
 import BUCToolkit as bt
+from BUCToolkit.cli.print_logo import generate_display_art
 import BUCToolkit.api as api
 from BUCToolkit.api.DataLoaders import PyGDataLoader, ISFSPyGDataLoader
 import BUCToolkit.Preprocessing.load_files as load_files
@@ -105,7 +106,7 @@ def parse_center_input_file(path: str):
     # Section: load data
     data_type = config.get('DATA_TYPE', 'POSCAR').upper()
     data_path = config.get('DATA_PATH', '')
-    data_selector = config.get('DATA_NAME_SELECTER', None)
+    data_selector = config.get('DATA_NAME_SELECTOR', None)
     if data_path == '': raise ValueError(f'`DATA_PATH` is not defined.')
     data_loader_kwargs = config.get('DATA_LOADER_KWARGS', {})
     data: bt.Structures = load_data(data_type, data_path, data_loader_kwargs)
@@ -267,7 +268,10 @@ def main():
         buctoolkit -i xxx.inp -o xxx.oup
         bctk
     """
-    parser = argparse.ArgumentParser(description='BUCToolkit MAIN PROGRAM INTERFACES')
+    parser = argparse.ArgumentParser(
+        description=f'BUCToolkit MAIN PROGRAM INTERFACES\n{generate_display_art()}',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument('-i', '--input', help='The path to input file.', required=True)
     parser.add_argument(
         '-o', '--output',

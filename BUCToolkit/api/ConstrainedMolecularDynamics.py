@@ -220,9 +220,9 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                         raise RuntimeError(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                     # MD
                     if self.VERBOSE > 0:
-                        self.logger.info('*' * 100)
+                        self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
-                        self.logger.info('*' * 100)
+                        self.logger.info('*' * 89)
                         cell_str = np.array2string(
                             get_cell_vec(dataIS), **FLOAT_ARRAY_FORMAT
                         ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.

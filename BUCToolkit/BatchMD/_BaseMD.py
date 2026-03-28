@@ -486,7 +486,8 @@ class _BaseMD:
         )
 
         # print Atoms Information
-        if self.verbose > 0:
+        #   if has no handler, means the handler is upper level 'Main', thus not print repeatedly
+        if (self.verbose > 0) and len(self.logger.handlers) > 0:
             # elem info
             elem_list = list()
             _element_list = list()

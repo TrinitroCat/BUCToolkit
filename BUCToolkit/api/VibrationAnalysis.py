@@ -202,7 +202,7 @@ class VibrationAnalysis(_CONFIGS):
                     idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
                     n_s += len(batch_indx)
                     if self.VERBOSE > 0:
-                        self.logger.info('*' * 100)
+                        self.logger.info('*' * 89)
                         self.logger.info(f'Vibration Calculation Batch {n_c}.')
                         cell_str = np.array2string(
                             CELL, **FLOAT_ARRAY_FORMAT
@@ -243,7 +243,7 @@ class VibrationAnalysis(_CONFIGS):
                         # log out
                         for i, ee in enumerate(elem_list):
                             self.logger.info(f'Structure {i:>5d}: {ee}')
-                        self.logger.info('*' * 100)
+                        self.logger.info('*' * 89)
                     # run
                     with th.no_grad():
                         eig_freq, normal_mode = vib_calculator.normal_mode(

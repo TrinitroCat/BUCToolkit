@@ -221,7 +221,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                         raise RuntimeError(f'Data type {self.data_type} is not supported.')
                     # NEB
                     if self.VERBOSE > 0:
-                        self.logger.info('*' * 100)
+                        self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
                         self.logger.info(f'Structure names: {get_indx(dataIS)}\n')
                         cell_str = np.array2string(
