@@ -19,7 +19,7 @@ import shlex
 
 import BUCToolkit as bt
 from BUCToolkit.utils._CheckModules import check_module
-from BUCToolkit.CLI.print_logo import generate_display_art
+from BUCToolkit.cli.print_logo import generate_display_art
 
 has_prmt = (check_module('prompt_toolkit') is not None)
 
@@ -35,7 +35,7 @@ class BaseCLI:
     def __init__(self, *args, **kwargs):
         self._COMMANDS = {
             "/help": (self.print_help, 'Show this help message.'),
-            "/exit": (self.do_exit, 'Exit the CLI program. One can also press "Ctrl+C" to exit."'),
+            "/exit": (self.do_exit, 'Exit the cli program. One can also press "Ctrl+C" to exit."'),
             "/verbose": (
                 self.set_verbose,
                 "Reset the verbosity level. Available values: 'FATAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'NOTSET'"
@@ -76,7 +76,7 @@ class BaseCLI:
 
         self.closed = False
 
-        self.logger = logging.getLogger('CLI')
+        self.logger = logging.getLogger('cli')
         self.logger.setLevel(logging.INFO)
         self._log_formatter = logging.Formatter('%(message)s')
         if len(self.logger.handlers) <= 0:
@@ -211,7 +211,7 @@ class BaseCLI:
                     self.do_exit()
 
                 except Exception as e:
-                    self.logger.error(f"An exception occurred in CLI: {e}.")
+                    self.logger.error(f"An exception occurred in cli: {e}.")
                     continue
         finally:
             if not self.closed:
@@ -236,7 +236,7 @@ def cli_predict():
 
 def cli_opt():
     """
-    Do optimization by BUCToolkit.TrainingMethod.StructureOptimization.relax
+    Do optimization by BUCToolkit.api.StructureOptimization.relax
     Returns:
 
     """
@@ -244,7 +244,7 @@ def cli_opt():
 
 def cli_ts():
     """
-    Do optimization by BUCToolkit.TrainingMethod.StructureOptimization.ts
+    Do optimization by BUCToolkit.api.StructureOptimization.ts
     Returns:
 
     """
@@ -252,7 +252,7 @@ def cli_ts():
 
 def cli_neb():
     """
-    Do optimization by BUCToolkit.TrainingMethod.NEB
+    Do optimization by BUCToolkit.api.NEB
     Returns:
 
     """

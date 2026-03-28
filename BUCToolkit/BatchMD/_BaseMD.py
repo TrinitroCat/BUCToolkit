@@ -71,7 +71,7 @@ class _BaseMD:
         self.free_degree = None  # (n_batch, ), freedom degree tensor
         self.require_grad = None
 
-        # An inner attr that let the dumper do not close after `self.run`.
+        # An inner attr that lets the dumper do not close after `self.run`.
         # It is used to contiguously run within a loop.
         # Adv. API `MolecularDynamics` turns on it.
         self._HOLD_DUMPER = False

@@ -26,5 +26,5 @@ def check_module(module_name: str, pkg_name: None | str = None):
         pkg = importlib.import_module(module_name, pkg_name)
         return pkg
     except ImportError:
-        warnings.warn(f'Package {module_name} was not found, therefore some related methods would be unavailable.')
+        #warnings.warn(f'Package {module_name} was not found, therefore some related methods would be unavailable.')
         return None

@@ -27,8 +27,7 @@ from .Losses import Energy_Force_Loss, Energy_Loss
 from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 
 from BUCToolkit.utils._CheckModules import check_module
-from BUCToolkit import Structures
-from BUCToolkit.utils.ElemListReduce import elem_list_reduce
+from BUCToolkit.cli.print_logo import generate_display_art
 from BUCToolkit.utils.setup_loggers import has_any_handler
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
@@ -198,7 +197,7 @@ class _CONFIGS(object):
         Returns:
 
         """
-        element_list = element_tensor.tolist()
+        element_list = element_tensor.tolist() if isinstance(element_tensor, th.Tensor) else list(element_tensor)
         elem_list = list()
         _element_list = list()
         if batch_indx is not None:
@@ -232,7 +231,162 @@ class _CONFIGS(object):
         # log out
         for i, ee in enumerate(elem_list):
             self.logger.info(f'Structure {i:>5d}: {ee}')
-        self.logger.info('*' * 100)
+        self.logger.info('*' * 89)
+
+    def logout_task_information(
+            self,
+            _model: nn.Module,
+            mode: str,
+            algo_config: Dict[str, Any] | None,
+            n_samp: int | None
+    ) -> None:
+        """
+        Logout task head information.
+        Args:
+            _model: nn.Module, a user-defind model to count & print parameter number.
+            mode: task mode keyword.
+            algo_config: Dict[str, Any], kwargs/configs of this task.
+            n_samp: int, number of samples loaded in.
+
+        Returns: None
+
+        """
+        __time = time.strftime("%Y%m%d_%H:%M:%S")
+        para_count = sum(p.numel() for p in _model.parameters())
+        self.logger.info('\n' + generate_display_art())
+        self.logger.info('\n' + '*' * 89 + f'\n TIME: {__time}')
+        # parse mode
+        algo_info = None
+        if mode == 'OPT':
+            self.logger.info(' TASK: Structure Optimization (minimize) <<')
+            algo_info = self.RELAXATION["ALGO"]
+        elif mode == 'TS':
+            self.logger.info(' TASK: Structure Optimization (TS) <<')
+            algo_info = self.TRANSITION_STATE["ALGO"]
+        elif mode == 'MD':
+            self.logger.info(' TASK: Molecular Dynamics <<')
+            algo_info = f"{self.MD["ENSEMBLE"]} Ensemble"
+        elif mode == 'NEB':
+            self.logger.info(' TASK: Nudged Elastic Band Transition State Search <<')
+            algo_info = self.NEB.get('ALGO', 'CI-NEB')
+        elif mode == 'CMD':
+            self.logger.info(' TASK: Constrained Molecular Dynamics <<')
+            algo_info = f"{self.MD["ENSEMBLE"]} Ensemble"
+        elif mode == 'VIB':
+            self.logger.info(' TASK: Vibrational Analysis (Harmonic) <<')
+            algo_info = "Finite Difference" if self.VIBRATION.get('METHOD', 'Coord') == "Coord" else "Automatic Differentiation"
+        elif mode == 'MC':
+            self.logger.info(' TASK: Monte Carlo <<')
+            algo_info = f"{self.MC["ENSEMBLE"]} Ensemble"
+        elif mode == 'TRAIN':
+            self.logger.info(' TASK: TRAINING & VALIDATION <<')
+        elif mode == 'PREDICT':
+            self.logger.info(' TASK: Predict <<')
+        else:
+            self.logger.info(' TASK: Unknown Mode <<')
+        # mode end
+        if (self.START == 0) or (self.START == 'from_scratch'):
+            self.logger.info(' FROM_SCRATCH <<')
+        elif (self.START == 1) or (self.START == 'resume'):
+            self.logger.info(' RESUME <<')
+        elif (self.START == 2) or (self.START == 'load_param'):
+            self.logger.info(' LOAD_PARAMETER <<')
+        self.logger.info(f' COMMENTS: {self.COMMENTS}')
+        self.logger.info(f' I/O INFORMATION:')
+        self.logger.info(f'\tVERBOSITY LEVEL: {self.VERBOSE}')
+        if not self.REDIRECT:
+            self.logger.info('\tLOG WILL OUTPUT TO STDOUT')
+        else:
+            output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+            self.logger.info(f'\tLOG WILL OUTPUT TO {output_file}')  # type: ignore
+        if (self.START == 2) or (self.START == 'load_param'):
+            self.logger.info(f'\tMODEL PARAMETERS LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
+        elif (self.START == 1) or (self.START == 'resume'):
+            self.logger.info(f'\tMODEL CHECKPOINT FILE LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
+        if mode == 'TRAIN': self.logger.info(f'\tCHECKPOINT FILE SAVE TO: {self.CHK_SAVE_PATH}_{self.CHK_SAVE_POSTFIX}')
+        self.logger.info(f' MODEL NAME: {self.MODEL_NAME}')
+        self.logger.info(f' MODEL INFORMATION:')
+        self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
+        if mode == 'TRAIN':
+            para_count_train = sum(p.numel() for p in _model.parameters() if p.requires_grad)
+            self.logger.info(f'\tTOTAL TRAINABLE PARAMETERS: {para_count_train}')
+        if self.VERBOSE > 1:
+            self.logger.info(f'\tHYPER-PARAMETERS:')
+            for hp, hpv in self.MODEL_CONFIG.items():
+                self.logger.info(f'\t\t{hp}: {hpv}')
+
+        self.logger.info(f' TASK WILL RUN ON {self.DEVICE}')
+        if mode == 'TRAIN':
+            self.logger.info(f' LOSS FUNCTION: {self.loss_name}')
+            if len(self.METRICS) > 0:
+                with _LoggingEnd(self.log_handler):
+                    self.logger.info(f' METRICS: ')
+                    for _name in self.METRICS.keys():
+                        self.logger.info(f'{_name}  ')
+                self.logger.info('')
+            else:
+                self.logger.info(' METRICS: None')
+            self.logger.info(f' OPTIMIZER INFORMATION:')
+            __opt_repr = re.split(r'\(\n|\)$|\s{2,}|\n', repr(OPTIMIZER))  # type: ignore
+            self.logger.info(f'\tOPTIMIZER: {__opt_repr[0]}')
+            if (self.VERBOSE > 1) and hasattr(self, '_layerwise_opt_configs'):
+                if self._layerwise_opt_configs is not None:
+                    _layer_grp_name = list(self._layerwise_opt_configs.keys())
+                else:
+                    _layer_grp_name = None
+                kk = 0
+                for __partt in __opt_repr[1:-2]:
+                    if __partt.startswith('Parameter Group'):
+                        self.logger.info(f'\t{__partt}')
+                        if self._layerwise_opt_configs is not None:
+                            self.logger.info(
+                                f'\t\tcontaining layers: {
+                                _layer_grp_name[kk].pattern if kk < len(_layer_grp_name) else "all remaining layers"
+                                }'
+                            )
+                            kk += 1
+                    else:
+                        self.logger.info(f'\t\t{__partt}')
+                del kk, _layer_grp_name
+            if self.LR_SCHEDULER is not None:
+                self.logger.info(f'\tLR_SCHEDULER: {str(self.LR_SCHEDULER)}')
+                self.logger.info(f'\tLR_SCHEDULER CONFIG:')
+                for hp, hpv in self.LR_SCHEDULER_CONFIG.items(): self.logger.info(f'\t\t{hp}: {hpv}')
+            else:
+                self.logger.info('\tLR_SCHEDULER: None')
+            if self.GRAD_CLIP:
+                self.logger.info(f'\tGRAD_CLIP: True')
+                self.logger.info(f'\tGRAD_CLIP_MAX_NORM: {self.GRAD_CLIP_MAX_NORM:<.2f}')
+                if len(self.GRAD_CLIP_CONFIG) > 0: self.logger.info(f'\tGRAD_CLIP_CONFIG: {self.GRAD_CLIP_CONFIG}')
+            else:
+                self.logger.info(f'\tGRAD_CLIP: False')
+            if self.EMA:
+                self.logger.info(f'\tEXPONENTIAL MOVING AVERAGE (EMA): True')
+                self.logger.info(f'\tEMA_DECAY: {self.EMA_DECAY:<.5f}')
+                self.logger.info(
+                    f'\tNOTE: `best_checkpoint` will save with EMA parameters, while `checkpoint` and `stop_checkpoint` will not.'
+                )
+            else:
+                self.logger.info(f'\tEXPONENTIAL MOVING AVERAGE (EMA): False')
+            self.logger.info(f' ITERATION INFORMATION:')
+            self.logger.info(f'\tEPOCH: {self.EPOCH}\n\tBATCH SIZE: {self.BATCH_SIZE}\n\tVALID BATCH SIZE: {self.VAL_BATCH_SIZE}' +
+                             f'\n\tGRADIENT ACCUMULATION STEPS: {self.ACCUMULATE_STEP}\n\tEVAL PER {self.VAL_PER_STEP} STEPS\n' +
+                             '*' * 89 + '\n' + 'ENTERING MAIN LOOP...')
+        else:
+            if self.SAVE_PREDICTIONS:
+                self.logger.info(f' PREDICTIONS WILL SAVE TO {self.PREDICTIONS_SAVE_FILE}')
+            else:
+                self.logger.info(f' PREDICTIONS WILL SAVE IN MEMORY AND RETURN AS A VARIABLE.')
+            self.logger.info(f' ITERATION INFORMATION:')
+            # ALGORITHM PRINT
+            if algo_info is not None:
+                self.logger.info(f'\tALGORITHM: {algo_info}')
+            for _algo_conf_name, _algo_conf in algo_config.items():
+                self.logger.info(f'\t{_algo_conf_name}: {_algo_conf}')
+            n_samp = 'Unknown' if n_samp is None else n_samp
+            self.logger.info(f'\tBATCH SIZE: {self.BATCH_SIZE}' +
+                             f'\n\tTOTAL SAMPLE NUMBER: {n_samp}\n' +
+                             '*' * 89 + '\n' + 'ENTERING MAIN LOOP...')
 
     def fixation_resolve(self):
         """
@@ -428,6 +582,9 @@ class _CONFIGS(object):
 
         # If Vibration Calc.
         self.VIBRATION = self.config.get('VIBRATION', None)
+
+        # If Monte Carlo
+        self.MC = self.config.get('MC', None)
 
     @property
     def PREDICTIONS_SAVE_FILE(self):
@@ -712,6 +869,7 @@ class ExpMovingAverage:
 class DumpStructures:
     """
     Dump structures calculated by `Predictor`, `StructureOptimization`, etc.
+    Use the `ArrayDumper` as the backend, which dump structure information into binary file.
     """
     def __init__(self, path:str|None=None):
         """

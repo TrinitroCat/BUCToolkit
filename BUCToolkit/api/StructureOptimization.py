@@ -4,6 +4,7 @@
 #  File: StructureOptimization.py
 #  Environment: Python 3.12
 import logging
+import math
 import os
 import time
 import traceback
@@ -16,7 +17,7 @@ from torch import nn
 from BUCToolkit import BatchOptim
 from BUCToolkit.BatchOptim.minimize import CG, QN, FIRE
 from BUCToolkit.BatchOptim.TS.Dimer import Dimer
-from BUCToolkit.TrainingMethod._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl, PygBatchUpdater
+from BUCToolkit.api._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl, PygBatchUpdater
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER
 from BUCToolkit.utils._CheckModules import check_module
@@ -234,53 +235,12 @@ class StructureOptimization(_CONFIGS):
 
         # initialize
         self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
-        self.n_batch = self.n_samp // self.BATCH_SIZE + 1  # total batch number per epoch
+        self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
         # I/O
         try:
             if self.VERBOSE > 0:
-                __time = time.strftime("%Y%m%d_%H:%M:%S")
-                para_count = sum(p.numel() for p in _model.parameters() if p.requires_grad)
-                self.logger.info('*' * 60 + f'\n TIME: {__time}')
-                if mode == 'minimize':
-                    self.logger.info(' TASK: Structure Optimization (minimize) <<')
-                elif mode == 'ts':
-                    self.logger.info(' TASK: Structure Optimization (TS) <<')
-                if (self.START == 0) or (self.START == 'from_scratch'):
-                    self.logger.info(' FROM_SCRATCH <<')
-                else:
-                    self.logger.info(' RESUME <<')
-                self.logger.info(f' COMMENTS: {self.COMMENTS}')
-                self.logger.info(f' I/O INFORMATION:')
-                self.logger.info(f'\tVERBOSITY LEVEL: {self.VERBOSE}')
-                if not self.REDIRECT:
-                    self.logger.info('\tPREDICTION LOG OUTPUT TO SCREEN')
-                else:
-                    output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-                    self.logger.info(f'\tPREDICTION LOG OUTPUT TO {output_file}')  # type: ignore
-                if (self.START != 0) and (self.START != 'from_scratch'):
-                    self.logger.info(f'\tMODEL PARAMETERS LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
-                self.logger.info(f' MODEL NAME: {self.MODEL_NAME}')
-                self.logger.info(f' MODEL INFORMATION:')
-                self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
-                if self.VERBOSE > 1:
-                    for hp, hpv in self.MODEL_CONFIG.items():
-                        self.logger.info(f'\t\t{hp}: {hpv}')
-                self.logger.info(f' MODEL WILL RUN ON {self.DEVICE}')
-                if self.SAVE_PREDICTIONS:
-                    self.logger.info(f' PREDICTIONS WILL SAVE TO {self.PREDICTIONS_SAVE_FILE}')
-                else:
-                    self.logger.info(f' PREDICTIONS WILL SAVE IN MEMORY AND RETURN AS A VARIABLE.')
-                self.logger.info(f' ITERATION INFORMATION:')
-                if mode == 'minimize':
-                    self.logger.info(f'\tALGO: {self.RELAXATION["ALGO"]}')
-                else:
-                    self.logger.info(f'\tALGO: {self.TRANSITION_STATE["ALGO"]}')
-                for _algo_conf_name, _algo_conf in self.Stru_Opt_config.items():
-                    self.logger.info(f'\t{_algo_conf_name}: {_algo_conf}')
-                self.logger.info(f'\tBATCH SIZE: {self.BATCH_SIZE}' +
-                                 f'\n\tTOTAL SAMPLE NUMBER: {self.n_samp}\n' +
-                                 '*' * 60 + '\n' + 'ENTERING MAIN LOOP...')
+                self.logout_task_information(_model, mode, self.Stru_Opt_config, self.n_samp)
 
             time_tol = time.perf_counter()
             _model.eval()
