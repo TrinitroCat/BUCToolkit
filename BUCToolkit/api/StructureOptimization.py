@@ -339,7 +339,9 @@ class StructureOptimization(_CONFIGS):
                     if mode == 'ts':
                         X_diff = get_init_dX(val_data)
                         if X_diff is None:
-                            pass
+                            self.logger.warning(
+                                f'WARNING: No initial dimer direction given. A random direction will be used.'
+                            )
                         elif not isinstance(X_diff, th.Tensor):
                             X_diff = None
                             self.logger.warning(

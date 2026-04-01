@@ -18,8 +18,10 @@ import importlib.util
 import hashlib
 
 import yaml
+import torch as th
 
 import BUCToolkit as bt
+from BUCToolkit.BatchGenerate.coords_interp import direction_for_finite_diff
 from BUCToolkit.cli.print_logo import generate_display_art
 import BUCToolkit.api as api
 from BUCToolkit.api.DataLoaders import PyGDataLoader, ISFSPyGDataLoader
@@ -95,13 +97,13 @@ def parse_center_input_file(path: str):
         task_type = TASKS_TYPE_ALIAS[task_type]
 
     # Section: load model
-    model_path = config.get('MODEL_PATH', None)
+    model_file = config.get('MODEL_FILE', None)
     model_name = config.get('MODEL_NAME', None)
-    if model_path is None:
-        raise ValueError(f"`MODEL_PATH` must be specified.")
+    if model_file is None:
+        raise ValueError(f"`MODEL_FILE` must be specified.")
     if model_name is None:
         raise ValueError(f"`MODEL_NAME` must be specified.")
-    udf_model = load_model(model_path, model_name)
+    udf_model = load_model(model_file, model_name)
 
     # Section: load data
     data_type = config.get('DATA_TYPE', 'POSCAR').upper()
@@ -112,6 +114,8 @@ def parse_center_input_file(path: str):
     data: bt.Structures = load_data(data_type, data_path, data_loader_kwargs)
     if data_selector is not None:
         data = data.select_by_sample_id(rf"{data_selector}")
+        if len(data) == 0:
+            raise RuntimeError(f"No data matches the pattern given by `DATA_NAME_SELECTOR`. BYE!")
     is_shuffle = config.get('IS_SHUFFLE', False)
 
     if task_type == 'TRAIN':
@@ -131,7 +135,7 @@ def parse_center_input_file(path: str):
             if n_val >= len(data) or n_val <= 0:
                 raise ValueError(
                     f"Unreasonable `VAL_SPLIT_RATIO` value `{validation_ratio}`, "
-                    f"which causes {n_val} validation samples and {len(data) - n_val} training samples."
+                    f"which will cause {n_val} validation samples and {len(data) - n_val} training samples."
                 )
             val_data = data[:n_val]
             data = data[n_val:]
@@ -148,8 +152,6 @@ def parse_center_input_file(path: str):
         val_forc = [val_data[atm.idx].Forces[0] for atm in val_data_list]
         valid_data = {'data': val_data_list, 'labels': {'energy': val_ener, 'forces': val_forc}}
         dataset_args = (train_data, valid_data)
-        # TODO: ADD layerwise train scheme
-        # TODO: ADD lr_scheduler
 
     elif task_type == 'NEB' or task_type == 'CMD':  # They use ISFSDataLoader
         # handle the final state configuration data
@@ -162,6 +164,42 @@ def parse_center_input_file(path: str):
         is_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
         fs_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(fs_data, n_core=1)
         run_data = {'dataIS': is_data_list, 'dataFS': fs_data_list}
+        dataset_args = (run_data,)
+
+    elif task_type == 'TS':  # Need a dimer initial guess
+        # handle the final state configuration data
+        disp_data_path = config.get('DISPDATA_PATH', None)
+        displace_flag = config.get('TRANSITION_STATE', None)
+        if displace_flag is None:
+            raise ValueError(
+                f"Transition state search is required but input arguments not provided. "
+                f"Please set `TRANSITION_STATE` section in the config file. "
+            )
+        else:
+            displace_flag = displace_flag.get('X_DIFF_ATTR', None)
+
+        is_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
+
+        if displace_flag is not None:  # IF DISPDATA_PATH is given, canonically use data read from DISPDATA_PATH
+            if disp_data_path is not None:
+                disp_data = load_data(data_type, disp_data_path, data_loader_kwargs)
+                for i, dat in enumerate(is_data_list):
+                    disp_tensor = th.as_tensor(disp_data.Coords[i])
+                    setattr(dat, str(displace_flag), disp_tensor)
+            else:
+                fs_data_path = config.get('FSDATA_PATH', None)  # ELIF FSDATA_PATH, use interpolated middle point of is/fs conf.
+                if fs_data_path is not None:
+                    fs_data = load_data(data_type, fs_data_path, data_loader_kwargs)
+                    # convert to displacement by interpolation
+                    for i, dat in enumerate(is_data_list):
+                        disp_coo, diff = direction_for_finite_diff(dat.pos, fs_data.Coords[i], dat.fixed)
+                        setattr(dat, 'pos', disp_coo)
+                        setattr(dat, str(displace_flag), diff)
+                else:
+                    warnings.warn(f"`X_DIFF_ATTR` is set but no displacement is provided. `X_DIFF_ATTR` will be ignored.")
+                    for i, dat in enumerate(is_data_list):
+                        setattr(dat, str(displace_flag), None)
+        run_data = {'data': is_data_list, 'labels': None}
         dataset_args = (run_data,)
 
     else:
@@ -260,13 +298,30 @@ def load_model(func_file_path, func_name) -> Callable:
 
     return udf
 
+def launch_task(inp):
+    """
+    launch a task.
+    Args:
+        inp: the input file path.
+
+    Returns: None
+
+    """
+    task_type, runner, udf_model = parse_center_input_file(inp)
+    if task_type == 'TRAIN':
+        runner.train(udf_model)
+    elif task_type == 'TS':
+        runner.ts(udf_model)
+    elif task_type == 'OPT':
+        runner.relax(udf_model)
+    else:
+        runner.run(udf_model)
 
 def main():
     """
     Main program interface
     Usage Convention:
         buctoolkit -i xxx.inp -o xxx.oup
-        bctk
     """
     parser = argparse.ArgumentParser(
         description=f'BUCToolkit MAIN PROGRAM INTERFACES\n{generate_display_art()}',
@@ -295,14 +350,7 @@ def main():
                 warnings.warn(f'Output file `{args.output}` already exists. Rename to {_rename}.')
                 opened_file = open(args.output, 'w')
                 sys.stdout = opened_file
-            task_type, runner, udf_model = parse_center_input_file(args.input)
-            if task_type == 'TS':
-                runner.ts(udf_model)
-            elif task_type == 'OPT':
-                runner.relax(udf_model)
-            else:
-                runner.run(udf_model)
-
+            launch_task(args.input)
     finally:
         if opened_file is not None:
             if not opened_file.closed:

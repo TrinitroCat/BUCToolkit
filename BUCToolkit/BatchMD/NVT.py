@@ -11,7 +11,7 @@ import warnings
 
 import torch as th
 
-from BUCToolkit.utils.scatter_reduce import scatter_reduce
+from BUCToolkit.utils.index_ops import index_reduce
 from ._BaseMD import _BaseMD
 
 
@@ -391,13 +391,13 @@ class NVT(_BaseMD):
 
             if batch_indices is not None:
                 self.p_iota += 0.5 / smass * (
-                        th.sum(scatter_reduce(masses * V ** 2 * 103.642696562621738, self.batch_scatter, 1), -1)
+                        th.sum(index_reduce(masses * V ** 2 * 103.642696562621738, self.batch_scatter, 1), -1)
                         - n_free * 8.617333262145e-5 * self.T_init
                 ) * self.time_step  # (1, n_batch)
                 _iota = self.p_iota[:, self.batch_scatter, None]  # (1, n_batch*n_atom, 1)
                 V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3 - 0.5 * _iota * V * self.time_step
                 self.p_iota += 0.5 / smass * (
-                        th.sum(scatter_reduce(masses * V ** 2 * 103.642696562621738, self.batch_scatter, 1), -1)
+                        th.sum(index_reduce(masses * V ** 2 * 103.642696562621738, self.batch_scatter, 1), -1)
                         - n_free * 8.617333262145e-5 * self.T_init
                 ) * self.time_step  # (1, n_batch)
             else:

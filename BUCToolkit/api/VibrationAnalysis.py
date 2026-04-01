@@ -210,40 +210,8 @@ class VibrationAnalysis(_CONFIGS):
                         self.logger.info(f'Structure names: {idx}\n')
                         self.logger.info(f'Cell Vectors:\n{cell_str}\n')
                         # print Atoms Information
-                        elem_list = list()
-                        _element_list = list()
-                        if batch_indx is not None:
-                            indx_old = 0
-                            for indx in batch_indx:
-                                _element_list.append(element_list[0][indx_old: indx_old + indx])
-                                indx_old += indx
-                        else:
-                            _element_list = element_list
-                        for elements in _element_list:
-                            __element_now = ''
-                            __elem = ''
-                            elem_info = ''
-                            __elem_count = ''
-                            for i, elem in enumerate(elements, 1):
-                                # get element symbol
-                                if isinstance(elem, int):
-                                    __elem = ATOMIC_NUMBER[elem]
-                                else:
-                                    __elem = elem
-                                # count element number
-                                if __elem == __element_now:
-                                    __elem_count += 1
-                                else:
-                                    elem_info = elem_info + str(__elem_count) + '  '
-                                    elem_info = elem_info + __elem + ': '
-                                    __elem_count = 1
-                                    __element_now = __elem
-                            elem_info = elem_info + str(__elem_count)
-                            elem_list.append(elem_info)
-                        # log out
-                        for i, ee in enumerate(elem_list):
-                            self.logger.info(f'Structure {i:>5d}: {ee}')
-                        self.logger.info('*' * 89)
+                        self.logout_element_information(element_list, batch_indx)
+
                     # run
                     with th.no_grad():
                         eig_freq, normal_mode = vib_calculator.normal_mode(

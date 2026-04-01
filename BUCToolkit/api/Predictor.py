@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import time
+import traceback
 import warnings
 from typing import Any
 
@@ -158,7 +159,7 @@ class Predictor(_CONFIGS):
                 return _results
 
         except Exception as e:
-            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n')
+            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{traceback.format_exc()}')
 
         finally:
             self.logger.removeHandler(self.log_handler)

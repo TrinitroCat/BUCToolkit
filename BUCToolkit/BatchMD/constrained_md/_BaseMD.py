@@ -17,7 +17,6 @@ import numpy as np
 
 from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.scatter_reduce import scatter_reduce
 from BUCToolkit.api._io import DumpStructures
 from BUCToolkit.utils._para_flatt_list import flatten
 

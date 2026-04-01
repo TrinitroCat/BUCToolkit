@@ -8,9 +8,8 @@ import gc
 
 import logging
 import os
-import queue
+import re
 import sys
-import threading
 import time
 import traceback
 import warnings
@@ -20,11 +19,6 @@ import numpy as np
 import torch as th
 import yaml
 from torch import nn
-from torch.nn import functional as F
-from torch.optim.lr_scheduler import StepLR, ExponentialLR, ChainedScheduler, ConstantLR, LambdaLR, LinearLR
-
-from .Losses import Energy_Force_Loss, Energy_Loss
-from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 
 from BUCToolkit.utils._CheckModules import check_module
 from BUCToolkit.cli.print_logo import generate_display_art
@@ -64,14 +58,6 @@ class _CONFIGS(object):
         self.logger = None
         self.config = dict()
         self.DEVICE = 'cpu'
-        self._OPTIM_DICT = {'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
-                            'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'custom': None}
-        self._LR_SCHEDULER_DICT = {'StepLR': StepLR, 'ExponentialLR': ExponentialLR, 'ChainedScheduler': ChainedScheduler,
-                                   'ConstantLR': ConstantLR, 'LambdaLR': LambdaLR, 'LinearLR': LinearLR, 'custom': None}
-        self._LOSS_DICT = {'MSE': nn.MSELoss, 'MAE': nn.L1Loss, 'Hubber': nn.HuberLoss, 'CrossEntropy': nn.CrossEntropyLoss,
-                           'Energy_Force_Loss': Energy_Force_Loss, 'Energy_Loss': Energy_Loss, 'custom': None}
-        self._METRICS_DICT = {'MSE': F.mse_loss, 'MAE': F.l1_loss, 'R2': _r2_score, 'RMSE': _rmse,
-                              'E_MAE': E_MAE, 'E_R2': E_R2, 'F_MAE': F_MAE, 'F_MaxE': F_MaxE, 'custom': None}
         self.param = None
         self._has_load_data = False
         self._data_loader = None
@@ -82,49 +68,12 @@ class _CONFIGS(object):
         """ reset the device that model would train on """
         self.DEVICE = device
 
-    def set_loss_fn(self, loss_fn, loss_config: Optional[Dict] = None) -> None:
-        """
-        Reset loss function, and reset configs of loss function optionally.
-        parameters:
-            loss_fn: uninstantiated class torch.nn.Module, a user-defind loss function.
-            loss_config: Dict[str, Any]|None, the new configs of given loss function. if None, loss_config would not change.
-        """
-        if loss_config is None:
-            pass
-        elif not isinstance(loss_config, Dict):
-            raise TypeError('loss_config must be a dictionary.')
-        else:
-            self.LOSS_CONFIG = loss_config
-        self.LOSS = loss_fn
-
-    def set_metrics(self, metrics_fn: Dict[str, Callable], metrics_fn_config: Dict[str, Dict] | None = None):
-        """
-        Set user-defined metrics function.
-        Parameters:
-            metrics_fn: Dict[str, Callable], str is the name of metrics function.
-            metrics_fn_config: Dict[str, Dict]|None, the configs of metrics function corresponding to the function name str.
-        """
-        if metrics_fn_config is None: metrics_fn_config = dict()
-        for _key in metrics_fn.keys():
-            if _key not in metrics_fn_config:
-                metrics_fn_config[_key] = dict()
-        self.METRICS.update(metrics_fn)
-        self.METRICS_CONFIG.update(metrics_fn_config)
-
     def set_model_config(self, model_config: Dict[str, Any] | None = None) -> None:
         """
         Set the new configs (hyperparameters) of model.
         """
         if model_config is None: model_config = dict()
         self.MODEL_CONFIG = model_config
-
-    def set_lr_scheduler(self, lr_scheduler, lr_scheduler_config: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Set the lr_scheduler that inherit from torch.optim.lr_scheduler.LRScheduler
-        """
-        self.LR_SCHEDULER = lr_scheduler
-        if lr_scheduler_config is not None:
-            self.LR_SCHEDULER_CONFIG = lr_scheduler_config
 
     def set_model_param(self, model_state_dict: Dict, is_strict: bool = True, is_assign: bool = False) -> None:
         """
@@ -141,21 +90,6 @@ class _CONFIGS(object):
             raise TypeError(f'model_state_dict must be a Dict, but occurred {type(model_state_dict)}')
         self.is_strict = is_strict
         self.is_assign = is_assign
-
-    def set_optimizer(self, optimizer, optim_config: Optional[Dict] = None) -> None:
-        r"""
-        Set the optimizer that inherit from torch.optim.Optimizer, and reset optimizer configs optionally.
-        parameters:
-            optimizer: torch.optim.Optimizer, a user-defind optimizer.
-            optim_config: Dict[str, Any]|None, the new configs of given optimizer. if None, optim_config would not change.
-        """
-        if optim_config is None:
-            pass
-        elif not isinstance(optim_config, Dict):
-            raise TypeError('optim_config must be a dictionary.')
-        else:
-            self.OPTIM_CONFIG = optim_config
-        self.OPTIMIZER = optimizer
 
     def set_dataloader(self, DataLoader, DataLoader_configs: Dict | None = None) -> None:
         r"""
@@ -327,7 +261,10 @@ class _CONFIGS(object):
             else:
                 self.logger.info(' METRICS: None')
             self.logger.info(f' OPTIMIZER INFORMATION:')
-            __opt_repr = re.split(r'\(\n|\)$|\s{2,}|\n', repr(OPTIMIZER))  # type: ignore
+            __opt_repr = re.split(
+                r'\(\n|\)$|\s{2,}|\n',
+                repr(self.OPTIMIZER(list(th.zeros(1)), **self.OPTIM_CONFIG))
+            )
             self.logger.info(f'\tOPTIMIZER: {__opt_repr[0]}')
             if (self.VERBOSE > 1) and hasattr(self, '_layerwise_opt_configs'):
                 if self._layerwise_opt_configs is not None:
@@ -458,7 +395,7 @@ class _CONFIGS(object):
         """
         # load config file
         config_file_path = self.config_file if config_file_path is None else config_file_path
-        with open(config_file_path, 'r') as f:
+        with open(config_file_path, 'r', encoding='utf-8') as f:
             config: Dict[str, Any] = yaml.safe_load(f)
         self.config = config
 
@@ -472,65 +409,13 @@ class _CONFIGS(object):
         self.COMMENTS: str = self.config.get('COMMENTS', 'None.')
         self.VERBOSE: int = int(self.config.get('VERBOSE', 1))
         self.DEVICE: str|th.device = self.config.get('DEVICE', 'cpu')
-        self.EPOCH: int = self.config.get('EPOCH', 0)
         self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', 1)
-        self.VAL_PER_STEP: int = self.config.get('VAL_PER_STEP', 10)
-        self.VAL_BATCH_SIZE: int = self.config.get('VAL_BATCH_SIZE', self.BATCH_SIZE)
-        self.VAL_IF_TRN_LOSS_BELOW: float = self.config.get('VAL_IF_TRN_LOSS_BELOW', th.inf)
 
         # model info
         self.MODEL_NAME: str = self.config.get('MODEL_NAME', 'Untitled')
         if not isinstance(self.MODEL_NAME, str): raise TypeError('MODEL_NAME must be a str.')
         self.MODEL_CONFIG = self.config.get('MODEL_CONFIG', dict())
         if not isinstance(self.MODEL_CONFIG, Dict): raise ValueError('MODEL_CONFIG must be a dictionary.')
-
-        # optim info
-        optim_name = self.config.get('OPTIM', None)
-        if optim_name is not None:
-            self.OPTIMIZER = self._OPTIM_DICT.get(optim_name, None)
-        else:
-            self.OPTIMIZER = None
-        self.OPTIM_CONFIG = self.config.get('OPTIM_CONFIG', dict())
-        if not isinstance(self.OPTIM_CONFIG, Dict): raise ValueError('OPTIM_CONFIG must be a dictionary.')
-
-        self.GRAD_CLIP: bool = self.config.get('GRAD_CLIP', False)
-        self.GRAD_CLIP_MAX_NORM: float = self.config.get('GRAD_CLIP_MAX_NORM', 100)
-        self.GRAD_CLIP_CONFIG = self.config.get('GRAD_CLIP_CONFIG', dict())
-        if not isinstance(self.GRAD_CLIP, bool): raise TypeError('GRAD_CLIP must be a boolean.')
-        if not isinstance(self.GRAD_CLIP_CONFIG, Dict): raise ValueError('GRAD_CLIP_CONFIG must be a dictionary.')
-
-        self.ACCUMULATE_STEP = self.config.get('ACCUMULATE_STEP', 1)
-        if not (isinstance(self.ACCUMULATE_STEP, int) and self.ACCUMULATE_STEP > 0): raise TypeError('ACCUMULATE_STEP must be a positive integer.')
-
-        self.LR_SCHEDULER = self.config.get('LR_SCHEDULER', None)
-        self.LR_SCHEDULER_CONFIG = self.config.get('LR_SCHEDULER_CONFIG', dict())
-        if not isinstance(self.LR_SCHEDULER_CONFIG, Dict): raise TypeError('LR_SCHEDULER_CONFIG must be a dict.')
-
-        self.EMA = self.config.get('EMA', False)  # exponential moving average strategy. best_checkpoint saves using ema param, and others do not.
-        self.EMA_DECAY = float(self.config.get('EMA_DECAY', 0.999))
-
-        # loss & criterion info
-        self.loss_name = self.config.get('LOSS', None)
-        if self.loss_name is not None:
-            self.LOSS = self._LOSS_DICT.get(self.loss_name, None)
-        else:
-            self.LOSS = None
-        self.LOSS_CONFIG = self.config.get('LOSS_CONFIG', dict())
-        if not isinstance(self.LOSS_CONFIG, Dict): raise TypeError('LOSS_CONFIG must be a dictionary.')
-        __metric_name = self.config.get('METRICS', tuple())
-        self.METRICS_CONFIG = self.config.get('METRICS_CONFIG', dict())
-        if not isinstance(__metric_name, Sequence): raise TypeError(f'METRICS must be a sequence, but occurred {type(__metric_name)}')
-        if not isinstance(self.METRICS_CONFIG, Dict): raise TypeError(f'METRICS_CONFIG must be a dict, but occurred {type(self.METRICS_CONFIG)}')
-        self.METRICS = dict()
-        for __metric in __metric_name:
-            if __metric not in self._METRICS_DICT:
-                self.METRICS[__metric] = None
-                self.METRICS_CONFIG[__metric] = dict()
-            elif __metric not in self.METRICS_CONFIG:
-                self.METRICS[__metric] = self._METRICS_DICT[__metric]
-                self.METRICS_CONFIG[__metric] = dict()
-            else:
-                self.METRICS[__metric] = self._METRICS_DICT[__metric]
 
         # output info
         self.REDIRECT = self.config.get('REDIRECT', True)
@@ -569,6 +454,9 @@ class _CONFIGS(object):
 
         # loading atoms fixation info.
         self.FIXATIONS = self.config.get('FIXATIONS', None)
+
+        # If Train
+        self.TRAIN = self.config.get('TRAIN', None)
 
         # If Structure opt.
         self.RELAXATION = self.config.get('RELAXATION', None)

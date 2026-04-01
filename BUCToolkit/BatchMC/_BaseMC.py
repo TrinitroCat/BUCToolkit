@@ -16,7 +16,6 @@ import torch as th
 from torch import nn
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.scatter_reduce import scatter_reduce
 from BUCToolkit.utils.setup_loggers import has_any_handler
 
 
