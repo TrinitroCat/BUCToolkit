@@ -46,11 +46,11 @@ class FIRE(_BaseOpt):
             F_threshold: float, threshold of gradient of func.
             maxiter: int, the maximum iteration steps.
             steplength: The initial step length, i.e. the BatchMD time step.
-            alpha:
-            alpha_fac:
-            fac_inc:
-            fac_dec:
-            N_min:
+            alpha: FIRE arg. alpha.
+            alpha_fac: FIRE arg. the factor of alpha change.
+            fac_inc: FIRE arg. the increment factor.
+            fac_dec: FIRE arg. the decrement factor.
+            N_min: FIRE arg. the minimum number that keeps steplength static.
             device: The device that program runs on.
             verbose: amount of print information.
             _hold_samples: ONLY FOR SPECIAL USE (e.g., CI-NEB or DEBUG).

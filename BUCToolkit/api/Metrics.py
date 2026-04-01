@@ -65,6 +65,7 @@ def E_R2(pred: Dict[Literal['energy', 'forces'], th.Tensor],
     else:
         with th.no_grad():
             r2 = _r2_score(pred['energy'], label['energy'])
+
     return r2
 
 

@@ -12,7 +12,6 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.utils.scatter_reduce import scatter_reduce
 from ._BaseMD import _rBaseMD
 from .NVT import NVT
 from .NVE import NVE

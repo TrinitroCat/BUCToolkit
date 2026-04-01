@@ -12,14 +12,20 @@ import os
 import re
 import time
 from math import ceil
-from typing import Dict, Tuple, Literal, List, Any
+from typing import Dict, Tuple, Literal, List, Any, Callable, Optional
 import traceback
 from inspect import isclass
 
 import numpy as np
 import torch as th
 from torch import nn
+from torch.nn import functional as F
+from torch.optim.lr_scheduler import (StepLR, ExponentialLR, ChainedScheduler, ConstantLR, CyclicLR, MultiStepLR,
+                                      LambdaLR, LinearLR, CosineAnnealingWarmRestarts, CosineAnnealingLR)
 
+from .Losses import Energy_Force_Loss, Energy_Loss
+from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
+from .ModelOptims import FIRELikeOptimizer
 from ._io import _CONFIGS, _LoggingEnd, ExpMovingAverage
 
 
@@ -42,7 +48,7 @@ class Trainer(_CONFIGS):
 
     """
 
-    def __init__(self, config_file: str) -> None:
+    def __init__(self, config_file: str, *args) -> None:
         super().__init__(config_file)
 
         self.config_file = config_file
@@ -52,6 +58,173 @@ class Trainer(_CONFIGS):
         self._has_load_data = False
         self._data_loader = None
         self._layerwise_opt_configs = None
+
+        # CONSTANT of training information
+        self._OPTIM_DICT = {
+            'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
+            'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'FIRE': FIRELikeOptimizer,
+            'custom': None
+        }
+        self._LR_SCHEDULER_DICT = {
+            'StepLR': StepLR, 'ExponentialLR': ExponentialLR, 'ChainedScheduler': ChainedScheduler,
+            'ConstantLR': ConstantLR, 'LambdaLR': LambdaLR, 'LinearLR': LinearLR, 'CosineAnnealingLR': CosineAnnealingLR,
+            'CosineAnnealingWarmRestarts': CosineAnnealingWarmRestarts, 'CyclicLR': CyclicLR, 'MultiStepLR': MultiStepLR,
+            'None': None, 'custom': None
+        }
+        self._LOSS_DICT = {
+            'MSE': nn.MSELoss, 'MAE': nn.L1Loss, 'Hubber': nn.HuberLoss, 'CrossEntropy': nn.CrossEntropyLoss,
+            'Energy_Force_Loss': Energy_Force_Loss, 'Energy_Loss': Energy_Loss, 'custom': None
+        }
+        self._METRICS_DICT = {
+            'MSE': F.mse_loss, 'MAE': F.l1_loss, 'R2': _r2_score, 'RMSE': _rmse,
+            'E_MAE': E_MAE, 'E_R2': E_R2, 'F_MAE': F_MAE, 'F_MaxE': F_MaxE, 'custom': None
+        }
+
+        # Section: parse train parameters
+        trn_config = self.config.get('TRAIN', None)
+        if trn_config is None:
+            self.logger.critical('** ERROR: Training task is required without setting args `TRAIN`. Task aborted. BYE!!! **')
+            raise RuntimeError('** ERROR: Training task is required without setting args `TRAIN`. Task aborted. BYE!!! **')
+
+        # epoches & validation set
+        self.EPOCH: int = int(trn_config.get('EPOCH', 0))
+        self.ACCUMULATE_STEP = trn_config.get('ACCUMULATE_STEP', 1)
+        if not (isinstance(self.ACCUMULATE_STEP, int) and self.ACCUMULATE_STEP > 0):
+            raise TypeError(f'ACCUMULATE_STEP must be a positive integer, but got {self.ACCUMULATE_STEP}')
+        self.VAL_PER_STEP: int = int(trn_config.get('VAL_PER_STEP', 10))
+        self.VAL_BATCH_SIZE: int = int(trn_config.get('VAL_BATCH_SIZE', self.BATCH_SIZE))
+        self.VAL_IF_TRN_LOSS_BELOW: float = float(trn_config.get('VAL_IF_TRN_LOSS_BELOW', th.inf))
+
+        # optim info
+        optim_name = trn_config.get('OPTIM', None)
+        if optim_name is not None:  # lazy to check. One may set/reset it by `self.set_optimizer`
+           self.OPTIMIZER = self._OPTIM_DICT.get(optim_name, None)
+        else:
+           self.OPTIMIZER = None
+        self.OPTIM_CONFIG = trn_config.get('OPTIM_CONFIG', dict())
+        if not isinstance(self.OPTIM_CONFIG, Dict): raise ValueError('OPTIM_CONFIG must be a dictionary.')
+        layerwise_optim_conf = trn_config.get('LAYERWISE_OPTIM_CONFIG', None)
+        if isinstance(layerwise_optim_conf, dict):
+            self.set_layerwise_optim_config(layerwise_optim_conf)
+        elif layerwise_optim_conf is not None:
+            self.logger.warning(f"Invalid format of `LAYERWISE_OPTIM_CONFIG`: {layerwise_optim_conf}, thus ignoring it.")
+
+        self.GRAD_CLIP: bool = trn_config.get('GRAD_CLIP', False)
+        self.GRAD_CLIP_MAX_NORM: float = float(trn_config.get('GRAD_CLIP_MAX_NORM', 100))
+        self.GRAD_CLIP_CONFIG = trn_config.get('GRAD_CLIP_CONFIG', dict())
+        if not isinstance(self.GRAD_CLIP, bool): raise TypeError('GRAD_CLIP must be a boolean.')
+        if not isinstance(self.GRAD_CLIP_CONFIG, Dict): raise ValueError('GRAD_CLIP_CONFIG must be a dictionary.')
+
+        lr_scheduler_name = trn_config.get('LR_SCHEDULER', None)
+        if lr_scheduler_name is not None:
+            self.LR_SCHEDULER = self._LR_SCHEDULER_DICT.get(lr_scheduler_name, None)
+            if lr_scheduler_name not in self._LR_SCHEDULER_DICT:
+                self.logger.warning(f"Unknown lr scheduler name: {lr_scheduler_name}. Learning rate scheduler will be ignored.")
+        else:
+            self.LR_SCHEDULER = None
+        self.LR_SCHEDULER_CONFIG = trn_config.get('LR_SCHEDULER_CONFIG', dict())
+        if not isinstance(self.LR_SCHEDULER_CONFIG, Dict): raise TypeError('LR_SCHEDULER_CONFIG must be a dict.')
+
+        self.EMA = trn_config.get('EMA', False)  # exponential moving average strategy. best_checkpoint saves using ema param, and others do not.
+        self.EMA_DECAY = float(trn_config.get('EMA_DECAY', 0.999))
+
+        # loss & criterion info
+        self.loss_name = trn_config.get('LOSS', None)
+        if self.loss_name is not None:
+           self.LOSS = self._LOSS_DICT.get(self.loss_name, None)
+        else:
+           self.LOSS = None
+        self.LOSS_CONFIG = trn_config.get('LOSS_CONFIG', dict())
+        if not isinstance(self.LOSS_CONFIG, Dict): raise TypeError('LOSS_CONFIG must be a dictionary.')
+        _metric_name = trn_config.get('METRICS', tuple())
+        self.METRICS_CONFIG = trn_config.get('METRICS_CONFIG', dict())
+        if not isinstance(_metric_name, (List, Tuple)): raise TypeError(f'METRICS must be a sequence, but occurred {type(_metric_name)}')
+        if not isinstance(self.METRICS_CONFIG, Dict): raise TypeError(f'METRICS_CONFIG must be a dict, but occurred {type(self.METRICS_CONFIG)}')
+        self.METRICS = dict()
+        for __metric in _metric_name:
+           if __metric not in self._METRICS_DICT:
+               self.METRICS[__metric] = None
+               self.METRICS_CONFIG[__metric] = dict()
+           elif __metric not in self.METRICS_CONFIG:
+               self.METRICS[__metric] = self._METRICS_DICT[__metric]
+               self.METRICS_CONFIG[__metric] = dict()
+           else:
+               self.METRICS[__metric] = self._METRICS_DICT[__metric]
+
+    def set_loss_fn(self, loss_fn, loss_config: Optional[Dict] = None) -> None:
+        """
+        Reset loss function, and reset configs of loss function optionally.
+        parameters:
+            loss_fn: uninstantiated class torch.nn.Module, a user-defind loss function.
+            loss_config: Dict[str, Any]|None, the new configs of given loss function. if None, loss_config would not change.
+        """
+        if loss_config is None:
+            pass
+        elif not isinstance(loss_config, Dict):
+            raise TypeError('loss_config must be a dictionary.')
+        else:
+            self.LOSS_CONFIG = loss_config
+        self.LOSS = loss_fn
+
+    def set_metrics(self, metrics_fn: Dict[str, Callable], metrics_fn_config: Dict[str, Dict] | None = None):
+        """
+        Set user-defined metrics function.
+        Parameters:
+            metrics_fn: Dict[str, Callable], str is the name of metrics function.
+            metrics_fn_config: Dict[str, Dict]|None, the configs of metrics function corresponding to the function name str.
+        """
+        if metrics_fn_config is None: metrics_fn_config = dict()
+        for _key in metrics_fn.keys():
+            if _key not in metrics_fn_config:
+                metrics_fn_config[_key] = dict()
+        self.METRICS.update(metrics_fn)
+        self.METRICS_CONFIG.update(metrics_fn_config)
+
+    def set_lr_scheduler(self, lr_scheduler, lr_scheduler_config: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Set the lr_scheduler that inherit from torch.optim.lr_scheduler.LRScheduler
+        """
+        self.LR_SCHEDULER = lr_scheduler
+        if lr_scheduler_config is not None:
+            self.LR_SCHEDULER_CONFIG = lr_scheduler_config
+
+    def set_optimizer(self, optimizer, optim_config: Optional[Dict] = None) -> None:
+        r"""
+        Set the optimizer that inherit from torch.optim.Optimizer, and reset optimizer configs optionally.
+        parameters:
+            optimizer: torch.optim.Optimizer, a user-defind optimizer.
+            optim_config: Dict[str, Any]|None, the new configs of given optimizer. if None, optim_config would not change.
+        """
+        if optim_config is None:
+            pass
+        elif not isinstance(optim_config, Dict):
+            raise TypeError('optim_config must be a dictionary.')
+        else:
+            self.OPTIM_CONFIG = optim_config
+        self.OPTIMIZER = optimizer
+
+    def set_layerwise_optim_config(self, layer_config_dict: Dict[str, Dict[str, Any]] | None = None):
+        """
+        The optimizer configs of layers in `layer_config_dict.keys()` would set to the corresponding values,
+        and other unspecified layers would use the config of `OPTIM_CONFIG` in the input file.
+        The parameters of the layer which lr is set to `None` would be fixed during training without calculating gradients.
+        The name of layers can be specified by regular expressions e.g.,
+         {"fc1.*": {"lr": 1e-4, "weight_decay": 1e-4}, "fc2.[a-zA-Z]+Norm.*": {"lr": None}}
+
+        Args:
+            layer_config_dict: dict of named layers' learning config: {layer name: {'lr': ...}}.
+
+        Returns: None
+
+        """
+        if layer_config_dict is not None:
+            if not isinstance(layer_config_dict, Dict):
+                self.logger.exception(f'ERROR: Expected `layer_lr_dict` is a Dict, but got {type(layer_config_dict)}')
+                raise TypeError(f'Expected `layer_lr_dict` is a Dict, but got {type(layer_config_dict)}')
+            # fixed_parameter_dict: {name: name length before glob '*'}
+            self._layerwise_opt_configs = {re.compile(nam): val for nam, val in layer_config_dict.items()}
+        else:
+            self._layerwise_opt_configs = None
 
     def train(self, model):
         r"""
@@ -459,25 +632,3 @@ class Trainer(_CONFIGS):
             _metr_list = dict()
         return _val_loss, _metr_list
 
-    def set_layerwise_optim_config(self, layer_config_dict: Dict[str, Dict[str, Any]] | None = None):
-        """
-        The optimizer configs of layers in `layer_config_dict.keys()` would set to the corresponding values,
-        and other unspecified layers would use the config of `OPTIM_CONFIG` in the input file.
-        The parameters of the layer which lr is set to `None` would be fixed during training without calculating gradients.
-        The name of layers can be specified by regular expressions e.g.,
-         {"fc1.*": {"lr": 1e-4, "weight_decay": 1e-4}, "fc2.[a-zA-Z]+Norm.*": {"lr": None}}
-
-        Args:
-            layer_config_dict: dict of named layers' learning config: {layer name: {'lr': ...}}.
-
-        Returns: None
-
-        """
-        if layer_config_dict is not None:
-            if not isinstance(layer_config_dict, Dict):
-                self.logger.exception(f'ERROR: Expected `layer_lr_dict` is a Dict, but got {type(layer_config_dict)}')
-                raise TypeError(f'Expected `layer_lr_dict` is a Dict, but got {type(layer_config_dict)}')
-            # fixed_parameter_dict: {name: name length before glob '*'}
-            self._layerwise_opt_configs = {re.compile(nam): val for nam, val in layer_config_dict.items()}
-        else:
-            self._layerwise_opt_configs = None

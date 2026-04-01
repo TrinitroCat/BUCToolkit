@@ -8,7 +8,7 @@ from .minimize.QN import QN
 from .minimize.FIRE import FIRE
 from .TS.Dimer import Dimer
 from .frequency import Frequency, vibrational_thermo, extract_freq
-from BUCToolkit.BatchGenerate.coords_linear_interp import linear_interpolation
+from BUCToolkit.BatchGenerate.coords_interp import linear_interpolation
 
 __all__ = [
     'CG',

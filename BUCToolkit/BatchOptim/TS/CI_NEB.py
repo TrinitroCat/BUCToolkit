@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as Fn
 
 from BUCToolkit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.BatchGenerate.coords_linear_interp import linear_interpolation_tens
+from BUCToolkit.BatchGenerate.coords_interp import linear_interpolation_tens
 from ..minimize import CG, QN, FIRE
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)

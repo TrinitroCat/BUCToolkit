@@ -18,7 +18,7 @@ from BUCToolkit.BatchMD.constrained_md import ConstrNVT, ConstrNVE
 from BUCToolkit.utils._CheckModules import check_module
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
-from BUCToolkit.BatchGenerate.coords_linear_interp import linear_interpolation_tens
+from BUCToolkit.BatchGenerate.coords_interp import linear_interpolation_tens
 
 
 class ConstrainedMolecularDynamics(_CONFIGS):
