@@ -156,17 +156,11 @@ class FIRE(_BaseOpt):
             is_ncount_gt_Nmin = n_count_ >= self.N_min
             #
             new_t_ = (self.t_ * self.fac_inc).clamp_max_(self.MAX_STEPLENGTH)
-            self.t_.masked_scatter_(is_ncount_gt_Nmin, new_t_.masked_select(is_ncount_gt_Nmin))
-            a_.masked_scatter_(
-                is_ncount_gt_Nmin,
-                (a_ * self.alpha_fac).masked_select(is_ncount_gt_Nmin)
-            )
+            self.t_ = th.where(is_ncount_gt_Nmin, new_t_, self.t_)
+            a_ = th.where(is_ncount_gt_Nmin, (a_ * self.alpha_fac), a_)
             # if P <= 0.
             is_p_lt_0 = momenta <= 0.
-            self.t_.masked_scatter_(
-                is_p_lt_0,
-                (self.t_ * self.fac_dec).masked_select(is_p_lt_0)
-            )
+            self.t_ = th.where(is_p_lt_0, (self.t_ * self.fac_dec), self.t_)
             self.v_.masked_fill_(
                 is_p_lt_0,
                 0.
@@ -197,17 +191,11 @@ class FIRE(_BaseOpt):
             n_count_ += th.where(momenta > 0., 1, -n_count_)
             is_ncount_gt_Nmin = n_count_ >= self.N_min
             new_t_ = (self.t_ * self.fac_inc).clamp_max_(self.MAX_STEPLENGTH)
-            self.t_.masked_scatter_(is_ncount_gt_Nmin, new_t_.masked_select(is_ncount_gt_Nmin))
-            a_.masked_scatter_(
-                is_ncount_gt_Nmin,
-                (a_ * self.alpha_fac).masked_select(is_ncount_gt_Nmin)
-            )
+            self.t_ = th.where(is_ncount_gt_Nmin, new_t_, self.t_)
+            a_ = th.where(is_ncount_gt_Nmin, (a_ * self.alpha_fac), a_)
             # if P <= 0.
             is_p_lt_0 = momenta <= 0.
-            self.t_.masked_scatter_(
-                is_p_lt_0,
-                (self.t_ * self.fac_dec).masked_select(is_p_lt_0)
-            )
+            self.t_ = th.where(is_p_lt_0, (self.t_ * self.fac_dec), self.t_)
             self.v_.masked_fill_(
                 is_p_lt_0,
                 0.

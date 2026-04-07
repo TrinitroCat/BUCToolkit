@@ -195,6 +195,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                 if self.VERBOSE: self.logger.error(__err_msg)
                 raise ValueError(__err_msg)
             n_c = 1  # running batch now
+            n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             for dataIS, dataFS in val_set:
                 try:
                     # get basic information of IS.
@@ -278,7 +279,8 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     _X.detach_()
                     out_grad.detach_()
                     idx = get_indx(dataIS)
-
+                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
+                    n_s += len(batch_indx)
                     self.dumper.collect(
                         batch_indx,
                         idx,

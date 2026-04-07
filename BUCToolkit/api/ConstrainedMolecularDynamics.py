@@ -178,6 +178,25 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 def get_atomic_number(data):
                     return data.atomic_numbers.tolist()  # note: here is different from MD/Relaxations that NOT unsqueeze(0)
 
+                def get_indx(data):
+                    _indx: Dict = getattr(data, 'idx', None)
+                    return _indx
+
+                def get_fixed_mask(data):
+                    mask = getattr(data, 'fixed', None)
+                    if mask is not None:
+                        mask = mask.unsqueeze(0)
+                    return mask
+
+                def get_batch_indx(data):
+                    return [len(dat.pos) for dat in data.to_data_list()]
+
+                def get_init_veloc(data):
+                    veloc = getattr(data, 'velocity', None)
+                    if veloc is not None:
+                        veloc = veloc.unsqueeze(0)
+                    return veloc
+
                 def rebatched_graph(single_graph, X):
                     """ expand batches """
                     X_in = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
@@ -195,6 +214,25 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 def get_cell_vec(data):
                     return data.nodes['cell'].data['cell'].numpy(force=True)
 
+                def get_fixed_mask(data):
+                    mask = data.nodes['atom'].data.get('fix', None)
+                    if mask is not None:
+                        mask = mask.unsqueeze(0)
+                    return mask
+
+                def get_batch_indx(data):
+                    return val_data.batch_num_nodes('atom')
+
+                def get_init_veloc(data):
+                    veloc = data.nodes['atom'].data.get('velocity', None)
+                    if veloc is not None:
+                        veloc = veloc.unsqueeze(0)
+                    return veloc
+
+                def get_indx(data):
+                    _indx: Dict = data.nodes['atom'].data
+                    return _indx.get('idx', None)
+
                 def get_atomic_number(data):
                     return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
 
@@ -205,6 +243,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 if self.VERBOSE: self.logger.error(__err_msg)
                 raise ValueError(__err_msg)
             n_c = 1  # running batch now
+            n_s = 0
             for dataIS, dataFS in val_set:
                 try:
                     # Check Batch
@@ -219,6 +258,15 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                         if self.VERBOSE: self.logger.error(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                         raise RuntimeError(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
                     # MD
+                    # cells & fixations
+                    _cell = get_cell_vec(dataIS)
+                    fixed_mask = get_fixed_mask(dataIS)
+                    # get batch
+                    batch_indx = get_batch_indx(dataIS)
+                    # get id
+                    idx = get_indx(dataIS)
+                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
+                    n_s += len(batch_indx)
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
@@ -226,6 +274,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                         cell_str = np.array2string(
                             get_cell_vec(dataIS), **FLOAT_ARRAY_FORMAT
                         ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
+                        self.logger.info(f'Structure names: {idx}\n')
                         self.logger.info(f'Cell Vectors:\n{cell_str}')
 
                     if self.data_type == 'pyg':
@@ -260,12 +309,12 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                         model_wrap.Energy,
                         X_init_,
                         [origin_elem_list]*self.NIMAGE,
-                        V_init=None,  # TODO, Support user-defined initial velocities.
+                        V_init=get_init_veloc(dataIS),
                         grad_func=model_wrap.Grad,
                         func_args=(dataIS,), grad_func_args=(dataIS,),
                         is_grad_func_contain_y=False,
                         require_grad=self.require_grad,
-                        fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
+                        fixed_atom_tensor=fixed_mask,
                     )
 
                     # Print info

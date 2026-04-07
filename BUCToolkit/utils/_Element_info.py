@@ -26,6 +26,7 @@ Constants:
 #  Environment: Python 3.12
 
 MASS = {
+    "X": 1., # A placeholder
     "H": 1.008,
     "He": 4.0026,
     "Li": 6.94,
@@ -115,6 +116,7 @@ MASS = {
 }  # element set
 
 N_MASS = {
+    0: 1.,  # A placeholder
     1: 1.008,
     2: 4.0026,
     3: 6.94,
@@ -204,6 +206,7 @@ N_MASS = {
 }  # element set
 
 ATOMIC_NUMBER: 'dict(atomic number: element symbol)' = {
+    0: "X",  # A placeholder
     1: "H",
     2: "He",
     3: "Li",
@@ -293,6 +296,7 @@ ATOMIC_NUMBER: 'dict(atomic number: element symbol)' = {
 }
 
 ATOMIC_SYMBOL: 'dict(element symbol : atomic number)' = {
+    "X": 0,
     "H": 1,
     "He": 2,
     "Li": 3,

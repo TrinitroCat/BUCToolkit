@@ -15,4 +15,4 @@ from .NVE import NVE
 from .NVT import NVT
 from .BiasedMD import BiasedMD
 
-__all__ = [NVE, NVT, BiasedMD]
+__all__ = ['NVE', 'NVT', 'BiasedMD']

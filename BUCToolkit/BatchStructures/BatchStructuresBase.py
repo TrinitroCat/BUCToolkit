@@ -1102,6 +1102,7 @@ class BatchStructures(object):
             rev_Numbers: Numbers of structure to revise.
             rev_Coords_type: Coords of structure to revise.
             rev_Coords: Coords of structure to revise.
+            rev_Fixed: Fixation mask of atoms to revise.
             rev_Energies: Energies of structure to revise.
             rev_Forces: Forces of structure to revise.
             rev_Labels: Labels of structure to revise.
@@ -1319,7 +1320,7 @@ class BatchStructures(object):
             n_labels = len(add_Labels)
             if self.Labels is None:  # adding data into None
                 if len(self) == 0:
-                    self.Forces = list()
+                    self.Labels = list()
                 else:
                     raise ValueError(f'Other structures do not have forces, but here some forces is adding.')
 

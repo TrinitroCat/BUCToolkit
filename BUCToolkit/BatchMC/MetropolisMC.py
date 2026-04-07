@@ -25,8 +25,12 @@ class MMC(_BaseMC):
             temperature_update_freq: int = 1,
             temperature_scheme_param: float | None = None,
             coordinate_update_param: float = 0.2,
+            output_file: str | None = None,
+            output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
-            verbose: int = 2
+            verbose: int = 2,
+            is_compile: bool = False,
+            compile_kwargs: dict | None = None
     ):
         """
 
@@ -46,14 +50,23 @@ class MMC(_BaseMC):
             temperature_scheme_param: to control the temperature scheme. see args `temperature_scheme`.
             temperature_update_freq: update temperature per `temperature_update_freq` step.
             coordinate_update_param: float, the scale parameter for coordinates update. variation for Gaussian/range for Uniform/scale for Cauchy.
+            output_file: the path to the binary file that stores trajectories.
+            output_structures_per_step: int, output structures per output_structures_per_step steps.
             device: the device that the program runs on.
             verbose: verbosity of output.
+            is_compile: whether to use jit to compile integrator or not.
+            compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
+                default value: {'mode':'max-autotune-no-cudagraphs'}
         """
         super().__init__(
             iter_scheme,
             maxiter,
+            output_file,
+            output_structures_per_step,
             device,
-            verbose
+            verbose,
+            is_compile,
+            compile_kwargs
         )
         self.T_begin = float(temperature_init)
         self.T_now = copy.deepcopy(self.T_begin)
@@ -102,24 +115,81 @@ class MMC(_BaseMC):
 
     def __x_Gaussian(self, X: th.Tensor):
         T_tmp = max(10., self.T_now)
-        _x = th.full_like(X, self.coordinate_update_param * math.sqrt(T_tmp/298.15))
-        g = th.distributions.Normal(X, _x)
+        _sigma_short = self.coordinate_update_param * math.sqrt(T_tmp/298.15) / th.sqrt(self.free_degree)
+        if self.is_concat_X:
+            _std = _sigma_short.reshape(1, -1, 1).index_select(1, self.batch_scatter)
+        else:
+            _std = _sigma_short.reshape(-1, 1, 1)
+        g = th.distributions.Normal(X, _std)
         X_new = g.sample()
         return X_new
 
     def __x_Cauchy(self, X: th.Tensor):
         T_tmp = max(10., self.T_now)
-        _x = th.full_like(X, self.coordinate_update_param * math.sqrt(T_tmp/298.15))
-        g = th.distributions.Cauchy(X, _x)
+        _sigma_short = self.coordinate_update_param * math.sqrt(T_tmp / 298.15) / th.sqrt(self.free_degree)
+        if self.is_concat_X:
+            _std = _sigma_short.reshape(1, -1, 1).index_select(1, self.batch_scatter)
+        else:
+            _std = _sigma_short.reshape(-1, 1, 1)
+        g = th.distributions.Cauchy(X, _std)
         X_new = g.sample()
         return X_new
 
     def __x_Uniform(self, X: th.Tensor):
         T_tmp = max(10., self.T_now)
-        _x = th.full_like(X, self.coordinate_update_param * math.sqrt(T_tmp/298.15))
-        g = th.distributions.Uniform(X - _x, X + _x)
+        _sigma_short = self.coordinate_update_param * math.sqrt(T_tmp / 298.15) / th.sqrt(self.free_degree)
+        if self.is_concat_X:
+            _std = _sigma_short.reshape(1, -1, 1).index_select(1, self.batch_scatter)
+        else:
+            _std = _sigma_short.reshape(-1, 1, 1)
+        g = th.distributions.Uniform(X - _std, X + _std)
         X_new = g.sample()
         return X_new
+
+    def _metropolis_update(self, func, func_args, func_kwargs, energies_old, X: th.Tensor):
+        """
+        Main Metropolis update function.
+        Args:
+            func:
+            func_args:
+            func_kwargs:
+            energies_old:
+            X:
+
+        Returns:
+
+        """
+        _X = self.X_update_func(X)  # atom_mask will be handled within update_func
+        _energy = th.compiler.disable(func)(_X, *func_args, **func_kwargs)
+        delta_E = _energy - energies_old  # (n_batch, )
+        metropolis_mask = th.exp(- delta_E / (8.617333262145e-5 * self.T_now))  # (n_batch, ); Boltzmann constant kB = 8.617333262145e-5 eV/K
+        # metropolis_mask.clamp_max_(1.)  # no need to cut-off because rand_like always < 1.
+        _x_mask = th.rand_like(_energy) < metropolis_mask
+        energy_new = th.where(
+            _x_mask,
+            _energy,
+            energies_old
+        )
+        # delta_E = th.where(
+        #    _x_mask,
+        #    delta_E,
+        #    0.
+        # )
+        self.is_accept = _x_mask
+        if self.batch_scatter is not None:
+            X_new = th.where(
+                _x_mask.reshape(1, -1, 1).index_select(1, self.batch_scatter),
+                _X,
+                X
+            )
+        else:
+            X_new = th.where(
+                _x_mask.reshape(-1, 1, 1),
+                _X,
+                X
+            )
+
+        return energy_new, delta_E, X_new
 
     def _update_X(self, func, func_args, func_kwargs, energies_old, X: th.Tensor):
         """
@@ -134,39 +204,8 @@ class MMC(_BaseMC):
         Returns:
             p: th.Tensor, the new update direction of X.
         """
-        _X = self.X_update_func(X) * self.atom_masks
-        _energy = func(_X, *func_args, **func_kwargs)
-        delta_E = _energy - energies_old  # (n_batch, )
-        metropolis_mask = th.exp(- delta_E / (8.617333262145e-5 * self.T_now))  # (n_batch, ); Boltzmann constant kB = 8.617333262145e-5 eV/K
-        metropolis_mask = th.where(
-            metropolis_mask > 1.,
-            1.,
-            metropolis_mask
-        )
-        _x_mask = th.rand_like(_energy) < metropolis_mask
-        energy_new = th.where(
-            _x_mask,
-            _energy,
-            energies_old
-        )
-        delta_E = th.where(
-            _x_mask,
-            delta_E,
-            0.
-        )
-        self.is_accept = _x_mask
-        if self.batch_scatter is not None:
-            X_new = th.where(
-                _x_mask[self.batch_scatter],
-                _X,
-                X
-            )
-        else:
-            X_new = th.where(
-                _x_mask.unsqueeze(-1).unsqueeze(-1),
-                _X,
-                X
-            )
+        _main_update_func = th.compile(self._metropolis_update, **self.compile_kwargs, disable=(not self.is_compile))
+        energy_new, delta_E, X_new = _main_update_func(func, func_args, func_kwargs, energies_old, X)
 
         return energy_new, delta_E, X_new
 

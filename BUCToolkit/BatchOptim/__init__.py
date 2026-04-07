@@ -15,6 +15,8 @@ __all__ = [
     'QN',
     'FIRE',
     'Dimer',
+    'Frequency',
+    'vibrational_thermo',
     'linear_interpolation'
 ]
 

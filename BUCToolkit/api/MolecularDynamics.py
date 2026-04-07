@@ -216,7 +216,7 @@ class MolecularDynamics(_CONFIGS):
                     batch_indx = get_batch_indx(val_data)
                     # get id
                     idx = get_indx(val_data)
-                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
+                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
                     n_s += len(batch_indx)
                     element_tensor = get_atomic_number(val_data)
                     if self.VERBOSE > 0:

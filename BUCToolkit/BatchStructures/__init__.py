@@ -4,11 +4,12 @@
 #  File: __init__.py
 #  Environment: Python 3.12
 
-from BUCToolkit.BatchStructures.StructuresIO import read_opt_structures, read_md_traj, ArrayDumper, ArrayDumpReader
+from BUCToolkit.BatchStructures.StructuresIO import read_opt_structures, read_md_traj, read_mc_traj, ArrayDumper, ArrayDumpReader
 
 __all__ = [
     "read_opt_structures",
     "read_md_traj",
+    "read_mc_traj",
     "ArrayDumper",
     "ArrayDumpReader",
 ]

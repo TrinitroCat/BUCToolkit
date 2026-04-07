@@ -20,6 +20,7 @@ from torch.nn import functional as Fn
 
 from BUCToolkit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT, FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils import index_ops
+from BUCToolkit.utils.function_utils import preload_func
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)
 
@@ -294,10 +295,8 @@ class FindMinEigen:
             raise ValueError(f'Invalid value of maxiter_rot: {self.maxiter_rot}. It would be an integer greater than 0.')
 
         # set variables device
-        if isinstance(func, nn.Module):
-            func = func.to(self.device)
-            func.eval()
-            func.zero_grad()
+        func = preload_func(func, self.device)
+
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
         X = X.detach()

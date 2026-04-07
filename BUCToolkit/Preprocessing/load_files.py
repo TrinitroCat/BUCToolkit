@@ -857,14 +857,28 @@ class Xyz2Feat(BatchStructures):
         with open(os.path.join(self.path, file_name), 'r') as _f:
             data = _f.readlines()
         # match atoms number, energy of every structure and generate atom_number_all_list, Energy_list
-        line_of_energy = [d for d in data if len(re.findall(r'i\s=', d)) != 0]
-        if self.has_cell: raise NotImplementedError #
-        atom_list = [
-            int(re.findall(r'\s+[0-9]+\n', d)[0]) for d in data if len(re.findall(r'\s+[0-9]+\n', d)) != 0
-        ]
-        energy_list = [float(data[1 + (atom_list[i] + 2) * i].split()[-1]) for i in range(len(line_of_energy))]
+        atom_list = list()
+        labels_list = list()
+        is_head = False
+        for dd in data:
+            if is_head:  # next title info line
+                labels_list.append(dd)
+                is_head = False
+            # if head
+            try_head = re.match(f"^\s*[0-9]+\n", dd)  # pure int line
+            if try_head is not None:
+                atom_list.append(int(try_head.group()))
+                is_head = True
+                continue
+
+        #line_of_energy = [d for d in data if len(re.findall(r'i\s*=', d)) != 0]
+        #if self.has_cell: raise NotImplementedError #
+        #atom_list = [
+        #    int(re.findall(r'\s*[0-9]+\n', d)[0]) for d in data if len(re.findall(r'\s*[0-9]+\n', d)) != 0
+        #]
+        #energy_list = [float(data[1 + (atom_list[i] + 2) * i].split()[-1]) for i in range(len(line_of_energy))]
         element_position_list = [
-            data[2 + (atom_list[i] + 2) * i: (atom_list[i] + 2) * (i + 1)] for i in range(len(line_of_energy))
+            data[2 + (atom_list[i] + 2) * i: (atom_list[i] + 2) * (i + 1)] for i in range(len(atom_list))
         ]
 
         # Match coordinate, Element_type ,Element_number and generate Coordinate_list, Element_type_Without_repetition_list, Element_Number_Without_repetition_list
@@ -874,34 +888,27 @@ class Xyz2Feat(BatchStructures):
         element_number_without_repetition_list = list()
         idx = list()
         for i, P in enumerate(element_position_list):
-            position_list_ = [l.split()[1:] for l in P]
-            element_list_ = [l.split()[0] for l in P]
-            E = element_list_[:1]
-            N = list()
-            count_ = 0
-            for j, el in enumerate(element_list_):
-                if el != E[-1]:
-                    E.append(el)
-                    N.append(count_)
-                    count_ = 1
-                else:
-                    count_ += 1
-            N.append(count_)
-            element_type_without_repetition_list.append(E)
-            element_number_without_repetition_list.append(N)
-            pos_forc_array = np.array(position_list_, dtype=np.float32)
-            coordinate_list.append(pos_forc_array[:, :3])
-            if self.has_forces:
-                forces_list.append(pos_forc_array[:, 3:])
-            # idx
-            idx.append(file_name + '_' + str(i))
-        cells = [None] * len(element_position_list)
+            try:
+                position_list_ = [l.split()[1:] for l in P]
+                element_list_ = [l.split()[0] for l in P]
+                elem, _, numb = elem_list_reduce(element_list_)
+                element_type_without_repetition_list.append(elem)
+                element_number_without_repetition_list.append(numb)
+                pos_forc_array = np.array(position_list_, dtype=np.float32)
+                coordinate_list.append(pos_forc_array[:, :3])
+                if self.has_forces:
+                    forces_list.append(pos_forc_array[:, 3:])
+                # idx
+                idx.append(file_name + '_' + str(i))
+            except Exception as e:
+                self.logger.warning(f"* Error occurred while loading {i}-th structure: {e}")
+        cells = [np.zeros((3, 3))] * len(element_position_list)
         coo_type = ['C'] * len(element_position_list)
 
-        return (idx, cells, energy_list, forces_list, element_type_without_repetition_list,
+        return (idx, cells, labels_list, forces_list, element_type_without_repetition_list,
                 element_number_without_repetition_list, coordinate_list, coo_type)
 
-    def read(self, file_list):
+    def read(self, file_list = None):
         t_st = time.perf_counter()
         if file_list is None:
             file_list = os.listdir(self.path)
@@ -915,7 +922,7 @@ class Xyz2Feat(BatchStructures):
                 temp = self._read_single(fil)
                 self._Sample_ids.extend(temp[0])
                 self.Cells.extend(temp[1])
-                self.Energies.extend(temp[2])
+                self.Labels.extend(temp[2])
                 if self.has_forces:
                     self.Forces.extend(temp[3])
                 self.Elements.extend(temp[4])
@@ -927,7 +934,10 @@ class Xyz2Feat(BatchStructures):
             except Exception as e:
                 err += 1
                 warnings.warn(
-                    f"An error occurred in {i}th file: {fil}, skipped. Total errors: {err}", RuntimeWarning
+                    f"An error occurred in {i}th file: {fil}, "
+                    f"ERROR: {e}"
+                    f" skipped. Total errors: {err}, {traceback.format_exc()}",
+                    RuntimeWarning
                 )
                 if self.verbose > 0:
                     warnings.warn(f"Error: {e}")

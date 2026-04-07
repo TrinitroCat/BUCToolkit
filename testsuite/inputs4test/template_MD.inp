@@ -1,0 +1,141 @@
+
+# input template
+
+# global configs
+TASK: !!str MD          # task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC'
+START: !!int 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
+VERBOSE: !!int 1        # verbosity level for log output
+DEVICE: !!str 'cuda:0'  # the device on which the task would run
+BATCH_SIZE: !!int 16    # the batch size of input data during calculation
+
+# I/O configs
+LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
+OUTPUT_PATH: !!str your/log/output/path
+OUTPUT_POSTFIX: !!str your_logfile_suffix
+PREDICTIONS_SAVE_FILE: !!str your/model/predictions/save/path  # path of saving predictions
+STRICT_LOAD: !!bool true  # whether to strictly load model parameter
+REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
+SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
+DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD']
+DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
+DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
+FSDATA_PATH: !!str your/final/state/data/path  # used for calc. requiring both initial and final states, e.g., CI-NEB
+DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., Dimer
+VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
+VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
+DATA_LOADER_KWARGS: {}      # other kwargs for data loader.
+IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calculating.
+
+# training
+TRAIN:
+  # epoches & val set
+  EPOCH: !!int 10
+  VAL_BATCH_SIZE: !!int 20  # batch size for validation. default is the same as BATCH_SIZE
+  VAL_PER_STEP: !!int 100   # validate every `VAL_PER_STEP` steps. step = `BATCH_SIZE` * `ACCUMULATE_STEP`
+  VAL_IF_TRN_LOSS_BELOW: !!float 1.e5  # only validating after training loss < `VAL_IF_TRN_LOSS_BELOW`
+  ACCUMULATE_STEP: !!int 12  # gradient accumulation steps
+  # loss configs
+  LOSS: !!str Energy_Loss  # 'MSE': nn.MSELoss, 'MAE': nn.L1Loss, 'Hubber': nn.HuberLoss, 'CrossEntropy': nn.CrossEntropyLoss 'Energy_Force_Loss': Energy_Force_Loss, 'Energy_Loss': Energy_Loss
+  LOSS_CONFIG:             # other kwargs for loss function
+    loss_E: !!str SmoothMAE
+
+  METRICS:  # tuple of ones in [E_MAE, F_MAE, F_MaxE, E_R2, MSE, MAE, R2, RMSE], F_MaxE is the max absolute error of forces.
+    - !!str E_MAE
+    - !!str E_R2
+  METRICS_CONFIG: {}  # other kwargs for metrics
+  #  - F_MaxE
+
+  # optimizer configs
+  OPTIM: !!str AdamW  # model optimizer. Available values:
+                      # 'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
+                      # 'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'FIRE': FIRELikeOptimizer,
+  OPTIM_CONFIG:       # optimizer kwargs
+    lr: !!float 2.e-4
+    # ...
+  LAYERWISE_OPTIM_CONFIG: # Supporting regular expression to selection layers and set them.
+    'force_block.*': { 'lr': 5.e-4 }
+    'energy_block.*': { 'lr': 2.e-4 }
+    '.*_bias_layer.*': { 'lr': 2.e-4 }
+
+  GRAD_CLIP: !!bool true  # whether to toggle on gradient clip
+  GRAD_CLIP_MAX_NORM: !!float 10.  # maximum grad. norm to clip
+  GRAD_CLIP_CONFIG: {}    # other kwargs for `nn.utils.clip_grad_norm_` function
+  LR_SCHEDULER: !!str None  # learning rate scheduler. Available values:
+                            # 'StepLR': StepLR, 'ExponentialLR': ExponentialLR, 'ChainedScheduler': ChainedScheduler,
+                            # 'ConstantLR': ConstantLR, 'LambdaLR': LambdaLR, 'LinearLR': LinearLR,
+                            # 'CosineAnnealingWarmRestarts': CosineAnnealingWarmRestarts, 'CyclicLR': CyclicLR,
+                            # 'MultiStepLR': MultiStepLR, 'CosineAnnealingLR': CosineAnnealingLR, 'None': None,
+  LR_SCHEDULER_CONFIG: {} # kwargs of above `LR_SCHEDULER`
+  EMA: !!bool false       # whether to toggle on EMA (Exponential Moving Average)
+  EMA_DECAY: !!float 0.999  # EMA decay rate
+
+# relaxation
+RELAXATION:
+  ALGO: !!str 'FIRE'  # options: CG, BFGS, FIRE
+  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'PR', 'WYL'
+  E_THRES: !!float 1.e4  # threshold of Energy difference
+  F_THRES: !!float 0.05  # threshold of max Force
+  MAXITER: !!int 300     # maximum iteration
+  STEPLENGTH: !!float 0.5  # initial steplength
+  USE_BB: !!bool true    # whether to use Barzilai-Borwein I steplength as initial steplength
+  LINESEARCH: !!str 'B'  # 'Backtrack' with Armijo's cond., 'Wolfe' for weak Wolfe cond. reached by M-T algo, 'Exact' for exact linear search
+  LINESEARCH_MAXITER: !!int 8  # max iterations of linear search per outer iteration.
+  LINESEARCH_THRES: !!float 0.02  # only for LINESEARCH = 'exact', threshold of exact line search.
+  LINESEARCH_FACTOR: !!float 0.5  # Shrinkage factor for "Backtrack".
+  REQUIRE_GRAD: !!bool False  # whether to toggle on auto-gradient during calculation.
+
+# transition state
+TRANSITION_STATE:
+  ALGO: !!str DIMER  # options: DIMER
+  X_DIFF_ATTR: !!str x_dimer  # the attribute name of initial dimer direction
+  E_THRES: !!float 1.e-4    # see above
+  TORQ_THRES: !!float 1.e-2  # threshold of torque during rotation process, i.e., the residuals of eigen vec.
+  F_THRES: !!float 5.e-2    # see above
+  MAXITER_TRANS: !!int 300  # maximum iteration number of translation steps
+  MAXITER_ROT: !!int 5      # maximum iteration number of rotation steps
+  MAX_STEPLENGTH: !!float 0.5  # limit of steplength
+  DX: !!float 1.e-1         # length for finite difference to calc. Hessian-vector prod.
+  REQUIRE_GRAD: !!bool False  # see above
+
+# vibration analyses (harmonic)
+VIBRATION:
+  METHOD: !!str 'Coord'  # Coord/Grad corresponding to finite difference and auto-grad scheme.
+  BLOCK_SIZE: !!int 1    # block-size of tensor/vectorize parallelization
+  DELTA: !!float 1e-2    # length for finite difference to calc. Hessian-vector prod.
+
+# NEB transition state
+NEB:
+  ALGO: !!str 'CI-NEB'   # option: CI-NEB
+  N_IMAGES: !!int 7      # images number for CI-NEB calc.
+  SPRING_CONST: 5.0      # spring constant for NEB
+  OPTIMIZER: !!str FIRE  # optimizer for CI-NEB. Now only support FIRE.
+  #OPTIMIZER_CONFIGS: Optional[Dict[str, Any]] = None, other kwargs of optimizer.
+  STEPLENGTH: !!float 0.2     # see args in section `RELAXATION`
+  E_THRESHOLD: !!float 1.e-3  # see args in section `RELAXATION`
+  F_THRESHOLD: !!float 0.05   # see args in section `RELAXATION`
+  MAXITER: !!int 20           # see args in section `RELAXATION`
+  REQUIRE_GRAD: !!bool False  # see args in section `RELAXATION`
+
+# molecular dynamics
+MD:
+  ENSEMBLE: !!str NVT     # MD ensemble. options: NVE, NVT
+  THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
+  THERMOSTAT_CONFIG:      # thermostat configs
+    DAMPING_COEFF: !!float 0.01  # damping coefficient for Langevin thermostat. unit: fs^-1
+    TIME_CONST: !!float 120      # time constant for CSVR thermostat. unit: fs
+  TIME_STEP: !!float 1  # MD time step. unit: fs
+  MAX_STEP: !!int 100  # total time (fs) = TIME_STEP * MAX_STEP
+  T_INIT: !!float 298.15  # Initial Temperature, Unit: K. For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist.
+  OUTPUT_COORDS_PER_STEP: !!int 1  # To control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted.
+  # Optional: constraints
+  CONSTRAINTS_FILE: !!str ./constraints.py  # function file path of constraints. This function should receive torch.Tensors and support auto-grad.
+  CONSTRAINTS_FUNC: !!str func              # the specific function name in `CONSTRAINTS_FILE`
+  REQUIRE_GRAD: !!bool False  # see above
+
+# model configs
+MODEL_FILE: !!str your/model/file/path/template_model.py  # function file path of torch model
+MODEL_NAME: !!str YourModel   # the specific name of the model in `MODEL_FILE`
+MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CONFIG)`
+  hyperparameter1: xxx
+  hyperparameter2: xxx
+  # ...
