@@ -25,6 +25,8 @@ class NVE(_BaseMD):
         output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: str|torch.device, device that program rum on.
         verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+        is_compile: whether to use jit to compile integrator or not.
+        compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
 
     Methods:
         run: run BatchMD.
@@ -39,7 +41,9 @@ class NVE(_BaseMD):
             output_file: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
-            verbose: int = 2
+            verbose: int = 0,
+            is_compile: bool = False,
+            compile_kwargs: dict | None = None,
     ):
         super().__init__(
             time_step,
@@ -48,33 +52,53 @@ class NVE(_BaseMD):
             output_file,
             output_structures_per_step,
             device,
-            verbose
+            verbose,
+            is_compile,
+            compile_kwargs
         )
 
-    def _updateXV(
+    def _velocity_Verlet(
             self, X, V, Force,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
             masses, atom_masks, is_grad_func_contain_y, batch_indices,
-    ) -> (th.Tensor, th.Tensor, th.Tensor):
-        """ Update X, V, Force, and return X, V, Energy, Force. """
-        #X: th.Tensor = X.contiguous()
-        #V: th.Tensor = V.contiguous()
-        #masses: th.Tensor = masses.contiguous()
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         with th.no_grad():
             #X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
             #V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             # Update V
-            with th.set_grad_enabled(self.require_grad):
-                X.requires_grad_(self.require_grad)
-                Energy = func(X, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+            Energy, Force = self._calc_EF(
+                X,
+                func,
+                func_args,
+                func_kwargs,
+                grad_func_,
+                grad_func_args,
+                grad_func_kwargs,
+                is_grad_func_contain_y
+            )
+            Force.mul_(atom_masks)
 
             #V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+
+        return X, V, Energy, Force
+
+    def _updateXV(
+            self, X, V, Force,
+            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+            masses, atom_masks, is_grad_func_contain_y, batch_indices,
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """ Update X, V, Force, and return X, V, Energy, Force. """
+        #X: th.Tensor = X.contiguous()
+        #V: th.Tensor = V.contiguous()
+        #masses: th.Tensor = masses.contiguous()
+        update_func = th.compile(self._velocity_Verlet, **self.compile_kwargs, disable=(not self.is_compile))
+        X, V, Energy, Force = update_func(
+            X, V, Force,
+            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+            masses, atom_masks, is_grad_func_contain_y, batch_indices,
+        )
 
         return X, V, Energy, Force

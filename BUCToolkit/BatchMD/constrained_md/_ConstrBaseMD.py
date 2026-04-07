@@ -13,12 +13,12 @@ import torch as th
 from torch import nn
 import numpy as np
 
-from ._BaseMD import _rBaseMD
+from .._BaseMD import _BaseMD
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BUCToolkit.utils.grad_functions import bjvp, bhvp
 
 
-class _rConstrBase(_rBaseMD):
+class _rConstrBase(_BaseMD):
     """
     Constrained Base Dynamics
 
@@ -37,18 +37,18 @@ class _rConstrBase(_rBaseMD):
     Examples for constrains:
         def constr_func(X):
             y = list()
-            # X: shape(N, D), which means the batch dimension would NOT be considered in constraints calculation of X.
-            # fix the distance between atoms (2, 4), (3, 7), (5, 8) into 1.5, 1.6, and 2.1, respectively.
-            y.append(th.linalg.norm(X[[2, 3, 5]] - X[[4, 7, 8]], dim=-1) - th.tensor([1.5, 1.6, 2.1]))
+            # X: shape(N, D), Note the batch dimension would NOT be considered in constraints calculation of X.
+            # fix the distance between atoms (2, 4), (3, 7), (5, 8) into corresponding `constr_val[:3]`
+            y.append(th.linalg.norm(X[[2, 3, 5]] - X[[4, 7, 8]], dim=-1))
 
-            # fix the angle of atom7-atom5-atom8 and atom11-atom9-atom12 into 109.5 and 120 degrees, respectively.
+            # fix the angle of atom7-atom5-atom8 and atom11-atom9-atom12 into corresponding `constr_val[3:6]`
             x1 = X[[5, 9]]
             x2 = X[[7, 11]]
             x3 = X[[8, 12]]
             y.append(
                 (
                     th.sum((x2 - x1) * (x3 - x1))
-                ) / (th.linalg.norm((x2 - x1)) * th.linalg.norm((x3 - x1))) - th.cos(th.deg2rad(th.tensor([109.5, 120])))
+                ) / (th.linalg.norm(x2 - x1) * th.linalg.norm(x3 - x1))
             )
             z = th.cat(y)
             return z
@@ -66,7 +66,6 @@ class _rConstrBase(_rBaseMD):
             constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
             output_file: str | None = None,
-            dump_path: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
             verbose: int = 2
@@ -76,12 +75,10 @@ class _rConstrBase(_rBaseMD):
             max_step,
             T_init,
             output_file,
-            dump_path,
             output_structures_per_step,
             device,
             verbose
         )
-        self.time_now_tens = th.tensor(self.time_now, dtype=th.float32, device=self.device)
         if constr_func is None:
             constr_func = lambda X: th.tensor(0.)
         self._lazy_calc_constr_val = False  # use the value of constr_func(X_init) to determine constr_val (and fixed).
@@ -89,10 +86,10 @@ class _rConstrBase(_rBaseMD):
             self.is_const_constr = True
             self.constr_val_func_raw = None
             self.constr_val_now = constr_val.to(self.device)
-        elif isinstance(constr_val, Callable):
+        elif callable(constr_val):
             self.is_const_constr = False
             self.constr_val_func_raw = constr_val
-            self.constr_val_now = constr_val(self.time_now_tens)
+            self.constr_val_now = constr_val(self.time_now)
         elif constr_val is None:
             self.is_const_constr = True
             self.constr_val_func_raw = None
@@ -111,6 +108,7 @@ class _rConstrBase(_rBaseMD):
         self.negsqrtM = None  # M^-1/2
         self.max_proj_iter = 10
         self.constr_thres = constr_threshold
+        self.lamb = None  # constr force, i.e., the mu of Lagrange multipler
 
     def initialize(
             self,
@@ -126,6 +124,7 @@ class _rConstrBase(_rBaseMD):
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,
+            batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
     ):
@@ -159,10 +158,18 @@ class _rConstrBase(_rBaseMD):
             keepdim=True
         )
         V_init.copy_(th.where(Ek_p < 1e-5, 0., th.sqrt(Ek/Ek_p) * ProjV))
-        self.n_reduce += jac.shape[1]
+        self.free_degree -= jac.shape[1]  # reduce the constr. free deg.
         # recalculate target Ek under constraints
         _, n_atom, n_dim = X.shape
-        self.EK_TARGET = 0.5 * (n_dim * (n_atom - 1) - self.n_reduce) * 8.617333262145e-5 * self.T_init
+        # target kinetic energy for NVT|NPT ensembles
+        if batch_indices:  # Unit: eV/atom. Boltzmann constant kB = 8.6173332621e-5 eV/K
+            self.EK_TARGET = th.tensor(
+                [((self.free_degree / 2.) * 8.617333262145e-5 * self.T_init) for _n_atom in batch_indices],
+                dtype=X.dtype,
+                device=self.device
+            )
+        else:
+            self.EK_TARGET = (self.free_degree / 2.) * 8.617333262145e-5 * self.T_init
         # calc. constr. intensity
         n_batch, n_constr, _ = self.R.shape
         self.lamb = th.zeros((n_batch, n_constr), device=self.device)
@@ -220,8 +227,7 @@ class _rConstrBase(_rBaseMD):
 
         """
         if not self.is_const_constr:
-            self.time_now_tens.copy_(self.time_now)
-            self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now_tens)  #  d s_k(r)/dt
+            self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now)  #  d s_k(r)/dt
 
     def _jacobian(self, X: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """
@@ -240,7 +246,7 @@ class _rConstrBase(_rBaseMD):
 
     def _do_qr(self, jac: th.Tensor):
         """
-        Do QR decomposition and save/update self.Q.
+        Do QR factorization and save/update self.Q.
         Args:
             jac: Jacobian matrix of s_k at X.
 
@@ -255,9 +261,10 @@ class _rConstrBase(_rBaseMD):
 
     def _project1(self, X:th.Tensor) -> th.Tensor:
         """
-        Project X into the manifold defined by all constrains by QR decomposition.
+        Project X into the manifold defined by all constrains by QR factorization.
+        Usually used for update velocity V.
         for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
-        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRD.
+        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
         Args:
             X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
 
@@ -284,7 +291,7 @@ class _rConstrBase(_rBaseMD):
         """
         Project X to normal space.
         for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
-        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRD.
+        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
         Args:
             X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
 
@@ -350,9 +357,9 @@ class _rConstrBase(_rBaseMD):
 
     def _project1_std(self, X:th.Tensor) -> th.Tensor:
         """
-        Compute the projector for 1st-order quantity (e.g. velocity) of all constrains by QR decomposition.
+        Compute the projector for 1st-order quantity (e.g. velocity) of all constrains by QR factorization.
         for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
-        define the projector: P = M^1/2 Q_2 Q_2^T M^-1/2 = M^1/2 (I - Q_1 Q_1^T) M^-1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRD.
+        define the projector: P = M^1/2 Q_2 Q_2^T M^-1/2 = M^1/2 (I - Q_1 Q_1^T) M^-1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
         Args:
             X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
 
@@ -426,6 +433,7 @@ class _rConstrBase(_rBaseMD):
         iteratively solve the Christoffel symbol term by implicit midpoint method.
         function implicit_midpoint_step(r_n, v_n, h, tol=1e-8, max_iter=10)
         """
+        raise NotImplementedError(f"Not implemented yet.")
         n_batch, n_atom, n_dim = X.shape
         V_old = V.clone()
         V_new = V
@@ -487,28 +495,28 @@ class _rConstrBase(_rBaseMD):
             #   * P @ R_V = RV - dt * M^-1/2 @ Q @ R^-T @ linalg.solve(I + dJ^T @ M^-1/2 @ Q @ R^-T * dt, dJ^T @ R_V)
 
             # #######################################################################3
-            J_mid, y = self._jacobian(r_mid)  # (n_constr, n_atom * n_dim)
-            self._do_qr(J_mid)  # (n_f, n_constr), (n_constr, n_constr)
-            J_dot_mid = self._jacobian_derivative(r_mid, v_mid).reshape(1, -1)  # (n_constr, n_atom * n_dim)
-            _v = v_mid.reshape(-1, 1)
-            _y = J_dot_mid @ _v  # (n_constr, n_f) @ (n_atom*n_dim, 1) = (n_constr, 1)
-            _y = np.linalg.solve(R_mid.T, _y)  # (n_constr, n_constr) @ (n_constr, 1) = (n_constr, 1)
-            # (n_f, n_f) @ (n_f, n_constr) @ (n_constr, 1) = (n_f, 1)
-            Gamma = M_sqrt_inv @ Q_mid @ _y
-
-            # 带松弛的更新
-            v_candidate = v_old - dt * Gamma.reshape(n_atom, n_dim)
-            v_next = omega * v_candidate + (1 - omega) * v_new
-
-            eps = np.linalg.norm(v_next - v_new)
-            print(f'{_ + 1} Residuals: {eps}')
-            if eps < tol:
-                return v_next
-
-            v_new = v_next
-
-        print('Not Converged !')
-        return v_new
+        #    J_mid, y = self._jacobian(r_mid)  # (n_constr, n_atom * n_dim)
+        #    self._do_qr(J_mid)  # (n_f, n_constr), (n_constr, n_constr)
+        #    J_dot_mid = self._jacobian_derivative(r_mid, v_mid).reshape(1, -1)  # (n_constr, n_atom * n_dim)
+        #    _v = v_mid.reshape(-1, 1)
+        #    _y = J_dot_mid @ _v  # (n_constr, n_f) @ (n_atom*n_dim, 1) = (n_constr, 1)
+        #    _y = np.linalg.solve(R_mid.T, _y)  # (n_constr, n_constr) @ (n_constr, 1) = (n_constr, 1)
+        #    # (n_f, n_f) @ (n_f, n_constr) @ (n_constr, 1) = (n_f, 1)
+        #    Gamma = M_sqrt_inv @ Q_mid @ _y
+#
+        #    # 带松弛的更新
+        #    v_candidate = v_old - dt * Gamma.reshape(n_atom, n_dim)
+        #    v_next = omega * v_candidate + (1 - omega) * v_new
+#
+        #    eps = np.linalg.norm(v_next - v_new)
+        #    print(f'{_ + 1} Residuals: {eps}')
+        #    if eps < tol:
+        #        return v_next
+#
+        #    v_new = v_next
+#
+        #print('Not Converged !')
+        #return v_new
 
     def implicit_midpoint_step(
             self,

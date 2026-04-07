@@ -3,3 +3,6 @@
 #  Version: 0.9a
 #  File: __init__.py
 #  Environment: Python 3.12
+from .MetropolisMC import MMC
+
+__all__ = ['MMC',]

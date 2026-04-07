@@ -24,6 +24,7 @@ from BUCToolkit.utils._CheckModules import check_module
 from BUCToolkit.cli.print_logo import generate_display_art
 from BUCToolkit.utils.setup_loggers import has_any_handler
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
+from BUCToolkit.utils.function_utils import _BaseWrapper
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 
 
@@ -507,7 +508,7 @@ def compare_tensors(X1: th.Tensor, X2: th.Tensor):
     return char1 == char2
 
 
-class _Model_Wrapper_pyg:
+class _Model_Wrapper_pyg(_BaseWrapper):
 
     __slots__ = ('_model', 'forces', 'X', )
 
@@ -524,9 +525,7 @@ class _Model_Wrapper_pyg:
             Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
 
         """
-        self._model = model
-        self.forces = None
-        self.X = None
+        super().__init__(model)
         if check_module('torch_geometric') is None:
             ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
@@ -553,7 +552,7 @@ class _Model_Wrapper_pyg:
             return - force.reshape(origin_shape).contiguous()
 
 
-class _Model_Wrapper_pyg_only_X:
+class _Model_Wrapper_pyg_only_X(_BaseWrapper):
     def __init__(self, model , graph) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
@@ -566,8 +565,7 @@ class _Model_Wrapper_pyg_only_X:
             Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
             Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
         """
-        self._model = model
-        self.forces = None
+        super().__init__(model)
         self.graph = graph
         if check_module('torch_geometric') is None:
             ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
@@ -583,19 +581,19 @@ class _Model_Wrapper_pyg_only_X:
 
     def Grad(self, X):
         origin_shape = X.shape
-        if not th.allclose(X, self.X, atol=1e-6):
+        if (self.X is None) or (not compare_tensors(X, self.X)):
             self.forces = None
         if self.forces is None:
             self.X = X
-            self.graph.pos = self.X.squeeze(0)
-            return - ((self._model(self.graph ))['forces']).unsqueeze(0)
+            self.graph.pos = self.X.reshape(-1, 3)
+            return - ((self._model(self.graph))['forces']).reshape(origin_shape)
         else:
             force = self.forces
             self.forces = None
-            return - force.unsqueeze(0)
+            return - force.reshape(origin_shape).contiguous()
 
 
-class _Model_Wrapper_dgl:
+class _Model_Wrapper_dgl(_BaseWrapper):
     def __init__(self, model) -> None:
         """
         A format transformer for converting Tensor X into DGLGraph.ndata['pos'] i.e., wrapping the model(graph, ...) into f(X)
@@ -622,8 +620,7 @@ class _Model_Wrapper_dgl:
             Grad: input Tensor `X` and DGLGraph `graph`, it will update data.nodes['atom'].data['pos'] into X and return model(graph)['forces'].
 
         """
-        self._model = model
-        self.forces = None
+        super().__init__(model)
         if check_module('dgl') is None:
             ImportError('The method is unavailable because the `dgl` cannot be imported.')
         pass
@@ -639,7 +636,7 @@ class _Model_Wrapper_dgl:
         return energy
 
     def Grad(self, X, graph):
-        if not th.allclose(X, self.X, atol=1e-6):
+        if (self.X is None) or (not compare_tensors(X, self.X)):
             self.forces = None
         if self.forces is None:
             self.X = X
@@ -650,7 +647,8 @@ class _Model_Wrapper_dgl:
             self.forces = None
             return - force.unsqueeze(0)
 
-class _Model_Wrapper_regularBatch_pyg:
+
+class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
     def __init__(self, model) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
@@ -665,17 +663,15 @@ class _Model_Wrapper_regularBatch_pyg:
             Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
 
         """
-        self._model = model
-        self.forces = None
+        super().__init__(model)
         _pyg = check_module('torch_geometric.data')
         if _pyg is not None:
             import torch_geometric.data as _pyg
             self.pygBatch = _pyg.Batch
         else:
             ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
-        pass
 
-    def Energy(self, X: th.Tensor, graph, return_format: Literal['sum', 'origin'] = 'origin'):
+    def Energy(self, X: th.Tensor, graph):
         self.X = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
         batch_size = X.size(0)
         if graph.batch_size == 1:
@@ -684,13 +680,10 @@ class _Model_Wrapper_regularBatch_pyg:
         y = self._model(graph)  # (n_batch, )
         energy = y['energy']
         self.forces = y['forces']
-        if return_format == 'sum':
-            energy = th.sum(energy).unsqueeze(0)
         return energy
 
     def Grad(self, X, graph):
-        origin_shape = X.shape
-        if not th.allclose(X, self.X, atol=1e-6):
+        if (self.X is None) or (not compare_tensors(X, self.X)):
             self.forces = None
         if self.forces is None:
             self.Energy(X, graph)
@@ -698,6 +691,7 @@ class _Model_Wrapper_regularBatch_pyg:
         force: th.Tensor = self.forces
         self.forces = None
         return - force.unsqueeze(0)
+
 
 class ExpMovingAverage:
     """

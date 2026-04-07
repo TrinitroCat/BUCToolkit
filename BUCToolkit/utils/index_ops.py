@@ -58,7 +58,9 @@ def index_reduce(
         dim: int = 0,
         ops: Literal['prod', 'mean', 'amin', 'amax', 'sum'] = 'sum',
         init_value: float = 0.,
-        out_size: int|None = None
+        out_size: int|None = None,
+        include_self: bool = True,
+        out: th.Tensor|None = None
 ):
     """
     scatter_reduce method that reduces element in `src` with the same indices in `batch_indices` by `ops`.
@@ -69,6 +71,8 @@ def index_reduce(
         ops: reduce operation
         init_value: default value of the output tensor that reduced values filled in.
         out_size: size of the output tensor at the given dim. if None, it is equal to `batch_indices.max().item() + 1`
+        include_self: whether to let `init_value` really participate in the reduction.
+        out: the output tensor. If None, a new one will be returned.
 
     Returns:
 
@@ -78,11 +82,11 @@ def index_reduce(
     output_size = list(src.shape)
     output_size[dim] = (batch_indices.max().item() + 1) if out_size is None else out_size
 
-    out = th.full(output_size, init_value, device=src.device, dtype=src.dtype)
-    if ops == 'sum':
+    out = th.full(output_size, init_value, device=src.device, dtype=src.dtype) if out is None else out.fill_(init_value)
+    if ops == 'sum' and include_self:
         out.index_add_(dim, batch_indices, src)
     else:
-        out.index_reduce_(dim, batch_indices, src, ops, include_self=True)
+        out.index_reduce_(dim, batch_indices, src, ops, include_self=include_self)
     return out
 
 def index_inner_product(

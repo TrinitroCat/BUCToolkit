@@ -16,6 +16,7 @@ import torch as th
 from torch import nn
 from BUCToolkit.BatchOptim._utils._line_search import LineSearch
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
+from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.utils.setup_loggers import has_any_handler
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
@@ -265,10 +266,8 @@ the method of updating function arguments for a mask.
             raise ValueError(f'Invalid value of maxiter: {maxiter}. It would be an integer greater than 0.')
 
         # set variables device
-        if isinstance(func, nn.Module):
-            func = func.to(self.device)
-            func.eval()
-            func.zero_grad()
+        func = preload_func(func, self.device)
+
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
         X = X.detach()
@@ -284,7 +283,7 @@ the method of updating function arguments for a mask.
         is_main_loop_converge = False
         t_st = time.perf_counter()
         # Section: initialize
-        ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
+        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
         if self.verbose:
             self.logger.info('-' * 100)
             self.logger.info(f'Iteration Scheme: {self.iterform}')
@@ -575,7 +574,7 @@ the method of updating function arguments for a mask.
                 # Check NaN
                 #if not th.all(energies.isfinite()): raise RuntimeError(f'NaN Occurred in output: {energies}')
 
-                ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
         if self.verbose > 0:
             if is_main_loop_converge:
@@ -618,7 +617,7 @@ the method of updating function arguments for a mask.
         if output_grad:
             return energies, X, X_grad
         else:
-            return energies, X  , ptlist  # test <<<
+            return energies, X  #, ptlist  # test <<<
 
     @abstractmethod
     def initialize_algo_param(self):

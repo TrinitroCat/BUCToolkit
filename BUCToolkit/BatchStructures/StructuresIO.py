@@ -999,269 +999,6 @@ class ArrayDumpReader:
             )
 
 
-class StandardModel(ABC):
-    """
-    An abstract base class that convert arbitrary function into BUCToolkit supported format to structure opt, MD, and MC, etc.
-    It can receive any user-defined Callable object `model` which returns torch.Tensors, and convert it to the standard dict format
-        {'energy': energy, 'forces': forces} by user-override `initialize_model` (optional), `calc_energy`, and `calc_forces` with
-        input `args` and `kwargs`.
-    DO NOT SUPPORT FOR TRAINING.
-
-    """
-    def __init__(
-            self,
-            model,
-            args_for_init: Tuple = tuple(),
-            kwargs_for_init: Dict | None = None,
-            device: str = 'cpu',
-            *args,
-            **kwargs
-    ):
-        """
-        The original PyTorch model with (hyper-)parameters args and kwargs.
-        Args:
-            model: the main function
-            args_for_init: arguments passed to model
-            kwargs_for_init: keyword arguments passed to model
-            args: additional positional arguments for calc_energy or calc_forces, if necessary
-            kwargs: additional keyword arguments for calc_energy or calc_forces, if necessary
-        """
-        if kwargs_for_init is None: kwargs_for_init = {}
-        super().__init__()
-        self.model = model
-        self.args = args
-        self.kwargs = kwargs
-        self.device = th.device(device)
-
-        self.initialize_model(*args_for_init, **kwargs_for_init)
-
-    def initialize_model(self, *args, **kwargs):
-        """
-        Initialize & config the model, if necessary.
-        Args:
-            *args:
-            **kwargs:
-
-        Returns:
-
-        """
-        pass
-
-    @abstractmethod
-    def calc_energy(self, x) -> th.Tensor:
-        """
-        The method that calculates the energy of given x.
-        One may use input args/kwargs in __init__
-        Args:
-            x: input variable
-
-        Returns: energy
-
-        """
-        pass
-
-    @abstractmethod
-    def calc_forces(self, x) -> th.Tensor:
-        """
-        The method that calculates the forces of given x.
-        One may use input args/kwargs in __init__
-        Args:
-            x: input variable
-
-        Returns: forces
-
-        """
-        pass
-
-    def __call__(self, x):
-        with th.no_grad():
-            ener = th.as_tensor(self.calc_energy(x), device=self.device)
-            forc = th.as_tensor(self.calc_forces(x), device=self.device)
-            return {'energy': ener, 'forces': forc}
-
-
-class StandardInput(ABC):
-    """
-    An abstract container as the standard input of advanced API `api`,
-     which have properties that can be inquired by follow methods as the input arg `data`:
-
-        def get_batch_size(data):
-            # total batch size
-            return len(data)
-
-        def get_cell_vec(data):
-            # `batch_size` cell vectors stacked at the 1st dim.
-            return data.cell.numpy(force=True)
-
-        def get_atomic_number(data):
-            # `batch_size` atomic numbers tensor(int64) concatenated at the 1st dim.
-            return data.atomic_numbers.unsqueeze(0)
-
-        def get_indx(data):
-            # Python list object with `batch_size` elements of each sample's name.
-            # each name must have less than 128 bytes.
-            _indx: Dict = getattr(data, 'idx', None)
-            return _indx
-
-        def get_pos(data):
-            # Atomic coordinates tensor in dtype float32 concatenated at the 1st dim.
-            return data.pos.unsqueeze(0)
-
-        def get_fixed_mask(data):
-            # the same shape as `pos` with dtype int8. Exactly, only 0, 1.
-            # Optional. default is all ones.
-            mask = getattr(data, 'fixed', None)
-            if mask is not None:
-                mask = mask.unsqueeze(0)
-            return mask
-
-        def get_batch_indx(data):
-            # batch_indices in the form of 1d int64 th.Tensor [0, 0, 0, ..., 1, 1, ..., n]
-            # where the same number means the indexed data of the same sample.
-            return [len(dat.pos) for dat in data.to_data_list()] # or can directly store this attr and return `data.batch`
-
-        def get_init_dX(data):
-            # used for Dimer & other algo. requiring finite difference. Have the same shape & dtype as `pos`
-            # Optional.
-            return getattr(data, self.x_diff_attr, None)
-
-        def get_init_veloc(data):
-            # used for MD. The initial velocities that have the same shape & dtype as `pos`
-            # Optional.
-            veloc = getattr(data, 'velocity', None)
-            if veloc is not None:
-                veloc = veloc.unsqueeze(0)
-            return veloc
-
-    They are fully compatible with `torch_geometric.data.batch` object.
-    """
-    _ATTR_TYPE = {
-        'idx': '<U128',
-        'batch': '<i8',
-        'cell': '<f4',
-        'pos': '<f4',
-        'mask': '|i1',
-        'atomic_numbers': '<i4',
-        'x_diff': '<f4',
-        'velocity': '<f4',
-    }
-
-    # the following properties are must have implemented.
-
-    @abstractmethod
-    def __len__(self) -> int:
-        """ return the sample number in one batch """
-        pass
-
-    @property
-    @abstractmethod
-    def batch(self) -> Optional[th.Tensor]:
-        """
-        batch indices tensor in the form of 1-D int64 th.Tensor [0, 0, 0, ..., 1, 1, ..., n]
-            where the same number means the indexed data of the same sample.
-        """
-        pass
-
-    @batch.setter
-    @abstractmethod
-    def batch(self, value: Optional[th.Tensor]) -> None:
-        pass
-
-    @property
-    @abstractmethod
-    def pos(self) -> th.Tensor:
-        """
-        Atomic coordinates tensor in dtype float32 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
-        """
-        pass
-
-    @pos.setter
-    @abstractmethod
-    def pos(self, value: th.Tensor) -> None:
-        pass
-
-    @property
-    @abstractmethod
-    def cell(self) -> th.Tensor:
-        """
-        cell tensor in dtype float32 concatenated at the 1st dim. shape: (n_batch, 3, 3)
-        """
-        pass
-
-    @cell.setter
-    @abstractmethod
-    def cell(self, value: th.Tensor) -> None:
-        pass
-
-    @property
-    @abstractmethod
-    def atomic_numbers(self) -> th.Tensor:
-        """
-        Atomic number tensor in dtype int64 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, ).
-        """
-        pass
-
-    @atomic_numbers.setter
-    @abstractmethod
-    def atomic_numbers(self, value: th.Tensor) -> None:
-        pass
-
-    @property
-    def idx(self) -> Optional[List[str]]:
-        """
-        Optional. The sample name list. Each name must have less than 128 bytes.
-        """
-        return None
-
-    @idx.setter
-    def idx(self, value: Optional[List[str]]) -> None:
-        pass
-
-    @property
-    def fixed(self) -> Optional[th.Tensor]:
-        """
-        Optional. The atomic fixation tensor in dtype int8 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
-        element can only be 0 (fixed) or 1 (free).
-        """
-        return None
-
-    @fixed.setter
-    def fixed(self, value: Optional[th.Tensor]) -> None:
-        pass
-
-    @property
-    def velocity(self) -> Optional[th.Tensor]:
-        """
-        Optional. The atom velocity tensor in dtype float32 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
-        Only used for MD.
-        """
-        return None
-
-    @velocity.setter
-    def velocity(self, value: Optional[th.Tensor]) -> None:
-        pass
-
-    @property
-    def x_diff(self) -> Optional[th.Tensor]:
-        """
-        Optional. The atom difference tensor in dtype float32 concatenated at the 1st dim. shape: (sum_i^{n_batch} n_i, 3).
-        Only used for Dimer or other algorithms which require finite differences.
-        """
-        return None
-
-    @x_diff.setter
-    def x_diff(self, value: Optional[th.Tensor]) -> None:
-        pass
-
-    @abstractmethod
-    def to_data_list(self) -> List[Any]:
-        """
-        Split batched data into the List of each sample.
-        Similar to torch_geometric.data.Batch.
-        Optional to override.
-        """
-        raise NotImplementedError(f'Please implement `self.to_data_list()` by overriding in the subclass.')
-
 def structures_io_dumper(path: str|None, mode: Literal['w', 'x', 'a'] = 'x', disable: bool = False):
     """
     Auxiliary function for structure IO. It will be added into Batch* methods as a general dumper.
@@ -1316,6 +1053,7 @@ def read_md_traj(
     numbers_list = list()
     coo_t_list = list()
     coo_list = list()
+    veloc_list = list()
     fixed_list = list()
     energy_list = list()
     force_list = list()
@@ -1352,8 +1090,10 @@ def read_md_traj(
             for en, x, v, f in raw_results[f'group{i_content}']:
                 _x = [_ for _ in x]
                 _f = [_ for _ in f]
+                _v = [_ for _ in v]
                 smp_ids.extend([f'samp{i_cyc}_struc{_}_step{kk}' for _ in _id_per_frame])
                 coo_list.extend(_x)
+                veloc_list.extend(_v)
                 energy_list.extend(en.tolist())
                 force_list.extend(_f)
                 kk += 1
@@ -1389,8 +1129,10 @@ def read_md_traj(
             for en, x, v, f in raw_results[f'group{i_content}']:
                 _x = np.split(x[0], _split_indices, axis=0)
                 _f = np.split(f[0], _split_indices, axis=0)
+                _v = np.split(v[0], _split_indices, axis=0)
                 smp_ids.extend([f'samp{i_cyc}_struc{_}_step{kk}' for _ in _id_per_frame])
                 coo_list.extend(_x)
+                veloc_list.extend(_v)
                 energy_list.extend(en.tolist())
                 force_list.extend(_f)
                 kk += 1
@@ -1408,6 +1150,138 @@ def read_md_traj(
         fixed_list,
         energy_list,
         force_list,
+        veloc_list
+    )
+    bs._check_id()
+    bs._check_len()
+
+    return bs
+
+def read_mc_traj(
+        path,
+        indices: List[int]|slice|int = -1,
+        is_copy: bool = True
+):
+    """
+    A specialized reader for dump files generated by Monte Carlo.
+    For BaseMC class, the information is as follows
+    with denoting shape [n_batch, n_atom, n_dim] (regular batch) or [1, sumNi, n_atom] (irregular batch) as "sX":
+        group 1: 1-step
+            batch_indices_tensor[n_batch, ] (optional, exists for irregular batches)
+            cell_vec[n_batch, 3, 3] / [1], if No cell_vec input, it will be set to [0] (shape: [1, ]).
+            atomic_numbers[n]
+            fixed_mask[sX]
+        group 2: n_time_steps step
+            E[n_batch, ] (energy)
+            X[sX]        (coordinates)
+    Args:
+        path: the path to the dump file.
+        indices: the indices in each group of the arrays to read. A negative number means read all.
+        is_copy: whether to copy the arrays from the mmap file.
+            Note: if `is_copy` is False, the mmap file cannot be closed due to the exported pointers used by read arrays.
+             One must release all references to the mmap file first to close the memory map file.
+    Returns:
+        BatchStructures
+
+    """
+    reader = ArrayDumpReader(path)
+    raw_results = reader.read(groups=-1, indices=indices, is_copy=is_copy)
+    n_grp = len(raw_results)
+    if n_grp % 2 != 0:
+        raise EOFError(f"Molecular dynamics file must contain even number of groups, but got {n_grp}.")
+
+    smp_ids = list()
+    cell_list = list()
+    element_list = list()
+    numbers_list = list()
+    coo_t_list = list()
+    coo_list = list()
+    fixed_list = list()
+    energy_list = list()
+
+    for i in range(0, n_grp, 2):
+        i_head = i
+        i_content = i + 1
+        i_cyc = i_head // 2
+        if len(raw_results[f'group{i_head}'][0]) == 3:  # no irregular batch_indices
+            batch_indices_tensor = None
+            (
+                cell_vec,
+                atomic_numbers,
+                fixed_mask
+            ) = raw_results[f'group{i_head}'][0]
+            n_batch = len(cell_vec)
+            _elements = list()
+            _numbers = list()
+            _id_per_frame = list()
+            for ii, _atml in enumerate(atomic_numbers):
+                elements, _, numbers = elem_list_reduce(_atml)
+                _elements.append(elements)
+                _numbers.append(numbers)
+                _id_per_frame.append(ii)
+            _fixed = [_ for _ in fixed_mask]
+            _cells = [_ for _ in cell_vec]
+            kk = 0
+            n_cyc = len(raw_results[f'group{i_content}'])
+            cell_list.extend(_cells * n_cyc)
+            element_list.extend(_elements * n_cyc)
+            numbers_list.extend(_numbers * n_cyc)
+            coo_t_list.extend(['C'] * (n_batch * n_cyc))
+            fixed_list.extend(_fixed * n_cyc)
+            for en, x in raw_results[f'group{i_content}']:
+                _x = [_ for _ in x]
+                smp_ids.extend([f'samp{i_cyc}_struc{_}_step{kk}' for _ in _id_per_frame])
+                coo_list.extend(_x)
+                energy_list.extend(en.tolist())
+                kk += 1
+
+        elif len(raw_results[f'group{i_head}'][0]) == 4:  # irregular situation
+            (
+                batch_indices_tensor,
+                cell_vec,
+                atomic_numbers,
+                fixed_mask
+            ) = raw_results[f'group{i_head}'][0]
+            n_batch = len(batch_indices_tensor)
+            _split_indices = np.cumsum(batch_indices_tensor)[:-1]
+            _cells = [_ for _ in cell_vec]
+            _tol_atm_list = np.split(atomic_numbers[0], _split_indices, axis=0)
+            _elements = list()
+            _numbers = list()
+            _id_per_frame = list()
+            for ii, _atml in enumerate(_tol_atm_list):
+                elements, _, numbers = elem_list_reduce(_atml)
+                _elements.append(elements)
+                _numbers.append(numbers)
+                _id_per_frame.append(ii)
+            _fixed = np.split(fixed_mask[0], _split_indices, axis=0)
+            # main data
+            kk = 0
+            n_cyc = len(raw_results[f'group{i_content}'])
+            cell_list.extend(_cells * n_cyc)
+            element_list.extend(_elements * n_cyc)
+            numbers_list.extend(_numbers  * n_cyc)
+            coo_t_list.extend(['C'] * (n_batch * n_cyc))
+            fixed_list.extend(_fixed * n_cyc)
+            for en, x in raw_results[f'group{i_content}']:
+                _x = np.split(x[0], _split_indices, axis=0)
+                smp_ids.extend([f'samp{i_cyc}_struc{_}_step{kk}' for _ in _id_per_frame])
+                coo_list.extend(_x)
+                energy_list.extend(en.tolist())
+                kk += 1
+        else:
+            raise ValueError(f"Invalid file format: {path}. It may be not a MD dump file.")
+
+    bs = BatchStructures()
+    bs.append_from_lists(
+        smp_ids,
+        cell_list,
+        element_list,
+        numbers_list,
+        coo_t_list,
+        coo_list,
+        fixed_list,
+        energy_list,
     )
     bs._check_id()
     bs._check_len()

@@ -539,7 +539,7 @@ class Trainer(_CONFIGS):
                         if n_err <= 200:
                             self.logger.error(
                                 f'An error occurred in the step {num_step} of epoch {i+1}: {e}; idx: {batch_data.idx}.\n'
-                                f'Total ERROR NUMBER: {n_err}.\n'
+                                f'Total ERROR NUMBER: {n_err}.\n{traceback.format_exc()}'
                                 f'Training will continue, but metrics and losses in this step may not be accurate.'
                             )
                         else:

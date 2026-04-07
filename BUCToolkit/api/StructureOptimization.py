@@ -319,7 +319,6 @@ class StructureOptimization(_CONFIGS):
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
-            idx = list()
             for val_data, val_label in val_set:
                 try:  # Catch error in each loop & continue, instead of directly exit.
                     # to avoid get an empty batch
@@ -364,7 +363,7 @@ class StructureOptimization(_CONFIGS):
                     fixed_mask = get_fixed_mask(val_data)
                     # get id
                     idx = get_indx(val_data)
-                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
+                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
                     n_s += len(batch_indx)
                     element_tensor = get_atomic_number(val_data)
                     if self.VERBOSE > 0:

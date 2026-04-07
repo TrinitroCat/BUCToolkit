@@ -20,7 +20,7 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 
 class MonteCarlo(_CONFIGS):
     """
-    Class of monte carlo algorithms, including NVT g monte carlo & simulated annealing (temperature varied MC).
+    Class of Monte Carlo algorithms, including NVT g Monte Carlo & simulated annealing (temperature varied MC).
     Users need to set the dataset and dataloader manually.
 
     Args:

@@ -199,7 +199,7 @@ class VibrationAnalysis(_CONFIGS):
                     masses = masses.unsqueeze(-1).expand_as(X_init)  # (n_batch, n_atom, n_dim)
                     # get id
                     idx = get_indx(val_data)
-                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, len(batch_indx))]
+                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
                     n_s += len(batch_indx)
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 89)

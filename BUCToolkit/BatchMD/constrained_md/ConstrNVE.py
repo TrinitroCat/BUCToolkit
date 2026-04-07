@@ -77,6 +77,7 @@ class ConstrNVE(_rConstrBase):
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,
+            batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
     ):
@@ -93,6 +94,7 @@ class ConstrNVE(_rConstrBase):
             grad_func_kwargs,
             is_grad_func_contain_y,
             require_grad,
+            batch_indices,
             fixed_atom_tensor,
             is_fix_mass_center
         )
@@ -101,19 +103,21 @@ class ConstrNVE(_rConstrBase):
     def _updateXV(
             self, X, V, Force,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y,
-    ) -> (th.Tensor, th.Tensor, th.Tensor):
+            masses, atom_masks, is_grad_func_contain_y, batch_indices,
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """ Update X, V, Force, and return X, V, Energy, Force. """
-        X: th.Tensor = X.detach()
+        # X: th.Tensor = X.contiguous()
+        # V: th.Tensor = V.contiguous()
+        # masses: th.Tensor = masses.contiguous()
         with th.no_grad():
-            X0 = X.clone()
-            V0 = V.clone()
-            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            V.add_(Force / masses, alpha=0.5 * self.time_step * 9.64853329045427e-3)
+            # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
+            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
-            # iteratively modify positions into the manifold, i.e., the approx. exp. mapping
-            lamb = self._project2(X)  # update X in-place
-            # Update F
+            Fc = self._project2(X)  # in-place update
+            if self.verbose > 0:
+                self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
+            # Update V
             with th.set_grad_enabled(self.require_grad):
                 X.requires_grad_(self.require_grad)
                 Energy = func(X, *func_args, **func_kwargs)
@@ -121,13 +125,10 @@ class ConstrNVE(_rConstrBase):
                     Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
                 else:
                     Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-            # update another half step
-            V.add_(Force / masses, alpha=0.5 * self.time_step * 9.64853329045427e-3)
-            # project V, i.e., approx. parallel trans.
+
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             V.copy_(self._project1(V))
-            # debug
-            #self._debug_X_check.append(abs(y[0].item()))
-            #self._debug_V_check.append(abs(th.sum(jac * V.unsqueeze(1), dim=(-2, -1))[0].item()))
 
         return X, V, Energy, Force
 
@@ -135,8 +136,9 @@ class ConstrNVE(_rConstrBase):
             self, X, V, Force,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
             masses, atom_masks, is_grad_func_contain_y,
-    ) -> (th.Tensor, th.Tensor, th.Tensor):
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
+        TESTING...
         Here the returned X, V, Force and Energy are all the quantities at the midpoint.
         And the quantities in the end point are additionally stored in external attr. self._X, self._V,
         and these attributes would be updated in-place within `self.implicit_midpoint_step`
