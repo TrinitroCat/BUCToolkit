@@ -10,6 +10,7 @@ from typing import Dict, Any, Literal, Optional, Sequence, Tuple, List, Callable
 import time
 import warnings
 from abc import ABC, abstractmethod
+import os
 
 import numpy as np
 import torch as th
@@ -17,12 +18,12 @@ from torch import nn
 from BUCToolkit.BatchOptim._utils._line_search import LineSearch
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils.function_utils import preload_func
-from BUCToolkit.utils.setup_loggers import has_any_handler
+from BUCToolkit.utils.setup_loggers import BaseLogger
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
 
 
-class _BaseOpt(ABC):
+class _BaseOpt(BaseLogger, ABC):
     def __init__(
             self,
             iter_scheme: str,
@@ -101,14 +102,8 @@ class _BaseOpt(ABC):
         self.verbose = verbose
 
         # logger
-        self.logger = logging.getLogger('Main.OPT')
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if not has_any_handler(self.logger):
-            log_handler = logging.StreamHandler(sys.stdout, )
-            log_handler.setLevel(logging.INFO)
-            log_handler.setFormatter(formatter)
-            self.logger.addHandler(log_handler)
+        super().__init__()
+        self.init_logger('Main.OPT')
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -141,8 +136,9 @@ class _BaseOpt(ABC):
 
         `method` is for main loop update; and `line_search_method` is for line search subroutine update;
         Args:
-            method: Callable(mask: Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict) -> Tuple[Tuple, Dict, Tuple, Dict],
-the method of updating function arguments for a mask.
+            method: Callable(
+                    mask: Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict
+                ) -> Tuple[Tuple, Dict, Tuple, Dict], the method of updating function arguments for a mask.
             line_search_method: as the same use of `method`, but for line search subroutines.
 
         Returns: None
@@ -160,9 +156,9 @@ the method of updating function arguments for a mask.
             func: Any | nn.Module,
             X: th.Tensor,
             grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
+            func_args: Tuple[Any] = tuple(),
             func_kwargs: Dict | None = None,
-            grad_func_args: Sequence = tuple(),
+            grad_func_args: Tuple[Any] = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,
@@ -202,6 +198,10 @@ the method of updating function arguments for a mask.
             grad_func_kwargs = dict()
         # Check batch indices; irregular batch
         if isinstance(X, th.Tensor):
+            if len(X.shape) == 2:
+                X = X.unsqueeze(0)
+            elif len(X.shape) != 3:
+                raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
             n_batch, n_atom, n_dim = X.shape
         else:
             raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')

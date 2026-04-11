@@ -849,7 +849,6 @@ class Xyz2Feat(BatchStructures):
         self.path = path
         self.has_cell = has_cell
         self.has_forces = has_forces
-        self.Energies = list()
         if has_forces: self.Forces = list()
 
     def _read_single(self, file_name: str, ) -> Tuple[List[str], List, List, List,
@@ -859,27 +858,30 @@ class Xyz2Feat(BatchStructures):
         # match atoms number, energy of every structure and generate atom_number_all_list, Energy_list
         atom_list = list()
         labels_list = list()
+        elem_coo_list = list()
         is_head = False
-        for dd in data:
+        end_ptr = len(data)
+        ptr = 0
+        while True:
+            if ptr >= end_ptr:
+                break
+            dd = data[ptr]
             if is_head:  # next title info line
-                labels_list.append(dd)
+                labels_list.append(dd)  # label info
+                ptr += 1
+                coo_part = data[ptr: ptr + atom_list[-1]]
+                elem_coo_list.append(coo_part)
                 is_head = False
+                ptr += atom_list[-1]
+                continue
             # if head
-            try_head = re.match(f"^\s*[0-9]+\n", dd)  # pure int line
+            try_head = re.match(r"^\s*[0-9]+\n", dd)  # pure int line
             if try_head is not None:
                 atom_list.append(int(try_head.group()))
                 is_head = True
+                ptr += 1
                 continue
-
-        #line_of_energy = [d for d in data if len(re.findall(r'i\s*=', d)) != 0]
-        #if self.has_cell: raise NotImplementedError #
-        #atom_list = [
-        #    int(re.findall(r'\s*[0-9]+\n', d)[0]) for d in data if len(re.findall(r'\s*[0-9]+\n', d)) != 0
-        #]
-        #energy_list = [float(data[1 + (atom_list[i] + 2) * i].split()[-1]) for i in range(len(line_of_energy))]
-        element_position_list = [
-            data[2 + (atom_list[i] + 2) * i: (atom_list[i] + 2) * (i + 1)] for i in range(len(atom_list))
-        ]
+            ptr += 1
 
         # Match coordinate, Element_type ,Element_number and generate Coordinate_list, Element_type_Without_repetition_list, Element_Number_Without_repetition_list
         coordinate_list = list()
@@ -887,7 +889,7 @@ class Xyz2Feat(BatchStructures):
         element_type_without_repetition_list = list()
         element_number_without_repetition_list = list()
         idx = list()
-        for i, P in enumerate(element_position_list):
+        for i, P in enumerate(elem_coo_list):
             try:
                 position_list_ = [l.split()[1:] for l in P]
                 element_list_ = [l.split()[0] for l in P]
@@ -902,8 +904,8 @@ class Xyz2Feat(BatchStructures):
                 idx.append(file_name + '_' + str(i))
             except Exception as e:
                 self.logger.warning(f"* Error occurred while loading {i}-th structure: {e}")
-        cells = [np.zeros((3, 3))] * len(element_position_list)
-        coo_type = ['C'] * len(element_position_list)
+        cells = [np.zeros((3, 3))] * len(elem_coo_list)
+        coo_type = ['C'] * len(elem_coo_list)
 
         return (idx, cells, labels_list, forces_list, element_type_without_repetition_list,
                 element_number_without_repetition_list, coordinate_list, coo_type)
@@ -917,6 +919,7 @@ class Xyz2Feat(BatchStructures):
             raise TypeError(f'Invalid type of files_list: {type(file_list)}')
 
         err = 0
+        self.Labels = list()
         for i, fil in enumerate(file_list):
             try:
                 temp = self._read_single(fil)

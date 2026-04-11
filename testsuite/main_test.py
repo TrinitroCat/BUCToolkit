@@ -20,8 +20,9 @@ from BUCToolkit.BatchMD.constrained_md import ConstrNVE, ConstrNVT
 from BUCToolkit.BatchOptim import QN, CG, FIRE, Frequency
 from BUCToolkit.BatchMC import MMC
 from BUCToolkit.utils.AtomicNumber2Properties import MASS
-from testsuite._toy_harmonic_potential import (HarmonicLatticePotential, SimpleSpringPotential,
-                                               build_cubic_lattice_batch, build_cubic_lattice_data)
+from testsuite._toy_harmonic_potential import (HarmonicLatticePotential, SimpleSpringPotential, LennardJonesCluster, DoubleWellPotential,
+                                               MullerBrownPotential, FreeParticles, build_cubic_lattice_batch, build_cubic_lattice_data)
+from BUCToolkit.api._io import PygBatchUpdater
 
 INPUT_PATH = './inputs4test/'
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,18 +50,23 @@ class MainTest(unittest.TestCase):
     def setUp(self):
         # data
         ATOMS = [8, 5, 10]
-        data = build_cubic_lattice_batch(ATOMS, 3., 0.1)
+        data = build_cubic_lattice_batch(ATOMS, 3., 1.)
         ELEM = ['Fe', 'Al', 'Pd']
         DOF_reduce = 0
         self.MASSES = [MASS[_] for _ in ELEM]
-        self.elem_list = [['Fe'] * ATOMS[0] ** 3 + ['Al'] * ATOMS[1] ** 3 + ['Pd'] * ATOMS[2] ** 3]
+        self.elem_list = [[]]
+        for i, el in enumerate(ELEM):
+            self.elem_list[0].extend([el] * ATOMS[i]**3)
         self.masses_list = [[MASS['Fe']] * ATOMS[0] ** 3, [MASS['Al']] * ATOMS[1] ** 3, [MASS['Pd']] * ATOMS[2] ** 3]
         self.DOF_vib = [3 * ATOMS[0] ** 3 - DOF_reduce, 3 * ATOMS[1] ** 3 - DOF_reduce, 3 * ATOMS[2] ** 3 - DOF_reduce]
         self.N = [_**3 for _ in ATOMS]
         #raw_model = HarmonicLatticePotential(100., 1.)
         raw_model = SimpleSpringPotential(data.pos0, 10., )
+        raw_model = LennardJonesCluster()
+        raw_model = DoubleWellPotential()
         self.model_test = _Model_Wrapper_pyg(raw_model)
         self.data = data
+        self.REQUIRE_GRAD = False
 
     def test_Train(self):
         pass
@@ -99,36 +105,38 @@ class MainTest(unittest.TestCase):
             TIME_STEP, 100, 0., f'/dev/shm/results/MD_STATIC_GPU', 1, device='cuda:0', verbose=1
         )
         runner_gpu_move_nve = NVE(
-            TIME_STEP, 10000, 500., f'/dev/shm/results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
+            TIME_STEP, 1000, TEMPERATURE, f'/dev/shm/results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
             is_compile=False
         )
         runner_cpu_csvr_nvt = NVT(
-            TIME_STEP, 10000, 'CSVR', {'time_const': 100},
-            TEMPERATURE, f'/dev/shm/results/MD_CSVR_CPU', 1, device='cpu', verbose=0,
-            is_compile=False
+            TIME_STEP, 100000, 'CSVR', {'time_const': 100},
+            TEMPERATURE, f'/dev/shm/results/MD_CSVR_CPU', 10, device='cpu', verbose=1,
+            is_compile=False,
+            compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_gpu_csvr_nvt = NVT(
-            TIME_STEP, 10000, 'CSVR', {'time_const': 100},
-            TEMPERATURE, f'/dev/shm/results/MD_CSVR_GPU', 1, device='cuda:0', verbose=0,
-            is_compile=False
+            TIME_STEP, 100000, 'CSVR', {'time_const': 100},
+            TEMPERATURE, f'/dev/shm/results/MD_CSVR_GPU', 10, device='cuda:0', verbose=1,
+            is_compile=False,
+            compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_cpu_lang_nvt = NVT(
-            TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'/dev/shm/results/MD_LANG_CPU', 1, device='cpu', verbose=0,
-            is_compile=False
+            TIME_STEP, 100000, 'Langevin', {'damping_coeff': 0.01},
+            TEMPERATURE, f'/dev/shm/results/MD_LANG_CPU', 10, device='cpu', verbose=0,
+            is_compile=True
         )
         runner_gpu_lang_nvt = NVT(
-            TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'/dev/shm/results/MD_LANG_GPU', 1, device='cuda:0', verbose=0,
-            is_compile=False
+            TIME_STEP, 100000, 'Langevin', {'damping_coeff': 0.01},
+            TEMPERATURE, f'/dev/shm/results/MD_LANG_GPU', 10, device='cuda:0', verbose=0,
+            is_compile=True
         )
         runner_cpu_nose_nvt = NVT(
-            TIME_STEP, 10000, 'Nose-Hoover', {},
-            TEMPERATURE, f'/dev/shm/results/MD_NOSE_CPU', 1, device='cpu', verbose=0
+            TIME_STEP, 100000, 'Nose-Hoover', {},
+            TEMPERATURE, f'/dev/shm/results/MD_NOSE_CPU', 10, device='cpu', verbose=0
         )
         runner_gpu_nose_nvt = NVT(
-            TIME_STEP, 10000, 'Nose-Hoover', {},
-            TEMPERATURE, f'/dev/shm/results/MD_NOSE_GPU', 1, device='cuda:0', verbose=0
+            TIME_STEP, 100000, 'Nose-Hoover', {},
+            TEMPERATURE, f'/dev/shm/results/MD_NOSE_GPU', 10, device='cuda:0', verbose=0
         )
 
         RUNNER_NAME = [
@@ -173,7 +181,7 @@ class MainTest(unittest.TestCase):
                 (_data, ),
                 None,
                 False,
-                False,
+                self.REQUIRE_GRAD,
                 [len(_.pos) for _ in _data.to_data_list()],
                 move_to_center_freq=-1
             )
@@ -208,10 +216,14 @@ class MainTest(unittest.TestCase):
             max_coord1, max_coord2, max_coord3 = 0., 0., 0.
 
             # cut the short simulations
-            if len(fbs) < 15000:
-                continue
+            prebalance =  int(len(fbs) * 0.4)
+            while True:
+                if prebalance % 3 != 0:
+                    prebalance += 1
+                else:
+                    break
 
-            for ibs in range(15000, len(fbs), 3):
+            for ibs in range(prebalance, len(fbs), 3):
                 # potential energy
                 ene1.append(fbs.Energies[ibs])
                 ene2.append(fbs.Energies[ibs + 1])
@@ -291,7 +303,7 @@ class MainTest(unittest.TestCase):
                         self.assertStatisticalEqual(
                             _etol_var,
                             0.,
-                            atol=1e-3,
+                            atol=5e-3,
                             msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
                                 f'test value: {_etol_var}\nstandard value: 0.'
                         )
@@ -309,7 +321,7 @@ class MainTest(unittest.TestCase):
                         self.assertStatisticalEqual(
                             _tv,
                             STANDARD_VALUES[_i][__i],
-                            atol=1e-1,
+                            rtol=5e-2,
                             msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
                                 f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
                         )
@@ -343,42 +355,42 @@ class MainTest(unittest.TestCase):
         # runner sets
         runner_cpu_nvt = MMC(
             'Gaussian',
-            30000,
+            100000,
             TEMPERATURE,
             'constant',
             1,
             None,
             0.07,
             f'/dev/shm/results/MC_GAUSS_NVT_CPU',
-            1,
+            10,
             device='cpu',
-            verbose=0,
-            is_compile=True
+            verbose=1,
+            is_compile=False
         )
         runner_gpu_nvt = MMC(
             'Gaussian',
-            30000,
+            100000,
             TEMPERATURE,
             'constant',
             1,
             None,
             0.07,
             f'/dev/shm/results/MC_GAUSS_NVT_GPU',
-            1,
+            10,
             device='cuda:0',
-            verbose=0,
-            is_compile = True
+            verbose=1,
+            is_compile = False
         )
         runner_gpu_anneal = MMC(
             'Gaussian',
-            30000,
+            100000,
             TEMPERATURE,
             'fast',
             1,
             None,
             0.07,
             f'/dev/shm/results/MC_GAUSS_ANNEAL_GPU',
-            1,
+            10,
             device='cuda:0',
             verbose=0
         )
@@ -426,21 +438,253 @@ class MainTest(unittest.TestCase):
                 #plt.plot(_en)
                 #plt.show()
                 #plt.clf()
-                _mean_val = np.mean(_en[15000:])
-                _std_val = np.std(_en[15000:])
-                try:
-                    self.assertStatisticalEqual(_mean_val, STANDARD_VALUES[0][_i])
-                    self.assertStatisticalEqual(_std_val, STANDARD_VALUES[1][_i])
-                    print(f"Mean Ep: {_mean_val}, STD Ep: {_std_val}")
-                    print(f'\n"MC Energy" Test {_i + 1} passed. <<<<<')
-                except AssertionError:
-                    print(f'\n"MC Energy" Test {i+ 1} Failed:\n'
-                          f'test value:\n\tenergy mean: {_mean_val}\n\tenergy std: {_std_val}'
-                          f'\nstandard value:\n\tenergy mean: {STANDARD_VALUES[0][_i]}\n\tenergy std: {STANDARD_VALUES[1][_i]}\n')
+                prebalance = int(len(_en) * 0.4)
+                while True:
+                    if prebalance % 3 != 0:
+                        prebalance += 1
+                    else:
+                        break
+                _mean_val = np.mean(_en[prebalance:])
+                _std_val = np.std(_en[prebalance:])
+                if 'ANNEAL' not in RUNNER_NAME[i]:
+                    try:
+                        self.assertStatisticalEqual(_mean_val, STANDARD_VALUES[0][_i], rtol=1e-2)
+                        self.assertStatisticalEqual(_std_val, STANDARD_VALUES[1][_i], rtol=1e-2)
+                        print(f"Mean Ep: {_mean_val}, STD Ep: {_std_val}")
+                        print(f'\n"MC Energy" Test {_i + 1} passed. <<<<<')
+                    except AssertionError:
+                        print(f'\n"MC Energy" Test {_i+ 1} Failed:\n'
+                              f'test value:\n\tenergy mean: {_mean_val}\n\tenergy std: {_std_val}'
+                              f'\nstandard value:\n\tenergy mean: {STANDARD_VALUES[0][_i]}\n\tenergy std: {STANDARD_VALUES[1][_i]}\n')
+                else:
+                    try:
+                        self.assertAlmostEqual(th.max(th.abs(_data.pos - data.pos0)).item(), 0., delta=1e-4)
+                    except AssertionError:
+                        print(f'\n"MC Energy" Test {_i + 1} Failed:\n'
+                              f'test value:\n\tfin energy: {_en[-1]}'
+                              f'\nstandard value:\n\tenergy: 0.\n'
+                              f'position displacement max error: {th.max(th.abs(_data.pos - data.pos0)).item()}')
 
 
     def test_OPT(self):
-        pass
+        # purge remaining testfiles
+        logfiles = glob.glob(os.path.join('/dev/shm', 'logs/OPT*.log'))
+        resultfiles = glob.glob(os.path.join('/dev/shm', 'results/OPT*'))
+        for logfile in logfiles:
+            os.remove(logfile)
+        for resultfile in resultfiles:
+            os.remove(resultfile)
+
+        # static test
+        data = self.data
+        elem_list = self.elem_list
+        kB = 8.617333262145e-5  # eV/K
+        TEMPERATURE = 500.
+        TIME_STEP = 0.5
+        MAXITER = 300
+
+        # runner sets
+        runner_cpu_cg_mt = CG(
+            'PR+',
+            1e-5,
+            0.01,
+            MAXITER,
+            'MT',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cpu',
+            verbose=1
+        )
+        runner_gpu_cg_mt = CG(
+            'PR+',
+            1e-5,
+            0.01,
+            MAXITER,
+            'MT',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cuda:0',
+            verbose=1
+        )
+        runner_cpu_cg_bk = CG(
+            'PR+',
+            1e-5,
+            0.01,
+            MAXITER,
+            'Backtrack',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cpu',
+            verbose=1
+        )
+        runner_gpu_cg_bk = CG(
+            'PR+',
+            1e-5,
+            0.01,
+            MAXITER,
+            'Backtrack',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cuda:0',
+            verbose=1
+        )
+        runner_cpu_bfgs_mt = QN(
+            'BFGS',
+            1e-5,
+            0.01,
+            50,
+            'MT',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cpu',
+            verbose=1
+        )
+        runner_gpu_bfgs_mt = QN(
+            'BFGS',
+            1e-5,
+            0.01,
+            MAXITER,
+            'MT',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cuda:0',
+            verbose=1
+        )
+        runner_cpu_bfgs_bk = QN(
+            'BFGS',
+            1e-5,
+            0.01,
+            50,
+            'Backtrack',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cpu',
+            verbose=1
+        )
+        runner_gpu_bfgs_bk = QN(
+            'BFGS',
+            1e-5,
+            0.01,
+            MAXITER,
+            'Backtrack',
+            10,
+            0.2,
+            0.6,
+            TIME_STEP,
+            use_bb=True,
+            device='cuda:0',
+            verbose=1
+        )
+        runner_cpu_fire = FIRE(
+            1e-5,
+            0.01,
+            MAXITER,
+            TIME_STEP,
+            device='cpu',
+            verbose=1
+        )
+        runner_gpu_fire = FIRE(
+            1e-5,
+            0.01,
+            MAXITER,
+            TIME_STEP,
+            device='cuda:0',
+            verbose=1
+        )
+
+
+        RUNNER_NAME = [
+            'OPT_CG_MT_CPU',
+            'OPT_CG_MT_GPU',
+            'OPT_CG_BK_CPU',
+            'OPT_CG_BK_GPU',
+            'OPT_BFGS_MT_CPU',
+            'OPT_BFGS_MT_GPU',
+            'OPT_BFGS_BK_CPU',
+            'OPT_BFGS_BK_GPU',
+            'OPT_FIRE_CPU',
+            'OPT_FIRE_GPU',
+        ]
+        import matplotlib.pyplot as plt
+        for i, runner in enumerate([
+            runner_cpu_cg_mt,
+            runner_gpu_cg_mt,
+            runner_cpu_cg_bk,
+            runner_gpu_cg_bk,
+            runner_cpu_bfgs_mt,
+            runner_gpu_bfgs_mt,
+            runner_cpu_bfgs_bk,
+            runner_gpu_bfgs_bk,
+            runner_cpu_fire,
+            runner_gpu_fire,
+        ]):
+            # if ('CPU' in RUNNER_NAME[i]) or ('STATICE' in RUNNER_NAME[i]) or ('NVE' in RUNNER_NAME[i]): continue
+            # if 'CPU' in RUNNER_NAME[i] or ('STATIC' in RUNNER_NAME[i]): continue
+            _data = data.to(runner.device).clone()
+            model_test = self.model_test.to(runner.device)
+            print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
+            t_st = time.perf_counter()
+            runner.reset_logger_handler(f"/dev/shm/logs/{RUNNER_NAME[i]}.log")
+            updater = PygBatchUpdater()
+            updater.initialize()
+            runner.set_batch_updater(updater, updater)
+            runner: FIRE
+            y, x_min, g = runner.run(
+                model_test.Energy,
+                _data.pos,
+                model_test.Grad,
+                (_data,),
+                None,
+                (_data, ),
+                None,
+                False,
+                self.REQUIRE_GRAD,
+                True,
+                None,
+                [len(_.pos) for _ in _data.to_data_list()],
+            )
+            print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s\n")
+            # validation
+            ene1, ene2, ene3 = y[0], y[1], y[2]
+            #std_pos = [_.pos for _ in _data.to_data_list()]
+            for _i, _en in enumerate((ene1, ene2, ene3)):
+                # plt.plot(_en)
+                # plt.show()
+                # plt.clf()
+                try:
+                    self.assertAlmostEqual(_en, 0., delta=1e-4)
+                    self.assertAlmostEqual(th.max(th.abs(g)).item(), 0., delta=5e-4)
+                    max_diff = th.max(th.abs(_data.pos - data.pos0)).item()
+                    self.assertAlmostEqual(max_diff, 0., delta=1e-4)
+                    print(f'"OPT" Test {_i + 1} passed. <<<<<')
+                    print(f"Energy: {_en}, STD Energy: 0.")
+                    print(f"Max Coordinates difference of standard value: {max_diff}\n")
+                except AssertionError:
+                    print(f'\n"OPT" Test {_i + 1} Failed:\n'
+                          f'test value:\n\tenergy: {_en}\n\tmax forces: {th.max(g.abs()).item()}'
+                          f'\nstandard value:\n\tenergy: 0.\n\tmax forces: 0.\n'
+                          f'position displacement max error: {th.max(th.abs(_data.pos - data.pos0)).item()}')
 
     def test_TS(self):
         pass

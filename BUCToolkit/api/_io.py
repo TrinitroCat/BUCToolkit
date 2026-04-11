@@ -186,6 +186,7 @@ class _CONFIGS(object):
         Returns: None
 
         """
+        if algo_config is None: algo_config = dict()
         __time = time.strftime("%Y%m%d_%H:%M:%S")
         para_count = sum(p.numel() for p in _model.parameters())
         self.logger.info('\n' + generate_display_art())
@@ -254,6 +255,7 @@ class _CONFIGS(object):
         if mode == 'TRAIN':
             self.logger.info(f' LOSS FUNCTION: {self.loss_name}')
             if len(self.METRICS) > 0:
+                self.logger.info(f" # note that `METRICS` only counts the data of last true batch instead of accumulated ones.")
                 with _LoggingEnd(self.log_handler):
                     self.logger.info(f' METRICS: ')
                     for _name in self.METRICS.keys():
@@ -755,7 +757,6 @@ class DumpStructures:
     """
     def __init__(self, path:str|None=None):
         """
-
         Args:
             path: the path to dump structures. If None, structures will always store in memory.
         """
@@ -963,7 +964,19 @@ class DumpStructures:
 
 
 class PygBatchUpdater:
-    """ batch updater for torch-geometric objects """
+    """
+    batch updater for torch-geometric objects.
+    It can be directly called after initialization.
+    Examples:
+        ```
+        updater = PygBatchUpdater()
+        updater.initialize()
+        optimizer = CG(...)
+        optimizer.set_batch_updater(updater)
+        optimizer.run(...)
+        ```
+    One can use `self.initialize()` to reset this updater.
+    """
 
     def __init__(self):
         self.__check_old = None

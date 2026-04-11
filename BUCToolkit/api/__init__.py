@@ -15,6 +15,7 @@ from .MonteCarlo import MonteCarlo
 from . import Losses
 from . import DataLoaders
 from . import Metrics
+from . import ModelOptims
 
 CINEB = ClimbingImageNudgedElasticBand
 CONSTR_MD = ConstrainedMolecularDynamics
@@ -33,4 +34,5 @@ __all__ = [
     'Losses',
     'DataLoaders',
     'Metrics',
+    'ModelOptims',
 ]

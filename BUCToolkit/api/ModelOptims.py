@@ -3,6 +3,8 @@
 #  Version: 1.0b
 #  File: ModelOptims.py
 #  Environment: Python 3.12
+import math
+from collections import deque
 
 import torch as th
 from torch.optim import Optimizer
@@ -133,4 +135,162 @@ class FIRELikeOptimizer(Optimizer):
 
     def load_state_dict(self, state_dict):
         self.n_count_dec = state_dict.pop('n')
+        super().load_state_dict(state_dict)
+
+
+class LangevinOptimizer(Optimizer):
+    r"""
+    Langevin optimizer based on Newton dynamics with Langevin thermostat.
+    Use Equipartition theorem or Virial theorem <x_i \partial H / \partial x_i> == k_B T to
+    judge whether equilibrium reached, wherein k_B = 1. If equilibrium reached, temperature decreases.
+
+    Args:
+        params: model parameters.
+        lr: initial learning rate, i.e., time steplength.
+        mass: hyperparameter of mass.
+        alpha: damping coefficient.
+        temperature: initial virtual temperature.
+        anneal_coeff: anneal coefficient to descent temperature.
+        balance_tol: relative tolerance of differences between k_B T and the Virial, which calculates as `(Virial - T)/T`
+        time_window_size: time window size to count the average <x_i \partial H / \partial x_i>.
+        heating_max_steps: the maximum heating steps. Once the number of calling `self.step()` over it, use normal SGD with momenta instead.
+        momenta_in_sgd: momentum decay coefficient after annealing.
+    """
+    def __init__(
+            self,
+            params,
+            lr=1e-3,
+            mass=1.0,
+            alpha=50.,
+            temperature=1.,
+            anneal_coeff=0.9,
+            balance_tol=0.1,
+            time_window_size=500,
+            heating_max_steps=100000,
+            momenta_in_sgd=0.6,
+    ):
+        if lr <= 0:
+            raise ValueError(f"Invalid lr: {lr}")
+        else:
+            lr = float(lr)
+        if mass <= 0:
+            raise ValueError(f"mass must be positive: {mass}")
+        else:
+            mass = th.scalar_tensor(mass, dtype=th.float32)
+        if anneal_coeff > 1. or anneal_coeff < 0.:
+            raise ValueError(f"anneal_coeff must be in [0, 1]: {anneal_coeff}")
+        time_window_size = int(time_window_size)
+        if time_window_size < 1:
+            raise ValueError(f"time_window_size must be positive: {time_window_size}")
+
+        # Virial queue
+        self.virials = deque([0.] * time_window_size, maxlen=time_window_size)
+        self.Virial_now = 0.
+        self.heating_max_steps = heating_max_steps
+        self.heating_step_now = 0
+
+        damp = math.exp(- alpha * lr)
+        defaults = dict(
+            lr=lr,
+            mass=mass,
+            damp=damp,
+            temperature=temperature,
+            anneal_coeff=anneal_coeff,
+            balance_tol=balance_tol,
+            momenta_in_sgd=momenta_in_sgd
+        )
+        super().__init__(params, defaults)
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            loss = closure()
+        # ---------- ABOBA update ----------
+        with th.no_grad():
+            for group in self.param_groups:
+                if self.heating_step_now >= self.heating_max_steps:  # enough annealing, use trivial SGD instead
+                    lr = group['lr']
+                    for p in group['params']:
+                        if p.grad is None:
+                            continue
+                        grad = p.grad.data
+                        state = self.state[p]
+                        # lazy launch initial veloc.
+                        if 'velocity' not in state:
+                            state['velocity'] = th.zeros_like(p.data)
+                        vel = state['velocity']
+                        vel.mul_(group['momenta_in_sgd']).add_(grad)
+                        p.add_(vel, alpha=-lr)
+
+                else:  # keep annealing
+                    lr = group['lr']
+                    mass = group['mass']
+                    damp = group['damp']
+                    temp = group['temperature']
+                    anneal_coeff = group['anneal_coeff']
+                    balance_tol = group['balance_tol']
+                    xpHpx = 0.
+                    sizes = 0
+                    _vir = 0.
+                    for p in group['params']:
+                        if p.grad is None:
+                            continue
+                        grad = p.grad
+                        state = self.state[p]
+                        # lazy launch initial veloc.
+                        if 'velocity' not in state:
+                            state['velocity'] = th.randn_like(p) * th.sqrt(temp / mass)
+                        vel = state['velocity']
+                        # Calc. Virial
+                        #xpHpx += th.sum(p * grad)  # x_i * \partial H / \partial x_i
+                        sizes += p.numel()
+                        _vir += (vel.pow(2).sum() * 0.5 * mass).item()
+                        mass = mass.to(p.dtype).to(p.device)
+                        # ABOBA
+                        vel.addcdiv_(grad, mass, value=- 0.5 * lr)
+                        p.add_(vel, alpha=0.5 * lr)
+                        # stochastic update velocity
+                        vel.mul_(damp)
+                        vel.add_(th.sqrt((temp * (1 - damp ** 2)) / mass) * th.randn_like(vel))
+                        # V = damp * V + th.sqrt((self.T_init * (1 - damp ** 2)) / masses) * th.randn_like(V)
+                        # the rest half-step
+                        p.add_(vel, alpha=0.5 * lr)
+                        vel.addcdiv_(grad, mass, value=-0.5 * lr)
+
+                    # Annealing, check the Equipartition theorem
+                    self.Virial_now -= self.virials[0]  # sub the head
+                    #_vir = xpHpx / sizes
+                    _vir /= sizes
+                    self.virials.append(_vir)
+                    self.Virial_now += _vir
+                    #print(f"Virial: {(self.Virial_now/len(self.virials)): <.4e}, T: {temp}")
+                    #avg_grad_norm = sum(p.grad.norm().item() for p in group['params'] if p.grad is not None) / len(group['params'])
+                    #avg_param_norm = sum(p.norm().item() for p in group['params']) / len(group['params'])
+                    #print(f"Step {self.heating_step_now}: Virial={self.Virial_now/(0.5 * len(self.virials)):.4e}, T={temp:.4e}")
+
+                    #if abs((self.Virial_now/len(self.virials) - temp)/temp) <= balance_tol:
+                    #    group['temperature'] *= anneal_coeff
+                    if abs((self.Virial_now/(0.5 * len(self.virials)) - temp) / temp) <= balance_tol:
+                        group['temperature'] *= anneal_coeff
+
+        self.heating_step_now += 1
+
+        return loss
+
+    # ---------- store/resume states ----------
+    def state_dict(self):
+        state = super().state_dict()
+        state.update({
+            'virials': self.virials, 'Virial_now': self.Virial_now,
+            'heating_step_now': self.heating_step_now,
+            'heating_max_steps': self.heating_max_steps,
+        })
+        return state
+
+    def load_state_dict(self, state_dict):
+        self.virials = state_dict.pop('virials')
+        self.virials = deque(self.virials, maxlen=len(self.virials))
+        self.Virial_now = state_dict.pop('Virial_now')
+        self.heating_step_now = state_dict.pop('heating_step_now')
+        self.heating_max_steps = state_dict.pop('heating_max_steps')
         super().load_state_dict(state_dict)

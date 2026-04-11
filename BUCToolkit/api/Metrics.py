@@ -16,8 +16,8 @@ def _r2_score(y_pred: th.Tensor, y_true: th.Tensor) -> th.Tensor:
         Calculate R^2
         """
         # initialize
-        y1 = y_pred.float()
-        y2 = y_true.float()
+        y1 = y_true.float()
+        y2 = y_pred.float()
         if y1.dim() == 1:
             y1 = y1.view(-1, 1)
             y2 = y2.view(-1, 1)

@@ -58,6 +58,7 @@ def parse_center_input_file(path: str):
     TASKS_TYPE_ALIAS = {
         'TRAIN': 'TRAIN',
         'PREDICT': 'PREDICT',
+        'PREDICTION': 'PREDICT',
         'OPT': 'OPT',
         'STRUCTURE_OPTIMIZATION': 'OPT',
         'STRUC_OPT': 'OPT',
@@ -146,10 +147,16 @@ def parse_center_input_file(path: str):
         val_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(val_data, n_core=1)
 
         trn_ener = [data[atm.idx].Energies[0] for atm in data_list]
-        trn_forc = [data[atm.idx].Forces[0] for atm in data_list]
+        if data.Forces is None:
+            trn_forc = None
+        else:
+            trn_forc = [data[atm.idx].Forces[0] for atm in data_list]
         train_data = {'data': data_list, 'labels': {'energy': trn_ener, 'forces': trn_forc}}
         val_ener = [val_data[atm.idx].Energies[0] for atm in val_data_list]
-        val_forc = [val_data[atm.idx].Forces[0] for atm in val_data_list]
+        if data.Forces is None:
+            val_forc = None
+        else:
+            val_forc = [val_data[atm.idx].Forces[0] for atm in val_data_list]
         valid_data = {'data': val_data_list, 'labels': {'energy': val_ener, 'forces': val_forc}}
         dataset_args = (train_data, valid_data)
 

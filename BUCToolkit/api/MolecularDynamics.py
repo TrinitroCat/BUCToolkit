@@ -179,7 +179,7 @@ class MolecularDynamics(_CONFIGS):
                     return mask
 
                 def get_batch_indx(data):
-                    return val_data.batch_num_nodes('atom')
+                    return data.batch_num_nodes('atom')
 
                 def get_init_veloc(data):
                     veloc = data.nodes['atom'].data.get('velocity', None)

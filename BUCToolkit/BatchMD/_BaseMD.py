@@ -24,10 +24,10 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARR
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseLogger
 
 
-class _BaseMD:
+class _BaseMD(BaseLogger):
     """ Base BatchMD """
 
     __slots__ = [
@@ -40,7 +40,7 @@ class _BaseMD:
         'Ekt_vir',
         'Ek',
         'p_iota',
-        '__dict__'
+        #'__dict__'
     ]
 
     def __init__(
@@ -106,39 +106,8 @@ class _BaseMD:
         )
 
         # logging
-        self.logger = logging.getLogger('Main.MD')
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if not has_any_handler(self.logger):
-            self.log_handler = logging.StreamHandler(sys.stdout)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-            self.logger.addHandler(self.log_handler)
-
-    def reset_logger_handler(self, handler: str|logging.StreamHandler|logging.FileHandler):
-        """
-        Clear all logging handlers including current logger and its ancestors, and reset one.
-        Args:
-            handler: the new handler.
-
-        Returns:
-
-        """
-        clear_all_handlers(self.logger)
-        formatter = logging.Formatter('%(message)s')
-        if isinstance(handler, logging.StreamHandler):
-            self.log_handler = logging.StreamHandler(stream=handler)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        else:
-            output_path = os.path.dirname(handler)
-            # check whether path exists
-            if not os.path.isdir(output_path): os.makedirs(output_path)
-            # set log handler
-            self.log_handler = logging.FileHandler(handler, 'w', delay=True)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
+        super().__init__()
+        self.init_logger('Main.MD')
 
     def reset_dumper(self, dumper: Any) -> None:
         if self.output_file is not None:
@@ -219,6 +188,78 @@ class _BaseMD:
             except Exception as e:
                 self.logger.error(f"Error: Failed to dump data due to \"{e}\"")
 
+    def _do_async_print(self, q: queue.Queue):
+        """
+
+        Args:
+            q:
+
+        Returns:
+
+        """
+        formatter1 = {'float': '{:> .2f}'.format}
+        formatter2 = {'float': '{:> 5.10f}'.format}
+        i = 0  # reinsurance for Exception part
+        # Note: PRINTING IS VERY EXPENSIVE !!!
+        while True:
+            try:
+                i, batch_indices, _print_Ep, _print_Ek, _print_temperature, _print_X, _print_V, _print_F = q.get()
+                if i is None:
+                    break
+                if self.verbose > 0:
+                    # print format
+                    np.set_printoptions(
+                        precision=8,
+                        linewidth=1024,
+                        floatmode='fixed',
+                        suppress=True,
+                        formatter=formatter1,
+                        threshold=2000
+                    )
+                    self.logger.info(
+                        f'Step: {i:>12d}\n\t'
+                        f'T     = {_print_temperature.numpy(force=True)}\n\t'
+                        f'E_tol = {np.array2string((_print_Ek + _print_Ep).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                        f'Ek    = {np.array2string(_print_Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                        f'Ep    = {np.array2string(_print_Ep.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
+                        # f'Time: {time.perf_counter() - t_step:>5.4f}'
+                    )
+                    # t_step = time.perf_counter()
+                if self.verbose > 1:
+                    # split to print
+                    if batch_indices is not None:
+                        X_tup = th.split(_print_X, batch_indices, dim=1)
+                        V_tup = th.split(_print_V, batch_indices, dim=1)
+                    else:
+                        X_tup = (_print_X,)
+                        V_tup = (_print_V,)
+                    np.set_printoptions(
+                        precision=8,
+                        floatmode='fixed',
+                        suppress=True,
+                        formatter=formatter2,
+                        threshold=3000000
+                    )
+                    self.logger.info('_' * 100)
+                    self.logger.info(f'Configuration {i}:')
+                    for __x in X_tup:
+                        X_str = np.array2string(
+                            __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
+                        ).replace("[", " ").replace("]", " ")
+                        self.logger.info(f'{X_str}\n')
+                    del X_str, X_tup
+                    if self.verbose > 2:
+                        self.logger.info(f'Velocities {i}:')
+                        for __x in V_tup:
+                            V_str = np.array2string(
+                                __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
+                            ).replace("[", " ").replace("]", " ")
+                            self.logger.info(f'{V_str}\n')
+                        del V_str
+                    self.logger.info('_' * 100)
+            except Exception as e:
+                self.logger.error(f"Error: Failed to logout at {i}-th iteration due to \"{e}\".")
+
     def _print_elem_info(self, Element_list, batch_indices):
         # elem info
         elem_list = list()
@@ -266,7 +307,6 @@ class _BaseMD:
             grad_func_args,
             grad_func_kwargs,
             is_grad_func_contain_y,
-
     ) -> Tuple[th.Tensor, th.Tensor]:
         with th.set_grad_enabled(self.require_grad):
             X.requires_grad_(self.require_grad)
@@ -656,8 +696,6 @@ class _BaseMD:
 
             Ek = th.zeros_like(Energy)
             temperature = th.zeros_like(Energy)
-            formatter1 = {'float': '{:> .2f}'.format}
-            formatter2 = {'float': '{:> 5.10f}'.format}
             # preload a graph of Ek, T
             Ek_T_graph = th.cuda.CUDAGraph()
             with th.cuda.graph(Ek_T_graph):
@@ -674,6 +712,16 @@ class _BaseMD:
                     V.add_(_dV)
             else:
                 mass_center_graph = None
+            # preload Verlet update
+            #self.Verlet1_graph = th.cuda.CUDAGraph()
+            #with th.cuda.graph(self.Verlet1_graph):
+            #    V.addcdiv_(Forces, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            #    X.add_(V, alpha=self.time_step)
+            #self.Verlet2_graph = th.cuda.CUDAGraph()
+            #with th.cuda.graph(self.Verlet2_graph):
+            #    Forces.mul_(atom_masks)
+            #    # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            #    V.addcdiv_(Forces, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
 
             copy_stream = th.cuda.Stream()
             copy_event = th.cuda.Event()
@@ -681,9 +729,12 @@ class _BaseMD:
             compute_event.record(th.cuda.default_stream(self.device))  # the default stream is the compute (main) stream.
             # launch the dumping thread
             dump_queue = queue.Queue()
-            dump_thread = threading.Thread(target=self._do_async_dump, args=(dump_queue, ))
+            dump_thread = threading.Thread(target=self._do_async_dump, args=(dump_queue, ), daemon=True)
+            logout_queue = queue.Queue()
+            logout_thread = threading.Thread(target=self._do_async_print, args=(logout_queue, ), daemon=True)
             try:
                 dump_thread.start()
+                logout_thread.start()
                 #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                 fl = th.compile(self._main_for_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
                 fl(
@@ -711,10 +762,9 @@ class _BaseMD:
                     copy_event,
                     dump_queue,
                     dumper,
+                    logout_queue,
                     func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
                     masses, atom_masks, is_grad_func_contain_y, batch_indices,
-                    formatter1,
-                    formatter2,
                     is_fix_mass_center,
                     move_to_center_freq,
                     mass_center_graph
@@ -727,6 +777,8 @@ class _BaseMD:
             finally:
                 dump_queue.put([None]*6)
                 dump_thread.join()
+                logout_queue.put([None]*8)
+                logout_thread.join()
 
         del self.Ekt_vir
         #return ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -757,10 +809,9 @@ class _BaseMD:
             copy_event,
             dump_queue,
             dumper,
+            logout_queue,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
             masses, atom_masks, is_grad_func_contain_y, batch_indices,
-            formatter1,
-            formatter2,
             is_fix_mass_center,
             move_to_center_freq,
             mass_center_graph
@@ -786,6 +837,7 @@ class _BaseMD:
                 _buf_F.copy_(Forces)
                 # D2H, async.
                 with th.cuda.stream(copy_stream):
+                    copy_stream.wait_stream(th.cuda.default_stream(self.device))
                     _print_temperature.copy_(_buf_Tp, non_blocking=True)
                     _print_Ek.copy_(_buf_Ek, non_blocking=True)
                     _print_Ep.copy_(_buf_Ep, non_blocking=True)
@@ -808,58 +860,7 @@ class _BaseMD:
             # print
             #with th.profiler.record_function('PRINT <<<<<'):
             if _do_print:
-                # Note: PRINTING IS VERY EXPENSIVE !!!
-                if self.verbose > 0:
-                    # print format
-                    np.set_printoptions(
-                        precision=8,
-                        linewidth=1024,
-                        floatmode='fixed',
-                        suppress=True,
-                        formatter=formatter1,
-                        threshold=2000
-                    )
-                    self.logger.info(
-                        f'Step: {i:>12d}\n\t'
-                        f'T     = {_print_temperature.numpy(force=True)}\n\t'
-                        f'E_tol = {np.array2string((_print_Ek + _print_Ep).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        f'Ek    = {np.array2string(_print_Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        f'Ep    = {np.array2string(_print_Ep.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        #f'Time: {time.perf_counter() - t_step:>5.4f}'
-                    )
-                    #t_step = time.perf_counter()
-                if self.verbose > 1:
-                    # split to print
-                    if batch_indices is not None:
-                        X_tup = th.split(_print_X, batch_indices, dim=1)
-                        V_tup = th.split(_print_V, batch_indices, dim=1)
-                    else:
-                        X_tup = (_print_X,)
-                        V_tup = (_print_V,)
-                    np.set_printoptions(
-                        precision=8,
-                        floatmode='fixed',
-                        suppress=True,
-                        formatter=formatter2,
-                        threshold=3000000
-                    )
-                    self.logger.info('_' * 100)
-                    self.logger.info(f'Configuration {i}:')
-                    for __x in X_tup:
-                        X_str = np.array2string(
-                            __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                        ).replace("[", " ").replace("]", " ")
-                        self.logger.info(f'{X_str}\n')
-                    del X_str, X_tup
-                    if self.verbose > 2:
-                        self.logger.info(f'Velocities {i}:')
-                        for __x in V_tup:
-                            V_str = np.array2string(
-                                __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                            ).replace("[", " ").replace("]", " ")
-                            self.logger.info(f'{V_str}\n')
-                        del V_str
-                    self.logger.info('_' * 100)
+                logout_queue.put((i, batch_indices, _print_Ep, _print_Ek, _print_temperature, _print_X, _print_V, _print_F))
                 _do_print = False
 
             # Correct barycentric transition
@@ -1261,7 +1262,7 @@ class _BaseMD:
             atom_masks,
             is_grad_func_contain_y,
             batch_indices
-    ) -> (th.Tensor, th.Tensor, th.Tensor):
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """ Update X, V, Force, and return X, V, Energy, Force. """
         raise NotImplementedError
         # return X, V, Energy, Force
