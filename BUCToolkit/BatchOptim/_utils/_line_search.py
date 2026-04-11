@@ -12,15 +12,16 @@ import warnings
 from typing import Any, Literal, Sequence, Tuple, Callable, Dict
 import logging
 import sys
+import os
 
 import torch as th
 from torch import nn
 
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
-from BUCToolkit.utils.setup_loggers import has_any_handler
+from BUCToolkit.utils.setup_loggers import has_any_handler,clear_all_handlers, BaseLogger
 
 
-class LineSearch:
+class LineSearch(BaseLogger):
     def __init__(
             self,
             method: Literal['Backtrack', 'B', 'Wolfe', 'W', 'MT', 'EXACT', 'None', 'N'] = 'Backtrack',
@@ -79,14 +80,8 @@ class LineSearch:
         self.WOLFE_BETA = 0.4
 
         # logger
-        self.logger = logging.getLogger('Main.OPT.LineSearch')
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if not has_any_handler(self.logger):
-            log_handler = logging.StreamHandler(sys.stdout, )
-            log_handler.setLevel(logging.INFO)
-            log_handler.setFormatter(formatter)
-            self.logger.addHandler(log_handler)
+        super().__init__()
+        self.init_logger('Main.OPT.LineSearch')
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -620,7 +615,7 @@ the method of updating function arguments for a mask.
             return _max_steplength
         elif th.all(armijo_mask) and _is_grad_neg:
             self.logger.warning(
-                f'WARNING: the function sufficiently descents even at the max steplength {_max_steplength.numpy(force=True).item()}. '
+                f'WARNING: the function sufficiently descents even at the max steplength {_max_steplength.max().numpy(force=True).item(): .2f}. '
                 f'The neighborhood of current point may be too flat. The max steplength will be used.'
             )
             return _max_steplength

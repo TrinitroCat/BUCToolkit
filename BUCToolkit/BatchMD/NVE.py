@@ -57,16 +57,20 @@ class NVE(_BaseMD):
             compile_kwargs
         )
 
-    def _velocity_Verlet(
+    def _updateXV(
             self, X, V, Force,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
             masses, atom_masks, is_grad_func_contain_y, batch_indices,
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """ Update X, V, Force, and return X, V, Energy, Force. """
+        #X: th.Tensor = X.contiguous()
+        #V: th.Tensor = V.contiguous()
+        #masses: th.Tensor = masses.contiguous()
         with th.no_grad():
-            #X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
+            # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
-            #V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             # Update V
             Energy, Force = self._calc_EF(
                 X,
@@ -80,25 +84,9 @@ class NVE(_BaseMD):
             )
             Force.mul_(atom_masks)
 
-            #V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
 
         return X, V, Energy, Force
-
-    def _updateXV(
-            self, X, V, Force,
-            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y, batch_indices,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """ Update X, V, Force, and return X, V, Energy, Force. """
-        #X: th.Tensor = X.contiguous()
-        #V: th.Tensor = V.contiguous()
-        #masses: th.Tensor = masses.contiguous()
-        update_func = th.compile(self._velocity_Verlet, **self.compile_kwargs, disable=(not self.is_compile))
-        X, V, Energy, Force = update_func(
-            X, V, Force,
-            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y, batch_indices,
-        )
 
         return X, V, Energy, Force

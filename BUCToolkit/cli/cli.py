@@ -13,6 +13,7 @@ import re
 import time
 import sys
 import logging
+import traceback
 from typing import Literal
 import shlex
 import copy
@@ -537,13 +538,13 @@ class BaseCLI:
                         else:
                             self.logger.error(f"Please input 'y' or 'n'.")
                     break
-                elif content.lower()[:4] == 'save':
+                elif content.lower()[:5] == 'save ' or content.lower() == 'save':
                     true_cont = content.lower().split()
                     if len(true_cont) == 2:
                         self.INPUT_FILE = true_cont[1]
                     self.dump_inpfile(inp_args, force=True)
                     continue
-                elif content.lower()[:4] == 'load':
+                elif content.lower()[:5] == 'load ' or content.lower() == 'load':
                     true_cont = content.split()
                     if len(true_cont) == 2:
                         self.INPUT_FILE = true_cont[1]
@@ -565,7 +566,7 @@ class BaseCLI:
                 elif (content.lower() == 'show') or (content.lower() == 'list'):
                     self.args_exhibitor(inp_args)
                     continue
-                elif content.lower()[:4] == 'chpt':
+                elif content.lower()[:5] == 'chpt ' or content.lower() == 'chpt':
                     _ = content.split(maxsplit=1)
                     if len(_) == 1:
                         _path = prompt(f">>> I/O: Please enter a path to save current configuration file: ")
@@ -578,7 +579,7 @@ class BaseCLI:
                         _path = str(_[1]).strip()
                     self.INPUT_FILE = _path
                     continue
-                elif content.lower()[:3] == 'del':
+                elif content.lower()[:4] == 'del ':
                     _ = content.split(maxsplit=1)
                     if len(_) != 2:
                         self.logger.error(f"Invalid argument: {content}. Usage: del `KEYWORDS`")
@@ -680,7 +681,7 @@ class BaseCLI:
                         self.logger.error(f"Please input 'y' or 'n'.")
                 break
             except Exception as e:
-                self.logger.error(f'ERROR: {e}.\nAll changes have been cancelled without saving.')
+                self.logger.error(f'ERROR: {e}.\n{traceback.format_exc()}\nAll changes have been cancelled without saving.')
                 #self.dump_inpfile(inp_args_bak, force=True)
                 break
 
@@ -750,7 +751,7 @@ class BaseCLI:
                     self.do_exit()
 
                 except Exception as e:
-                    self.logger.error(f"An exception occurred in cli: {e}.")
+                    self.logger.error(f"An exception occurred in cli: {e}.\n{traceback.format_exc()}")
                     continue
         finally:
             if not self.closed:

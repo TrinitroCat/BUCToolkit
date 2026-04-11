@@ -21,13 +21,13 @@ from torch import nn
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils._Element_info import ATOMIC_SYMBOL
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseLogger
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 
 
-class _BaseMC:
+class _BaseMC(BaseLogger):
     def __init__(
             self,
             iter_scheme: str,
@@ -86,39 +86,8 @@ class _BaseMC:
         )
 
         # logger
-        self.logger = logging.getLogger('Main.OPT')
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if not has_any_handler(self.logger):
-            log_handler = logging.StreamHandler(sys.stdout, )
-            log_handler.setLevel(logging.INFO)
-            log_handler.setFormatter(formatter)
-            self.logger.addHandler(log_handler)
-
-    def reset_logger_handler(self, handler: str|logging.StreamHandler|logging.FileHandler):
-        """
-        Clear all logging handlers including current logger and its ancestors, and reset one.
-        Args:
-            handler: the new handler.
-
-        Returns:
-
-        """
-        clear_all_handlers(self.logger)
-        formatter = logging.Formatter('%(message)s')
-        if isinstance(handler, logging.StreamHandler):
-            self.log_handler = logging.StreamHandler(stream=handler)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        else:
-            output_path = os.path.dirname(handler)
-            # check whether path exists
-            if not os.path.isdir(output_path): os.makedirs(output_path)
-            # set log handler
-            self.log_handler = logging.FileHandler(handler, 'w', delay=True)
-            self.log_handler.setLevel(logging.INFO)
-            self.log_handler.setFormatter(formatter)
-        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
+        super().__init__()
+        self.init_logger('Main.MC')
 
     def reset_dumper(self, dumper: Any) -> None:
         if self.output_file is not None:
@@ -153,6 +122,41 @@ class _BaseMC:
                 )
             except Exception as e:
                 self.logger.error(f"Error: Failed to dump data due to \"{e}\"")
+
+    def _do_async_print(self, q: queue.Queue):
+        """
+
+        Returns:
+
+        """
+        # Print information / Verbose
+        while True:
+            numit, _print_E, _print_dE, batch_indices, X, batch_slice_indx = q.get()
+            if numit is None:
+                break
+            if self.verbose > 0:
+                self.logger.info(
+                    f"ITERATION    {numit:>5d}\n "
+                    f"delta E:     {np.array2string(_print_dE.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                    f"Accepted:    {np.array2string(self.is_accept.numpy(force=True))}\n "
+                    f"Energies:    {np.array2string(_print_E.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                    f"Temperature: {self.T_now:.3e}\n "
+                    # f"TIME:        {time.perf_counter() - t_step:>6.4f} s"
+                )
+                # t_step = time.perf_counter()
+            if self.verbose > 1:
+                # split batches if specified batch
+                if batch_indices is not None:
+                    X_np = X.numpy(force=True)
+                    X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
+                else:
+                    X_tup = (X.numpy(force=True),)
+                self.logger.info(f" Coordinates:\n")
+                X_str = [
+                    np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    for xi in X_tup
+                ]
+                [self.logger.info(f'{x_str}\n') for x_str in X_str]
 
     def calc_shape_center(self, Xr, ) -> th.Tensor:
         """
@@ -283,6 +287,7 @@ class _BaseMC:
             n_true_batch = n_batch
             self.batch_scatter = None
             self.batch_tensor = None
+            batch_slice_indx = None
         # initialize vars
         maxiter = self.maxiter
         self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
@@ -424,72 +429,42 @@ class _BaseMC:
             compute_event.record(th.cuda.default_stream(self.device))  # the default stream is the compute (main) stream.
             dump_queue = queue.Queue()
             dump_thread = threading.Thread(target=self._do_async_dump, args=(dump_queue,))
+            logout_queue = queue.Queue()
+            logout_thread = threading.Thread(target=self._do_async_print, args=(logout_queue,))
             try:
                 dump_thread.start()
-                for numit in range(maxiter):
-                    # dump
-                    if numit % self.output_structures_per_step == 0:
-                        _do_print = True
-                        compute_event.wait(th.cuda.default_stream(self.device))
-                        # D2D, fast copy purely on GPU
-                        _buf_E.copy_(energies.squeeze().contiguous())
-                        _buf_dE.copy_(delta_E)
-                        _buf_X.copy_(X)
-                        # D2H, sync.
-                        with th.cuda.stream(copy_stream):
-                            _print_E.copy_(_buf_E, non_blocking=True)
-                            _print_dE.copy_(_buf_dE, non_blocking=True)
-                            _print_X.copy_(_buf_X, non_blocking=True)  # D2H
-                        copy_event.record(copy_stream)
-                        # use backend thread to dump
-                        dump_queue.put((self.dumper, copy_event, _print_E, _print_X))
+                logout_thread.start()
+                fl = th.compile(self._main_for_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
+                fl(
+                    compute_event,
+                    _buf_E,
+                    _buf_dE,
+                    _buf_X,
+                    _print_E,
+                    _print_dE,
+                    _print_X,
+                    energies,
+                    delta_E,
+                    X,
+                    copy_stream,
+                    copy_event,
+                    dump_queue,
+                    logout_queue,
+                    func, func_args, func_kwargs,
+                    batch_indices, batch_slice_indx,
+                    is_fix_mass_center,
+                    move_to_center_freq,
+                    SHAPE_CENTER
+                )
 
-                    # update X & energy. update before printing to cover the dumping cost by update.
-                    X_old = X#.clone() # note that X is not in-place updated in `self._update_X` due to `where` ops. Hence `clone` is not necessary.
-                    energies_old = energies.clone()
-                    energies, delta_E, X = self._update_X(func, func_args, func_kwargs, energies_old, X) # (n_batch, n_atom, n_dim)
-                    X_diff = X - X_old
-
-                    # Print information / Verbose
-                    if self.verbose > 0:
-                        self.logger.info(f"ITERATION    {numit:>5d}\n "
-                                         f"delta E:     {np.array2string(_print_dE.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                         f"Accepted:    {np.array2string(self.is_accept.numpy(force=True))}\n "
-                                         f"Energies:    {np.array2string(_print_E.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                         f"Temperature: {self.T_now:.3e}\n "
-                                         f"TIME:        {time.perf_counter() - t_step:>6.4f} s")
-                        t_step = time.perf_counter()
-                    if self.verbose > 1:
-                        # split batches if specified batch
-                        if batch_indices is not None:
-                            X_np = X.numpy(force=True)
-                            X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
-                        else:
-                            X_tup = (X.numpy(force=True),)
-                        self.logger.info(f" Coordinates:\n")
-                        X_str = [
-                            np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                            for xi in X_tup
-                        ]
-                        [self.logger.info(f'{x_str}\n') for x_str in X_str]
-
-                    # update algo. parameters.
-                    self._update_algo_param(numit, X_diff)
-
-                    # move to center
-                    if is_fix_mass_center and (numit % move_to_center_freq == 0):
-                        X.add_(SHAPE_CENTER - self.calc_shape_center(X))  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
-
-                    # Check NaN
-                    #if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
-
-                    #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
                 if not self._HOLD_DUMPER:
                     self.dumper.close()
                 th.cuda.synchronize()
             finally:
                 dump_queue.put([None]*4)
                 dump_thread.join()
+                logout_queue.put([None]*6)
+                logout_thread.join()
 
         if self.verbose > 0:
             self.logger.info(
@@ -510,6 +485,72 @@ class _BaseMC:
                 [self.logger.info(f'{x_str}\n') for x_str in X_str]
         # output
         #return energies, X  #, ptlist  # test <<<
+
+    def _main_for_loop_cuda(
+            self,
+            compute_event,
+            _buf_E,
+            _buf_dE,
+            _buf_X,
+            _print_E,
+            _print_dE,
+            _print_X,
+            energies,
+            delta_E,
+            X,
+            copy_stream,
+            copy_event,
+            dump_queue,
+            logout_queue,
+            func, func_args, func_kwargs,
+            batch_indices, batch_slice_indx,
+            is_fix_mass_center,
+            move_to_center_freq,
+            SHAPE_CENTER
+    ):
+        #t_step = time.perf_counter()
+        _do_print = False
+        for numit in range(self.maxiter):
+            # dump
+            if numit % self.output_structures_per_step == 0:
+                _do_print = True
+                compute_event.wait(th.cuda.default_stream(self.device))
+                # D2D, fast copy purely on GPU
+                _buf_E.copy_(energies.squeeze().contiguous())
+                _buf_dE.copy_(delta_E)
+                _buf_X.copy_(X)
+                # D2H, async.
+                with th.cuda.stream(copy_stream):
+                    copy_stream.wait_stream(th.cuda.default_stream(self.device))
+                    _print_E.copy_(_buf_E, non_blocking=True)
+                    _print_dE.copy_(_buf_dE, non_blocking=True)
+                    _print_X.copy_(_buf_X, non_blocking=True)  # D2H
+                copy_event.record(copy_stream)
+                # use backend thread to dump
+                dump_queue.put((self.dumper, copy_event, _print_E, _print_X))
+
+            # update X & energy. update before printing to cover the dumping cost by update.
+            X_old = X  # .clone() # note that X is not in-place updated in `self._update_X` due to `where` ops. Hence `clone` is not necessary.
+            energies_old = energies.clone()
+            energies, delta_E, X = self._update_X(func, func_args, func_kwargs, energies_old, X)  # (n_batch, n_atom, n_dim)
+            X_diff = X - X_old
+            compute_event.record(th.cuda.default_stream(self.device))  # the default stream is the compute (main) stream.
+
+            if _do_print:
+                logout_queue.put((numit, _print_E, _print_dE, batch_indices, X, batch_slice_indx))
+                _do_print = False
+
+            # update algo. parameters.
+            self._update_algo_param(numit, X_diff)
+
+            # move to center
+            if is_fix_mass_center and (numit % move_to_center_freq == 0):
+                X.add_(SHAPE_CENTER - self.calc_shape_center(X))  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
+
+            # Check NaN
+            # if th.any(energies != energies): raise RuntimeError(f'NaN Occurred in output: {energies}')
+
+            # ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
 
     def __run_on_cpu(
             self,
@@ -579,6 +620,7 @@ class _BaseMC:
             n_true_batch = n_batch
             self.batch_scatter = None
             self.batch_tensor = None
+            batch_slice_indx = None
         # initialize vars
         maxiter = self.maxiter
         n_batch, n_atom, n_dim = X.shape
@@ -701,54 +743,17 @@ class _BaseMC:
                 SHAPE_CENTER = index_reduce(X, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size) / self.batch_tensor
                 SHAPE_CENTER = SHAPE_CENTER.index_select(1, self.batch_scatter)  # (1, sumN*A, n_dim)
 
-            for numit in range(maxiter):
-                # dump
-                if numit % self.output_structures_per_step == 0:
-                    _do_print = True
-                    self.dumper.step(
-                        energies.numpy(),
-                        X.numpy(),
-                    )
-                # Print information / Verbose
-                if self.verbose > 0:
-                    self.logger.info(f"ITERATION    {numit:>5d}\n "
-                                     f"delta E:     {np.array2string(delta_E.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"Accepted:    {np.array2string(self.is_accept.numpy(force=True))}\n "
-                                     f"Energies:    {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"Temperature: {self.T_now:.3e}\n "
-                                     f"TIME:        {time.perf_counter() - t_step:>6.4f} s")
-                    t_step = time.perf_counter()
-                if self.verbose > 1:
-                    # split batches if specified batch
-                    if batch_indices is not None:
-                        X_np = X.numpy(force=True)
-                        X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
-                    else:
-                        X_tup = (X.numpy(force=True),)
-                    self.logger.info(f" Coordinates:\n")
-                    X_str = [
-                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                        for xi in X_tup
-                    ]
-                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
-
-                # update X & energy
-                X_old = X.clone()
-                energies_old = energies.clone()
-                energies, delta_E, X = self._update_X(func, func_args, func_kwargs, energies_old, X) # (n_batch, n_atom, n_dim)
-                X_diff = X - X_old
-
-                # update algo. parameters.
-                self._update_algo_param(numit, X_diff)
-
-                # Check NaN
-                #if not th.all(energies.isfinite()): raise RuntimeError(f'NaN Occurred in output: {energies}')
-
-                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
-
-            # move to center
-            if is_fix_mass_center and (numit % move_to_center_freq == 0):
-                X.add_(SHAPE_CENTER - self.calc_shape_center(X))  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
+            fl = th.compile(self._main_for_loop_cpu, **self.compile_kwargs, disable=(not self.is_compile))
+            fl(
+                energies,
+                delta_E,
+                X,
+                func, func_args, func_kwargs,
+                batch_indices, batch_slice_indx,
+                is_fix_mass_center,
+                move_to_center_freq,
+                SHAPE_CENTER
+            )
 
             if not self._HOLD_DUMPER:
                 self.dumper.close()
@@ -770,6 +775,70 @@ class _BaseMC:
                     for xi in X_tup
                 ]
                 [self.logger.info(f'{x_str}\n') for x_str in X_str]
+
+    def _main_for_loop_cpu(
+            self,
+            energies,
+            delta_E,
+            X,
+            func, func_args, func_kwargs,
+            batch_indices, batch_slice_indx,
+            is_fix_mass_center,
+            move_to_center_freq,
+            SHAPE_CENTER
+    ):
+        _do_print = False
+        for numit in range(self.maxiter):
+            # dump
+            if numit % self.output_structures_per_step == 0:
+                _do_print = True
+                self.dumper.step(
+                    energies.numpy(),
+                    X.numpy(),
+                )
+            # Print information / Verbose
+            if _do_print:
+                if self.verbose > 0:
+                    self.logger.info(
+                        f"ITERATION    {numit:>5d}\n "
+                        f"delta E:     {np.array2string(delta_E.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                        f"Accepted:    {np.array2string(self.is_accept.numpy(force=True))}\n "
+                        f"Energies:    {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                        f"Temperature: {self.T_now:.3e}\n "
+                        #f"TIME:        {time.perf_counter() - t_step:>6.4f} s"
+                    )
+                    #t_step = time.perf_counter()
+                if self.verbose > 1:
+                    # split batches if specified batch
+                    if batch_indices is not None:
+                        X_np = X.numpy(force=True)
+                        X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
+                    else:
+                        X_tup = (X.numpy(force=True),)
+                    self.logger.info(f" Coordinates:\n")
+                    X_str = [
+                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                        for xi in X_tup
+                    ]
+                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
+
+            # update X & energy
+            X_old = X.clone()
+            energies_old = energies.clone()
+            energies, delta_E, X = self._update_X(func, func_args, func_kwargs, energies_old, X)  # (n_batch, n_atom, n_dim)
+            X_diff = X - X_old
+
+            # update algo. parameters.
+            self._update_algo_param(numit, X_diff)
+
+            # Check NaN
+            # if not th.all(energies.isfinite()): raise RuntimeError(f'NaN Occurred in output: {energies}')
+
+            # ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+
+            # move to center
+            if is_fix_mass_center and (numit % move_to_center_freq == 0):
+                X.add_(SHAPE_CENTER - self.calc_shape_center(X))  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
 
     def initialize_algo_param(self):
         """

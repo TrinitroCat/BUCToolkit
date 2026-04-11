@@ -364,7 +364,7 @@ class NVT(_BaseMD):
                 alpha2.addcmul_(f, S).clamp_min_(self.epsK)
 
                 # (optional bookkeeping: post-thermostat kinetic energy)
-                self.Ekt_vir = alpha2 * K
+                #self.Ekt_vir = alpha2 * K
 
                 alpha = th.sqrt(alpha2).reshape(1, -1, 1)  # (n_batch, 1, 1)
                 V *= alpha.index_select(1, self.batch_scatter)
@@ -384,7 +384,7 @@ class NVT(_BaseMD):
                 alpha2: th.Tensor = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
                 alpha2.addcmul_(f, S).clamp_min_(self.epsK)
 
-                self.Ekt_vir = alpha2 * K
+                #self.Ekt_vir = alpha2 * K
 
                 alpha = th.sqrt(alpha2).reshape(-1, 1, 1)  # (n_batch, 1, 1)
                 V *= alpha

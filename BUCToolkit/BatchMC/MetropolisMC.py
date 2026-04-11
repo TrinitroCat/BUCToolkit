@@ -146,18 +146,18 @@ class MMC(_BaseMC):
         X_new = g.sample()
         return X_new
 
-    def _metropolis_update(self, func, func_args, func_kwargs, energies_old, X: th.Tensor):
+    def _update_X(self, func, func_args, func_kwargs, energies_old, X: th.Tensor):
         """
-        Main Metropolis update function.
+        Override this method to implement X update algorithm.
         Args:
-            func:
-            func_args:
-            func_kwargs:
-            energies_old:
-            X:
+            X: (n_batch, n_atom, 3), the independent vars X.
+            func,
+            func_args,
+            func_kwargs,
+            energies_old,
 
         Returns:
-
+            p: th.Tensor, the new update direction of X.
         """
         _X = self.X_update_func(X)  # atom_mask will be handled within update_func
         _energy = th.compiler.disable(func)(_X, *func_args, **func_kwargs)
@@ -188,24 +188,6 @@ class MMC(_BaseMC):
                 _X,
                 X
             )
-
-        return energy_new, delta_E, X_new
-
-    def _update_X(self, func, func_args, func_kwargs, energies_old, X: th.Tensor):
-        """
-        Override this method to implement X update algorithm.
-        Args:
-            X: (n_batch, n_atom, 3), the independent vars X.
-            func,
-            func_args,
-            func_kwargs,
-            energies_old,
-
-        Returns:
-            p: th.Tensor, the new update direction of X.
-        """
-        _main_update_func = th.compile(self._metropolis_update, **self.compile_kwargs, disable=(not self.is_compile))
-        energy_new, delta_E, X_new = _main_update_func(func, func_args, func_kwargs, energies_old, X)
 
         return energy_new, delta_E, X_new
 

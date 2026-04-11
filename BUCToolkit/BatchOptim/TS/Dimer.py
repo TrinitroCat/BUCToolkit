@@ -12,15 +12,16 @@ import time
 import warnings
 import logging
 import sys
+import os
 
 import numpy as np
 import torch as th
 from torch import nn
-from torch.nn import functional as Fn
 
 from BUCToolkit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT, FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils import index_ops
 from BUCToolkit.utils.function_utils import preload_func
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseLogger
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)
 
@@ -103,7 +104,7 @@ def fin_diff_hvp(
     return y_mean, g_mean, hvp
 
 
-class FindMinEigen:
+class FindMinEigen(BaseLogger):
     """
     Find the eigenvector with minimum eigenvalue by Riemann gradient descent on S^2 manifold v^T v = 1.
     In fact, dimer only requires the direction within negative cone, i.e., v^T H v < 0.
@@ -146,15 +147,8 @@ class FindMinEigen:
         self._hold_samples = _hold_samples
 
         # logger
-        self.logger = logging.getLogger('Main.OPT')
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if not self.logger.hasHandlers():
-            log_handler = logging.StreamHandler(sys.stdout, )
-            log_handler.setLevel(logging.INFO)
-            log_handler.setFormatter(formatter)
-            self.logger.addHandler(log_handler)
-        pass
+        super().__init__()
+        self.init_logger('Main.TS')
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -525,7 +519,7 @@ class FindMinEigen:
         return v, y, g, Hv, vHv
 
 
-class Dimer:
+class Dimer(BaseLogger):
     """
     Modified Dimer
     Ref. J Chem Phys 2005, 132, 224101.
@@ -569,15 +563,8 @@ class Dimer:
         )
 
         # logger
-        self.logger = logging.getLogger('Main.OPT')
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
-        if not self.logger.hasHandlers():
-            log_handler = logging.StreamHandler(sys.stdout, )
-            log_handler.setLevel(logging.INFO)
-            log_handler.setFormatter(formatter)
-            self.logger.addHandler(log_handler)
-        pass
+        super().__init__()
+        self.init_logger('Main.TS')
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -599,7 +586,6 @@ class Dimer:
         # TODO, adding linear search algo. to determine steplength.
         pass
 
-
     def set_batch_updater(
             self,
             method_trans: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]],
@@ -617,8 +603,7 @@ class Dimer:
         Default transform is identical transform (i.e., do nothing)
         Args:
             method_trans: Callable(mask: Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict) -> Tuple[Tuple, Dict, Tuple, Dict],
-            method_rot: batch updater for rotations.
-the method of updating function arguments for a mask.
+            method_rot: batch updater for rotations. the method of updating function arguments for a mask.
 
         Returns: None
         """

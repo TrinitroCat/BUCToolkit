@@ -273,6 +273,10 @@ class FIRE(_BaseOpt):
             grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
         """
         # manage Atomic Type & Masses
+        if len(X.shape) == 2:
+            X = X.unsqueeze(0)
+        elif len(X.shape) != 3:
+            raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
         if elements is None:
             self.masses = th.ones_like(X)
         elif isinstance(elements, Sequence):

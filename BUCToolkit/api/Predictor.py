@@ -9,7 +9,7 @@ import os
 import time
 import traceback
 import warnings
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch as th
@@ -27,17 +27,26 @@ class Predictor(_CONFIGS):
         config_file: the path of input file
     """
 
-    def __init__(self, config_file: str) -> None:
+    def __init__(
+            self,
+            config_file: str,
+            data_type: Literal['pyg', 'dgl'] = 'pyg',
+    ) -> None:
         super().__init__(config_file)
 
         self.config_file = config_file
         self.reload_config(config_file)
+        self.data_type = data_type
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
         self._data_loader = None
 
     def predict(self, model, test_model: bool = False, warm_up: bool = False):
+        """ Alias for `run(...)` """
+        self.run(model, test_model, warm_up)
+
+    def run(self, model, test_model: bool = False, warm_up: bool = False):
         """
         Parameters:
             model: the input model which is uninstantiated nn.Module class.
@@ -52,7 +61,7 @@ class Predictor(_CONFIGS):
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
-        if self.START == 'resume' or self.START == 1:
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH)
             if self.param is None:
                 _model.load_state_dict(chk_data['model_state_dict'])
@@ -84,6 +93,22 @@ class Predictor(_CONFIGS):
 
             time_tol = time.perf_counter()
             _model.eval()
+            # data type parse
+            if self.data_type == 'pyg':
+                def get_indx(data):
+                    _indx: dict = getattr(data, 'idx', None)
+                    return _indx
+
+                def get_batch_indx(data):
+                    return [len(dat.pos) for dat in data.to_data_list()]
+            else:
+                def get_indx(data):
+                    _indx: dict = data.nodes['atom'].data
+                    return _indx.get('idx', None)
+
+                def get_batch_indx(data):
+                    return val_data.batch_num_nodes('atom')
+
             # warm_up
             if warm_up:
                 with _LoggingEnd(self.log_handler):
@@ -109,6 +134,7 @@ class Predictor(_CONFIGS):
             t_per_batch = list()
             max_alloc_mem = list()
             val_label = None
+            n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             for val_data, val_label in val_set:
                 t_bt = time.perf_counter()
                 # to avoid get an empty batch
@@ -118,6 +144,19 @@ class Predictor(_CONFIGS):
                 # pred & loss
                 with th.no_grad():
                     pred_y = _model(val_data)
+                    if self.VERBOSE:
+                        idx = get_indx(val_data)
+                        batch_indx = get_batch_indx(val_data)
+                        idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
+                        n_s += len(batch_indx)
+                        ener_print = pred_y.get('energy', None)
+                        ener_print = ener_print.numpy(force=True) if ener_print is not None else None
+                        forc_print = pred_y.get('forces', None)
+                        forc_print = forc_print.numpy(force=True) if forc_print is not None else None
+                        self.logger.info(
+                            f"Sample [{n_c*len(val_data): >10d}/{self.n_batch: >10d}]: {idx}"
+                            f"\n\tenergy: {ener_print}\n\tforces: {forc_print}"
+                        )
                     _results.append(pred_y['energy'].detach().cpu().numpy())  # TODO, add Force & other properties.
                     if val_label is not None:
                         _results_names.extend(val_label)

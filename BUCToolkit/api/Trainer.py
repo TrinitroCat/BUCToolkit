@@ -25,7 +25,7 @@ from torch.optim.lr_scheduler import (StepLR, ExponentialLR, ChainedScheduler, C
 
 from .Losses import Energy_Force_Loss, Energy_Loss
 from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
-from .ModelOptims import FIRELikeOptimizer
+from .ModelOptims import FIRELikeOptimizer, LangevinOptimizer
 from ._io import _CONFIGS, _LoggingEnd, ExpMovingAverage
 
 
@@ -62,7 +62,8 @@ class Trainer(_CONFIGS):
         # CONSTANT of training information
         self._OPTIM_DICT = {
             'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
-            'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'FIRE': FIRELikeOptimizer,
+            'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax,
+            'FIRE': FIRELikeOptimizer, 'Langevin': LangevinOptimizer,
             'custom': None
         }
         self._LR_SCHEDULER_DICT = {
@@ -371,6 +372,7 @@ class Trainer(_CONFIGS):
             num_update = 0  # number of parameter updating
             _can_valid = False  # To avoid stacking, ensuring that validation is always occurred after param. update.
             nan_count = 0  # number of nan occurred.
+            n_err = 0  # error number during training.
             for i in range(epoch_now, self.EPOCH):
                 time_ep = time.perf_counter()
                 real_n_samp = 0
@@ -382,7 +384,6 @@ class Trainer(_CONFIGS):
                 num_step = 1
                 accum_loss = 0.  # the accumulation of loss within gradient accumulation steps.
                 accum_step = 0   # the actual steps that accumulated. normally `accum_step` == `self.ACCUMULATE_STEP`, except the last
-                n_err = 0        # error number during training.
                 time_gp = time.perf_counter()
                 for batch_data, batch_label in trn_set:
                     try:

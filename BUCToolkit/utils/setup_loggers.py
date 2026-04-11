@@ -8,9 +8,8 @@
 import logging
 import sys
 import warnings
+import os
 
-# logger cache to avoid repeatedly adding
-_logger_initialized = set()
 
 def clear_all_handlers(logger: logging.Logger):
     """
@@ -57,3 +56,63 @@ def has_any_handler(logger: logging.Logger) -> bool:
         current = current.parent
 
     return has_handler
+
+
+class BaseLogger:
+    """
+    Base class for logs of all classes.
+    """
+
+    def __init__(self):
+        self.logger = None
+        self.log_handler = None
+
+    def init_logger(self, logger_name: str):
+        # logging
+        if self.logger is None:
+            # cut off propagation
+            supreme_name = logger_name.split('.')[0]
+            top_logger = logging.getLogger(supreme_name)
+            top_logger.propagate = False
+            # set true logger
+            self.logger = logging.getLogger(logger_name)
+            self.logger.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(message)s')
+            if not has_any_handler(self.logger):
+                self.log_handler = logging.StreamHandler(sys.stdout)
+                self.log_handler.setLevel(logging.INFO)
+                self.log_handler.setFormatter(formatter)
+                top_logger.addHandler(self.log_handler)
+        else:
+            warnings.warn('Logger has already initialized. Nothing will be done.', RuntimeWarning)
+
+    def reset_logger_handler(self, handler: str|logging.StreamHandler|logging.FileHandler):
+        """
+        Clear all logging handlers including current logger and its ancestors, and reset one.
+        Args:
+            handler: the new handler.
+
+        Returns:
+
+        """
+        clear_all_handlers(self.logger)
+        # redirect to supreme logger
+        top_logger = self.logger
+        while top_logger.parent and top_logger.propagate:
+            top_logger = top_logger.parent
+
+        formatter = logging.Formatter('%(message)s')
+        if isinstance(handler, logging.Handler):
+            self.log_handler = handler
+        elif isinstance(handler, str):
+            output_path = os.path.dirname(handler)
+            # check whether path exists
+            if not os.path.isdir(output_path): os.makedirs(output_path)
+            # set log handler
+            self.log_handler = logging.FileHandler(handler, 'w', delay=True)
+        else:
+            raise TypeError("handler must be a string path or a logging.Handler instance")
+
+        self.log_handler.setLevel(logging.INFO)
+        self.log_handler.setFormatter(formatter)
+        top_logger.addHandler(self.log_handler)
