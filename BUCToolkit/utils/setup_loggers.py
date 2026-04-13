@@ -9,6 +9,9 @@ import logging
 import sys
 import warnings
 import os
+from typing import Any
+
+from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 
 
 def clear_all_handlers(logger: logging.Logger):
@@ -58,14 +61,19 @@ def has_any_handler(logger: logging.Logger) -> bool:
     return has_handler
 
 
-class BaseLogger:
+class BaseIO:
     """
     Base class for logs of all classes.
     """
 
-    def __init__(self):
+    def __init__(self, output_file: str|None = None) -> None:
         self.logger = None
         self.log_handler = None
+        self.output_file = str(output_file) if output_file is not None else None
+        self.dumper = structures_io_dumper(
+            path=self.output_file,
+            mode='x',
+        )
 
     def init_logger(self, logger_name: str):
         # logging
@@ -116,3 +124,14 @@ class BaseLogger:
         self.log_handler.setLevel(logging.INFO)
         self.log_handler.setFormatter(formatter)
         top_logger.addHandler(self.log_handler)
+
+    def reset_dumper(self, dumper: Any) -> None:
+        if self.output_file is not None:
+            self.dumper.close()
+            del self.dumper
+            self.dumper = dumper
+        else:
+            self.logger.error(
+                "ERROR: No output file specified. Hence, resetting dumper is meaningless.\n"
+                "'reset_dumper': Operation REFUSED."
+            )

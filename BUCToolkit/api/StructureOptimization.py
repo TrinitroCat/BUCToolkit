@@ -201,7 +201,7 @@ class StructureOptimization(_CONFIGS):
             mode: choose whether `minimize` or `ts`.
         """
         # check logger
-        if has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
+        if not has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if (self.START == 'resume') or (self.START == 1) or (self.START == 2):

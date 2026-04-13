@@ -273,7 +273,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                         is_grad_func_contain_y=False,
                         require_grad=self.require_grad,
                         output_grad = True,
-                        fixed_atom_tensor=fixed_atom_tensor,  # TODO, The Selective Dynamics.
+                        fixed_atom_tensor=fixed_atom_tensor,
                     )
                     _energy.detach_()
                     _X.detach_()

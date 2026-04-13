@@ -236,6 +236,7 @@ class MolecularDynamics(_CONFIGS):
                     else:
                         X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
 
+                    mv2cent_freq = int(self.MD.get('MOVE_TO_CENTER_FREQ', -1))
                     mole_dynam.run(
                         model_wrap.Energy,
                         X_init,
@@ -249,6 +250,7 @@ class MolecularDynamics(_CONFIGS):
                         require_grad=self.require_grad,
                         batch_indices=batch_indx,
                         fixed_atom_tensor=fixed_mask,  # The Selective Dynamics.
+                        move_to_center_freq=mv2cent_freq
                     )
 
                     # Print info

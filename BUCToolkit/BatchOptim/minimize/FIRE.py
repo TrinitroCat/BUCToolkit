@@ -33,6 +33,7 @@ class FIRE(_BaseOpt):
             fac_inc: float = 1.1,
             fac_dec: float = 0.5,
             N_min: int = 5,
+            output_file: str | None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2,
             _hold_samples: bool = False,
@@ -70,6 +71,7 @@ class FIRE(_BaseOpt):
             1.,
             1.,
             use_bb = False,
+            output_file=output_file,
             device = device,
             verbose = verbose,
             _hold_samples=_hold_samples
