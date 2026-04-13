@@ -21,13 +21,13 @@ from torch import nn
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils._Element_info import ATOMIC_SYMBOL
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseLogger
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseIO
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 
 
-class _BaseMC(BaseLogger):
+class _BaseMC(BaseIO):
     def __init__(
             self,
             iter_scheme: str,
@@ -65,7 +65,6 @@ class _BaseMC(BaseLogger):
         self.iterform = str(iter_scheme)
         self.verbose = int(verbose)
         self.device = device
-        self.output_file = str(output_file) if output_file is not None else None
         self.maxiter = int(maxiter)
         self.output_structures_per_step = int(output_structures_per_step)
 
@@ -78,27 +77,9 @@ class _BaseMC(BaseLogger):
         # Adv. API `MonteCarlo` turns on it.
         self._HOLD_DUMPER = False
 
-        # set dumper
-        # Note: cache_size: NOW it be hard coded as 4 MB / 4096 bytes
-        self.dumper = structures_io_dumper(
-            path=self.output_file,
-            mode='x',
-        )
-
         # logger
-        super().__init__()
+        super().__init__(output_file)
         self.init_logger('Main.MC')
-
-    def reset_dumper(self, dumper: Any) -> None:
-        if self.output_file is not None:
-            self.dumper.close()
-            del self.dumper
-            self.dumper = dumper
-        else:
-            self.logger.error(
-                "ERROR: No output file specified. Hence, resetting dumper is meaningless.\n"
-                "'reset_dumper': Operation REFUSED."
-            )
 
     def _do_async_dump(self, q: queue.Queue):
         """

@@ -18,12 +18,12 @@ from torch import nn
 from BUCToolkit.BatchOptim._utils._line_search import LineSearch
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils.function_utils import preload_func
-from BUCToolkit.utils.setup_loggers import BaseLogger
+from BUCToolkit.utils.setup_loggers import BaseIO
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
 
 
-class _BaseOpt(BaseLogger, ABC):
+class _BaseOpt(BaseIO, ABC):
     def __init__(
             self,
             iter_scheme: str,
@@ -36,6 +36,7 @@ class _BaseOpt(BaseLogger, ABC):
             linesearch_factor: float = 0.6,
             steplength: float = 0.5,
             use_bb: bool = True,
+            output_file: str | None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2,
             _hold_samples: bool = False,
@@ -61,6 +62,7 @@ class _BaseOpt(BaseLogger, ABC):
             linesearch_factor: A factor in linesearch. Shrinkage factor for "Backtrack", scaling factor in interval search for "Golden" and line steplength for "Newton".
             steplength: The initial step length.
             use_bb: whether to use Barzilai-Borwein steplength (BB1 or long BB) as initial steplength instead of fixed one.
+            output_file: the file to dump trajectory. if None, nothing will be dumped.
             device: The device that program runs on.
             verbose: amount of print information.
             _hold_samples: ONLY FOR SPECIAL USES (e.g., CI-NEB or DEBUG).
@@ -102,7 +104,7 @@ class _BaseOpt(BaseLogger, ABC):
         self.verbose = verbose
 
         # logger
-        super().__init__()
+        super().__init__(output_file)
         self.init_logger('Main.OPT')
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):

@@ -53,6 +53,7 @@ class QN(_BaseOpt):
             steplength: float = 0.5,
             use_bb: bool = True,
             external_Hessian: th.Tensor|None = None,
+            output_file: str | None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2
     ):
@@ -67,6 +68,7 @@ class QN(_BaseOpt):
             linesearch_factor,
             steplength,
             use_bb,
+            output_file,
             device,
             verbose
         )

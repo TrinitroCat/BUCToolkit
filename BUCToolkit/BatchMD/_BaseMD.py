@@ -24,10 +24,10 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARR
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseLogger
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseIO
 
 
-class _BaseMD(BaseLogger):
+class _BaseMD(BaseIO):
     """ Base BatchMD """
 
     __slots__ = [
@@ -75,7 +75,6 @@ class _BaseMD(BaseLogger):
         assert (max_step > 0) and isinstance(max_step, int), f'max_step must be a positive integer, but occurred {max_step}.'
         self.max_step = int(max_step)
         self.T_init = float(T_init)
-        self.output_file = str(output_file) if output_file is not None else None
         self.output_structures_per_step = int(output_structures_per_step)
         self.device = device
         self.verbose = int(verbose)
@@ -98,27 +97,9 @@ class _BaseMD(BaseLogger):
         # Adv. API `MolecularDynamics` turns on it.
         self._HOLD_DUMPER = False
 
-        # set dumper
-        # Note: cache_size: NOW it be hard coded as 4 MB / 4096 bytes
-        self.dumper = structures_io_dumper(
-            path=self.output_file,
-            mode='x',
-        )
-
-        # logging
-        super().__init__()
+        # logging & dumper
+        super().__init__(output_file)
         self.init_logger('Main.MD')
-
-    def reset_dumper(self, dumper: Any) -> None:
-        if self.output_file is not None:
-            self.dumper.close()
-            del self.dumper
-            self.dumper = dumper
-        else:
-            self.logger.error(
-                "ERROR: No output file specified. Hence, resetting dumper is meaningless.\n"
-                "'reset_dumper': Operation REFUSED."
-            )
 
     def _reduce_Ek_T(self, batch_indices, masses, V):
         if batch_indices is not None:

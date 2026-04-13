@@ -51,6 +51,7 @@ class CG(_BaseOpt):
             linesearch_factor: float = 0.6,
             steplength: float = 0.5,
             use_bb: bool = True,
+            output_file: str | None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2
     ):
@@ -65,6 +66,7 @@ class CG(_BaseOpt):
             linesearch_factor,
             steplength,
             use_bb,
+            output_file,
             device,
             verbose
         )

@@ -18,10 +18,10 @@ import torch as th
 from torch import nn
 
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
-from BUCToolkit.utils.setup_loggers import has_any_handler,clear_all_handlers, BaseLogger
+from BUCToolkit.utils.setup_loggers import has_any_handler,clear_all_handlers, BaseIO
 
 
-class LineSearch(BaseLogger):
+class LineSearch(BaseIO):
     def __init__(
             self,
             method: Literal['Backtrack', 'B', 'Wolfe', 'W', 'MT', 'EXACT', 'None', 'N'] = 'Backtrack',

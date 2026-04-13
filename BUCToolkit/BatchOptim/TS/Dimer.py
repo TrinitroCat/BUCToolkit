@@ -21,7 +21,7 @@ from torch import nn
 from BUCToolkit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT, FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils import index_ops
 from BUCToolkit.utils.function_utils import preload_func
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseLogger
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseIO
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)
 
@@ -104,7 +104,7 @@ def fin_diff_hvp(
     return y_mean, g_mean, hvp
 
 
-class FindMinEigen(BaseLogger):
+class FindMinEigen(BaseIO):
     """
     Find the eigenvector with minimum eigenvalue by Riemann gradient descent on S^2 manifold v^T v = 1.
     In fact, dimer only requires the direction within negative cone, i.e., v^T H v < 0.
@@ -519,7 +519,7 @@ class FindMinEigen(BaseLogger):
         return v, y, g, Hv, vHv
 
 
-class Dimer(BaseLogger):
+class Dimer(BaseIO):
     """
     Modified Dimer
     Ref. J Chem Phys 2005, 132, 224101.

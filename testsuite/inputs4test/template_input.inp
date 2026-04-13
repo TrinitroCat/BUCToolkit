@@ -2,7 +2,7 @@
 # input template
 
 # global configs
-TASK: !!str MD          # task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC'
+TASK: !!str MD          # task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC', 'TRAIN', 'PREDICT'
 START: !!int 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
 VERBOSE: !!int 1        # verbosity level for log output
 DEVICE: !!str 'cuda:0'  # the device on which the task would run
@@ -127,10 +127,24 @@ MD:
   MAX_STEP: !!int 100  # total time (fs) = TIME_STEP * MAX_STEP
   T_INIT: !!float 298.15  # Initial Temperature, Unit: K. For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist.
   OUTPUT_COORDS_PER_STEP: !!int 1  # To control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted.
+  MOVE_TO_CENTER_FREQ: !!int 20   # how many steps that move atoms to the barycenter and zeroize the bulk velocities
   # Optional: constraints
   CONSTRAINTS_FILE: !!str ./constraints.py  # function file path of constraints. This function should receive torch.Tensors and support auto-grad.
   CONSTRAINTS_FUNC: !!str func              # the specific function name in `CONSTRAINTS_FILE`
   REQUIRE_GRAD: !!bool False  # see above
+
+# Monte Carlo
+MC:
+  TYPE: !!str Metropolis  # now only `Metropolis` is supported.
+  ITER_SCHEME: !!str 'Gaussian'  # Literal['Gaussian', 'Cauchy', 'Uniform'], the distribution for perturbing atoms.
+  COORDINATE_UPDATE_PARAM: !!float 0.2  # the parameter to control atoms movement. It is the std for 'Gaussian', half interval length for 'Uniform', and the half width at half maximum for 'Cauchy'
+  MAXITER: !!int 10000
+  T_INIT: !!float 298.15    # initial temperature
+  T_SCHEME: !!str constant  # Literal['constant', 'linear', 'exponential', 'log', 'fast'], the way to change MC temperature. See class `BatchMC.MetropolisMC.MMC` for details.
+  T_UPDATE_FREQ: !!int 1    # how many time steps that updates temperature once
+  T_SCHEME_PARAM: !!float 0.  # the parameter to control temperature updating. See class `BatchMC.MetropolisMC.MMC` for details.
+  OUTPUT_COORDS_PER_STEP: !!int 1  # see `MD` section above
+  MOVE_TO_CENTER_FREQ: !!int 20    # see `MD` section above
 
 # model configs
 MODEL_FILE: !!str your/model/file/path/template_model.py  # function file path of torch model

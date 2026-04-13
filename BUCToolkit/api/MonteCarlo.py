@@ -3,7 +3,8 @@
 #  Version: 0.9a
 #  File: MolecularDynamics.py
 #  Environment: Python 3.12
-
+import logging
+import math
 import os
 import time
 import traceback
@@ -13,7 +14,7 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.BatchMD import NVE, NVT
+from BUCToolkit.BatchMC import MMC
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 
@@ -49,8 +50,6 @@ class MonteCarlo(_CONFIGS):
             config_file: str,
             data_type: Literal['pyg', 'dgl'] = 'pyg',
     ) -> None:
-        # TODO
-        raise NotImplementedError
         super().__init__(config_file)
 
         self.config_file = config_file
@@ -62,46 +61,54 @@ class MonteCarlo(_CONFIGS):
         self._has_load_data = False
         self._data_loader = None
 
-        __ensembles = {'NVE': NVE, 'NVT': NVT}
-        if self.MD is None:
-            raise RuntimeError('Molecular Dynamics Configs was NOT Set.')
-        self.MD: Dict
+        __ensembles = {'METROPOLIS': MMC, }
+        if self.MC is None:
+            raise RuntimeError('Monte Carlo Configs was NOT Set.')
+        self.MC: Dict
 
         try:
-            self.MDType = __ensembles[self.MD['ENSEMBLE']]  # The Main Function of MD. MD_config is its parameters.
+            self.MCType = __ensembles[self.MC['TYPE'].upper()]
         except KeyError:
-            raise NotImplementedError(f'Unknown Ensemble {self.MD["ENSEMBLE"]}.')
-        self.MD_config = {'time_step': self.MD.get('TIME_STEP', 1),
-                          'max_step': self.MD.get('MAX_STEP'),
-                          'T_init': self.MD.get('T_INIT', 298.15),
-                          'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
-                          'device': self.DEVICE,
-                          'verbose': self.VERBOSE}
+            raise NotImplementedError(f'Type {self.MC['TYPE']} is not supported yet.')
+        self.MC_config = {
+            'maxiter': int(self.MC.get('MAXITER', 10000)),
+            'output_structures_per_step': int(self.MC.get('OUTPUT_COORDS_PER_STEP', 1)),
+            'device': self.DEVICE,
+            'verbose': self.VERBOSE
+        }
         if self.REDIRECT:
-            self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-        if self.MD['ENSEMBLE'] == 'NVT':
-            self.MD_config['thermostat'] = self.MD.get('THERMOSTAT', 'CSVR')
-            self.MD_config['thermostat_config'] = self.MD.get('THERMOSTAT_CONFIG', dict())
+            self.MC_config['output_file'] = self.PREDICTIONS_SAVE_FILE
+        if self.MC['TYPE'].upper() == 'METROPOLIS':
+            self.MC_config.update(
+                {
+                    'iter_scheme': str(self.MC.get('ITER_SCHEME', 'Gaussian')),
+                    'temperature_init': float(self.MC.get('T_INIT', 298.15)),
+                    'temperature_scheme': str(self.MC.get('T_SCHEME', 'constant')),
+                    'temperature_update_freq': int(self.MC.get('T_UPDATE_FREQ', 1)),
+                    'temperature_scheme_param': float(self.MC.get('T_SCHEME_PARAM', None)),
+                    'coordinate_update_param': float(self.MC.get('COORDINATE_UPDATE_PARAM', 0.2)),
+                }
+            )
 
     def run(self, model):
         """
         Parameters:
             model: the input model which is non-instantiated nn.Module class.
         """
+        # check logger
+        if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
-        if self.START == 'resume' or self.START == 1:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH)
+        if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
+            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=False)
+                _model.load_state_dict(chk_data['model_state_dict'], strict=self.STRICT_LOAD)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
-                'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
+                'WARNING: The model does not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
             )
-            epoch_now = 0
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
         else:
@@ -115,47 +122,13 @@ class MonteCarlo(_CONFIGS):
 
         # initialize
         self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
-        self.n_batch = self.n_samp // self.BATCH_SIZE + 1  # total batch number per epoch
+        self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
+        mont_carlo = None
         try:
             # I/O
             if self.VERBOSE > 0:
-                __time = time.strftime("%Y%m%d_%H:%M:%S")
-                para_count = sum(p.numel() for p in _model.parameters() if p.requires_grad)
-                self.logger.info('*' * 60 + f'\n TIME: {__time}')
-                self.logger.info(' TASK: Molecular Dynamics <<')
-                if (self.START == 0) or (self.START == 'from_scratch'):
-                    self.logger.info(' FROM_SCRATCH <<')
-                else:
-                    self.logger.info(' RESUME <<')
-                self.logger.info(f' COMMENTS: {self.COMMENTS}')
-                self.logger.info(f' I/O INFORMATION:')
-                self.logger.info(f'\tVERBOSITY LEVEL: {self.VERBOSE}')
-                if not self.REDIRECT:
-                    self.logger.info('\tPREDICTION LOG OUTPUT TO SCREEN')
-                else:
-                    output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
-                    self.logger.info(f'\tPREDICTION LOG OUTPUT TO {output_file}')  # type: ignore
-                if (self.START != 0) and (self.START != 'from_scratch'):
-                    self.logger.info(f'\tMODEL PARAMETERS LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
-                self.logger.info(f' MODEL NAME: {self.MODEL_NAME}')
-                self.logger.info(f' MODEL INFORMATION:')
-                self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
-                if self.VERBOSE > 1:
-                    for hp, hpv in self.MODEL_CONFIG.items():
-                        self.logger.info(f'\t\t{hp}: {hpv}')
-                self.logger.info(f' MODEL WILL RUN ON {self.DEVICE}')
-                if self.SAVE_PREDICTIONS:
-                    self.logger.info(f' PREDICTIONS WILL SAVE TO {self.PREDICTIONS_SAVE_FILE}')
-                else:
-                    self.logger.info(f' PREDICTIONS WILL SAVE IN MEMORY AND RETURN AS A VARIABLE.')
-                self.logger.info(f' ITERATION INFORMATION:')
-                self.logger.info(f'\tENSEMBLE: {self.MD["ENSEMBLE"]}')
-                for _algo_conf_name, _algo_conf in self.MD_config.items():
-                    self.logger.info(f'\t{_algo_conf_name}: {_algo_conf}')
-                self.logger.info(f'\tBATCH SIZE: {self.BATCH_SIZE}' +
-                                 f'\n\tTOTAL SAMPLE NUMBER: {self.n_samp}\n' +
-                                 '*' * 60 + '\n' + 'ENTERING MAIN LOOP...')
+                self.logout_task_information(_model, 'MC', self.MC_config, self.n_samp)
 
             time_tol = time.perf_counter()
             _model.eval()
@@ -172,6 +145,25 @@ class MonteCarlo(_CONFIGS):
                 def get_atomic_number(data):
                     return data.atomic_numbers.unsqueeze(0).tolist()
 
+                def get_fixed_mask(data):
+                    mask = getattr(data, 'fixed', None)
+                    if mask is not None:
+                        mask = mask.unsqueeze(0)
+                    return mask
+
+                def get_batch_indx(data):
+                    return [len(dat.pos) for dat in data.to_data_list()]
+
+                def get_init_veloc(data):
+                    veloc = getattr(data, 'velocity', None)
+                    if veloc is not None:
+                        veloc = veloc.unsqueeze(0)
+                    return veloc
+
+                def get_indx(data):
+                    _indx: Dict = getattr(data, 'idx', None)
+                    return _indx
+
             else:
                 model_wrap = _Model_Wrapper_dgl(_model)
                 def get_batch_size(data):
@@ -183,46 +175,80 @@ class MonteCarlo(_CONFIGS):
                 def get_atomic_number(data):
                     return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
 
-            mole_dynam = self.MDType(**self.MD_config)
+                def get_fixed_mask(data):
+                    mask = data.nodes['atom'].data.get('fix', None)
+                    if mask is not None:
+                        mask = mask.unsqueeze(0)
+                    return mask
+
+                def get_batch_indx(data):
+                    return data.batch_num_nodes('atom')
+
+                def get_init_veloc(data):
+                    veloc = data.nodes['atom'].data.get('velocity', None)
+                    if veloc is not None:
+                        veloc = veloc.unsqueeze(0)
+                    return veloc
+
+                def get_indx(data):
+                    _indx: Dict = data.nodes['atom'].data
+                    return _indx.get('idx', None)
+
+            mont_carlo = self.MCType(**self.MC_config)
+            #if self.REDIRECT:
+            #    _file_handler = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+            #    mont_carlo.reset_logger_handler(_file_handler)
+            if self.SAVE_PREDICTIONS:
+                mont_carlo._HOLD_DUMPER = True
+                # change dumping mode to 'a' to contiguously dumper within the whole for-loop
+                mont_carlo.dumper.reset_args(self.PREDICTIONS_SAVE_FILE, mode='a', cache_size=4096, )
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # running batch now
-            X_dict = dict()
+            n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             for val_data, val_label in val_set:
                 try:
                     # to avoid get an empty batch
                     if get_batch_size(val_data) <= 0:
                         if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
                         continue
-                    # MD
+                    # MCc
+                    # cells & fixations
+                    _cell = get_cell_vec(val_data)
+                    fixed_mask = get_fixed_mask(val_data)
+                    # get batch
+                    batch_indx = get_batch_indx(val_data)
+                    # get id
+                    idx = get_indx(val_data)
+                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
+                    n_s += len(batch_indx)
+                    element_tensor = get_atomic_number(val_data)
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
-                        self.logger.info('*' * 89)
                         cell_str = np.array2string(
-                            get_cell_vec(val_data), **FLOAT_ARRAY_FORMAT
-                        ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
-                        self.logger.info(f'Cell Vectors:\n{cell_str}')
+                            _cell, **FLOAT_ARRAY_FORMAT
+                        ).replace("[", " ").replace("]", " ")
+                        self.logger.info(f'Structure names: {idx}\n')
+                        self.logger.info(f'Cell Vectors:\n{cell_str}\n')
+                        # print structures titles with elements
+                        self.logout_element_information(element_tensor, batch_indx)
 
-                    if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
-                    else:
-                        batch_indx = val_data.batch_num_nodes('atom')
                     # initial atom coordinates
                     if self.data_type == 'pyg':
                         X_init = val_data.pos.unsqueeze(0)
                     else:
                         X_init = val_data.nodes['atom'].data['pos'].unsqueeze(0)
 
-                    mole_dynam.run(
+                    mv2cent_freq = int(self.MC.get('MOVE_TO_CENTER_FREQ', -1))
+                    mont_carlo.run(
                         model_wrap.Energy,
-                        X_init,  # TODO, Now it support pygData and DGLGraph.
-                        get_atomic_number(val_data),
-                        V_init=None,  # TODO, Support user-defined initial velocities.
-                        grad_func=model_wrap.Grad,
-                        func_args=(val_data,), grad_func_args=(val_data,),
-                        is_grad_func_contain_y=False,
-                        fixed_atom_tensor=None,  # TODO, The Selective Dynamics.
+                        X_init,
+                        Element_list=get_atomic_number(val_data),
+                        Cell_vector=_cell,
+                        func_args=(val_data,),
+                        fixed_atom_tensor=fixed_mask,
                         batch_indices=batch_indx,
+                        move_to_center_freq=mv2cent_freq
                     )
 
                     # Print info
@@ -232,20 +258,12 @@ class MonteCarlo(_CONFIGS):
 
                 except Exception as e:
                     self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
-                    if self.VERBOSE > 1:
+                    if self.VERBOSE > 0:
                         excp = traceback.format_exc()
                         self.logger.warning(f"Traceback:\n{excp}")
                     n_c += 1
 
-            if self.VERBOSE: self.logger.info(f'Molecular Dynamics Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
-            if self.SAVE_PREDICTIONS:
-                t_save = time.perf_counter()
-                with _LoggingEnd(self.log_handler):
-                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS...')
-                th.save(X_dict, self.PREDICTIONS_SAVE_FILE)
-                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
-            else:
-                return X_dict
+            if self.VERBOSE: self.logger.info(f'Monte Carlo Simulation Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
 
         except Exception as e:
             th.cuda.synchronize()
@@ -254,4 +272,9 @@ class MonteCarlo(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
+            if mont_carlo is not None:
+                mont_carlo.dumper.close()
+            self.logger.removeHandler(self.log_handler)
+            if isinstance(self.log_handler, logging.FileHandler):
+                self.log_handler.close()
             pass
