@@ -14,13 +14,14 @@ import numpy as np
 import torch as th
 
 from BUCToolkit.utils._CheckModules import check_module
+from BUCToolkit.BatchStructures import Batch
 
 # check modules
 _pyg = check_module('torch_geometric.data')
 if _pyg is not None:
     pygBatch = _pyg.Batch
 else:
-    pygBatch = None
+    pygBatch = Batch
 
 dgl = check_module('dgl')
 

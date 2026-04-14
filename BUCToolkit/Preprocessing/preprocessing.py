@@ -24,6 +24,7 @@ import torch as th
 
 from BUCToolkit.BatchStructures.BatchStructuresBase import BatchStructures
 from BUCToolkit.utils._CheckModules import check_module
+from BUCToolkit.BatchStructures import Data, Batch
 from .load_files import OUTCAR2Feat, ExtXyz2Feat, POSCARs2Feat
 
 ase = check_module('ase')
@@ -32,7 +33,7 @@ dgl = check_module('dgl')
 if _pyg is not None:
     pygData = _pyg.Data
 else:
-    pygData = None
+    pygData = Data  # change to own subset of pyg data
 
 """ Constance """
 ALL_ELEMENT = {'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
@@ -513,8 +514,8 @@ class CreatePygData:
 
     def __init__(self, verbose: int = 0) -> None:
         # check module
-        if _pyg is None:
-            raise ImportError('`CreatePygData` requires package `torch-geometric` which could not be imported.')
+        #if _pyg is None:
+        #    raise ImportError('`CreatePygData` requires package `torch-geometric` which could not be imported.')
         self.verbose = verbose
         pass
 
@@ -703,7 +704,7 @@ class CreateDglData:
 
     def feat2graph_list(self, feat: BatchStructures, n_core: int = 1) -> List[pygData]:
         r"""
-        Convert BatchStructures into a list of pyg.Data for fair-chem model
+        Convert BatchStructures into a list of dgl.Graph for fair-chem model
         """
         if feat.Atomic_number_list is None: feat.generate_atomic_number_list()
 

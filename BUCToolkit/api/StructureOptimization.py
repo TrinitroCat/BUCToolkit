@@ -95,10 +95,10 @@ class StructureOptimization(_CONFIGS):
         self.dX = None
         self.config_file = config_file
         assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        if data_type == 'pyg':
-            self.pygData = check_module('torch_geometric.data.batch')
-        else:
-            self.pygData = None
+        #if data_type == 'pyg':
+        #    self.pygData = check_module('torch_geometric.data.batch')
+        #else:
+        #    self.pygData = None
         self.data_type = data_type
 
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')

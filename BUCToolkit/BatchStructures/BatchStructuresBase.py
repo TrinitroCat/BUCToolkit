@@ -423,13 +423,15 @@ class BatchStructures(object):
         _STANDARD_FILE_LIST = set(list(self._ATTR_NAMES) + ['head', ])
         if mode not in {'w', 'a'}:
             raise ValueError(f'Unknown `mode` value {mode}. It must be "w" or "a".')
-        if not os.path.isdir(path):  # path do not exist
+        if not os.path.exists(path):  # path do not exist
             mode = 'w'
             os.makedirs(path, )
+        elif os.path.isfile(path):
+            raise OSError(f"The file `{path}` already exists.")
         elif len(os.listdir(path)) > 0:
             if mode == 'a':
                 file_set = set(os.listdir(path))
-                assert file_set == _STANDARD_FILE_LIST, 'Existing files do not match the saving data.'
+                if file_set != _STANDARD_FILE_LIST: raise RuntimeError('Existing files do not match the saving data.')
             else:
                 for ff in os.listdir(path):
                     if ff not in _STANDARD_FILE_LIST:
@@ -724,8 +726,10 @@ class BatchStructures(object):
             is_convert = True
         else:
             is_convert = False
-        if not os.path.isdir(output_path):
+        if not os.path.exists(output_path):
             os.makedirs(output_path)
+        elif os.path.isfile(output_path):
+            raise OSError(f"There is already a file named '{output_path}'.")
 
         try:
             file_name_list = [f'{_}' for _ in file_name_list]

@@ -19,6 +19,7 @@ from BUCToolkit.utils._CheckModules import check_module
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.BatchGenerate.coords_interp import linear_interpolation_tens
+from BUCToolkit.BatchStructures import Batch
 
 
 class ConstrainedMolecularDynamics(_CONFIGS):
@@ -166,7 +167,8 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     import torch_geometric.data as _pyg
                     self.pygBatch = _pyg.Batch
                 else:
-                    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+                    #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+                    self.pygBatch = Batch
 
                 model_wrap = _Model_Wrapper_pyg(_model)
                 def get_batch_size(data):
