@@ -20,7 +20,7 @@ from BUCToolkit.BatchMD.constrained_md import ConstrNVE, ConstrNVT
 from BUCToolkit.BatchOptim import QN, CG, FIRE, Frequency
 from BUCToolkit.BatchMC import MMC
 from BUCToolkit.utils.AtomicNumber2Properties import MASS
-from testsuite._toy_harmonic_potential import (HarmonicLatticePotential, SimpleSpringPotential, LennardJonesCluster, DoubleWellPotential,
+from _toy_harmonic_potential import (HarmonicLatticePotential, SimpleSpringPotential, LennardJonesCluster, DoubleWellPotential,
                                                MullerBrownPotential, FreeParticles, build_cubic_lattice_batch, build_cubic_lattice_data)
 from BUCToolkit.api._io import PygBatchUpdater
 
@@ -50,7 +50,7 @@ class MainTest(unittest.TestCase):
     def setUp(self):
         # data
         ATOMS = [8, 5, 10]
-        data = build_cubic_lattice_batch(ATOMS, 3., 1.)
+        data = build_cubic_lattice_batch(ATOMS, 3., 0.1)
         ELEM = ['Fe', 'Al', 'Pd']
         DOF_reduce = 0
         self.MASSES = [MASS[_] for _ in ELEM]
@@ -62,8 +62,8 @@ class MainTest(unittest.TestCase):
         self.N = [_**3 for _ in ATOMS]
         #raw_model = HarmonicLatticePotential(100., 1.)
         raw_model = SimpleSpringPotential(data.pos0, 10., )
-        raw_model = LennardJonesCluster()
-        raw_model = DoubleWellPotential()
+        #raw_model = LennardJonesCluster()
+        #raw_model = DoubleWellPotential()
         self.model_test = _Model_Wrapper_pyg(raw_model)
         self.data = data
         self.REQUIRE_GRAD = False
@@ -400,7 +400,7 @@ class MainTest(unittest.TestCase):
             'MC_GAUSS_NVT_GPU',
             'MC_GAUSS_ANNEAL_GPU',
         ]
-        import matplotlib.pyplot as plt
+        #import matplotlib.pyplot as plt
         for i, runner in enumerate([
             runner_cpu_nvt,
             runner_gpu_nvt,
@@ -479,7 +479,6 @@ class MainTest(unittest.TestCase):
         data = self.data
         elem_list = self.elem_list
         kB = 8.617333262145e-5  # eV/K
-        TEMPERATURE = 500.
         TIME_STEP = 0.5
         MAXITER = 300
 
@@ -626,7 +625,7 @@ class MainTest(unittest.TestCase):
             'OPT_FIRE_CPU',
             'OPT_FIRE_GPU',
         ]
-        import matplotlib.pyplot as plt
+        #import matplotlib.pyplot as plt
         for i, runner in enumerate([
             runner_cpu_cg_mt,
             runner_gpu_cg_mt,
@@ -695,7 +694,273 @@ class MainTest(unittest.TestCase):
     def test_CMD(self):
         pass
 
+    def test_parallel(self):
+        """
+        Test of parallel efficiency
+        Returns:
+
+        """
+        # purge old files
+        filelist = glob.glob('/dev/shm/logs/*_paratest.log')
+        for ff in filelist: os.remove(ff)
+        # have 64 samples in total
+        SMALL_BATCHES = [
+            8,  9,  4,  8,  7,  9,  4,  5,  4,  5, 10,  9,  6, 10,  5,  3,  5,  8,
+            6,  6,  4,  4,  8,  8,  5,  6,  9,  6,  8,  6,  7,  5,  9,  5,  3,  5,
+            9,  3,  4,  4,  9,  8,  9,  6,  5,  7,  3,  8,  6, 10,  8, 10,  5,  5,
+            8,  6,  9,  3,  9,  6,  3,  4,  9,  3
+        ]
+        LARGE_BATCHES = [
+            12, 12, 18, 20, 16, 17, 13, 11, 20, 19, 19, 20, 20, 13, 19, 15, 16, 19,
+            18, 14, 13, 20, 20, 18, 12, 14, 17, 10, 13, 11, 10, 15, 18, 15, 19, 12,
+            10, 16, 11, 15, 16, 12, 10, 17, 10, 17, 19, 13, 15, 19, 20, 17, 12, 10,
+            18, 20, 15, 10, 10, 15, 11, 11, 16, 12
+        ]
+        TOTAL_ELEM = ['Fe', 'Al', 'Pd', 'C'] * 16
+
+        # input const
+        MAXITER = 1000
+        TIME_STEP = 0.5
+        TEMPERATURE = 873
+
+        # runners
+        runners = {
+            #   opt
+            'opt_cpu_cg_mt' : CG(
+                'PR+',
+                1e-5,
+                0.01,
+                MAXITER,
+                'MT',
+                10,
+                0.2,
+                0.6,
+                TIME_STEP,
+                use_bb=True,
+                device='cpu',
+                verbose=1
+            ),
+            'opt_gpu_cg_mt' : CG(
+                'PR+',
+                1e-5,
+                0.01,
+                MAXITER,
+                'MT',
+                10,
+                0.2,
+                0.6,
+                TIME_STEP,
+                use_bb=True,
+                device='cuda:0',
+                verbose=1
+            ),
+            'opt_cpu_fire' : FIRE(
+                1e-5,
+                0.01,
+                MAXITER,
+                TIME_STEP,
+                device='cpu',
+                verbose=1
+            ),
+            'opt_gpu_fire' : FIRE(
+                1e-5,
+                0.01,
+                MAXITER,
+                TIME_STEP,
+                device='cuda:0',
+                verbose=1
+            ),
+            #   mc
+            'mc_cpu_nvt' : MMC(
+                'Gaussian',
+                10000,
+                TEMPERATURE,
+                'constant',
+                1,
+                None,
+                0.07,
+                f'/dev/shm/results/MC_GAUSS_NVT_CPU_PARA',
+                10,
+                device='cpu',
+                verbose=1,
+                is_compile=False
+            ),
+            'mc_gpu_nvt' : MMC(
+                'Gaussian',
+                10000,
+                TEMPERATURE,
+                'constant',
+                1,
+                None,
+                0.07,
+                f'/dev/shm/results/MC_GAUSS_NVT_GPU_PARA',
+                10,
+                device='cuda:0',
+                verbose=1,
+                is_compile=False
+            ),
+            #   md
+            'md_cpu_nve': NVE(
+                TIME_STEP, 10000, TEMPERATURE, f'/dev/shm/results/MD_NVE_CPU_PARA',
+                10, device='cpu', verbose=0,
+                is_compile=False
+            ),
+            'md_gpu_nve' : NVE(
+            TIME_STEP, 10000, TEMPERATURE, f'/dev/shm/results/MD_NVE_GPU_PARA',
+                10, device='cuda:0', verbose=0,
+            is_compile=False
+            ),
+            'md_cpu_csvr_nvt' : NVT(
+                TIME_STEP, 10000, 'CSVR', {'time_const': 100},
+                TEMPERATURE, f'/dev/shm/results/MD_CSVR_CPU_PARA', 10, device='cpu', verbose=1,
+                is_compile=False,
+                compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
+            ),
+            'md_gpu_csvr_nvt' : NVT(
+                TIME_STEP, 10000, 'CSVR', {'time_const': 100},
+                TEMPERATURE, f'/dev/shm/results/MD_CSVR_GPU_PARA', 10, device='cuda:0', verbose=1,
+                is_compile=False,
+                compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
+            ),
+            'md_cpu_lang_nvt' : NVT(
+                TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
+                TEMPERATURE, f'/dev/shm/results/MD_LANG_CPU_PARA', 10, device='cpu', verbose=0,
+                is_compile=False
+            ),
+            'md_gpu_lang_nvt' : NVT(
+                TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
+                TEMPERATURE, f'/dev/shm/results/MD_LANG_GPU_PARA', 10, device='cuda:0', verbose=0,
+                is_compile=False
+            ),
+            'md_cpu_nose_nvt' : NVT(
+                TIME_STEP, 10000, 'Nose-Hoover', {},
+                TEMPERATURE, f'/dev/shm/results/MD_NOSE_CPU_PARA', 10, device='cpu', verbose=0
+            ),
+            'md_gpu_nose_nvt' : NVT(
+                TIME_STEP, 10000, 'Nose-Hoover', {},
+                TEMPERATURE, f'/dev/shm/results/MD_NOSE_GPU_PARA', 10, device='cuda:0', verbose=0
+            )
+        }
+
+        # warm start
+        data = build_cubic_lattice_batch([5, 3], 3., 1.).to('cuda:0')
+        pre_runner = MMC(
+                'Gaussian',
+                100,
+                TEMPERATURE,
+                'constant',
+                1,
+                None,
+                0.07,
+                None,
+                10,
+                device='cuda:0',
+                verbose=1,
+                is_compile=False
+            )
+        pre_runner.run(
+            self.model_test.to('cuda:0').Energy,
+            data.pos,
+            None,
+            None,
+            func_args=(data,),
+            batch_indices=[len(_.pos) for _ in data.to_data_list()],
+            move_to_center_freq=-1
+        )
+
+        # small batches test:
+        for name, runner in runners.items():
+            print(f"TASK: {name} started... ")
+            # main loop
+            for i in range(1, len(SMALL_BATCHES)+1, 4):
+                # handle inp data
+                ATOMS = SMALL_BATCHES[:i]
+                data = build_cubic_lattice_batch(ATOMS, 3., 1.)
+                elem_list = [[]]
+                for _, __ in enumerate(TOTAL_ELEM[:i]):
+                    elem_list[0].extend([__] * (ATOMS[_] ** 3))
+                model_test = self.model_test.to(runner.device)
+                # purge old file
+                fileslist = glob.glob('/dev/shm/results/*_PARA')
+                for ff in fileslist: os.remove(ff)
+                # running
+                _data = data.to(runner.device).clone()
+                t_st = time.perf_counter()
+                if name.startswith('opt_'):
+                    runner.reset_logger_handler(f"/dev/shm/logs/{name}_paratest.log")
+                    updater = PygBatchUpdater()
+                    updater.initialize()
+                    runner.set_batch_updater(updater, updater)
+                    runner: FIRE
+                    y, x_min, g = runner.run(
+                        model_test.Energy,
+                        _data.pos,
+                        model_test.Grad,
+                        (_data,),
+                        None,
+                        (_data,),
+                        None,
+                        False,
+                        self.REQUIRE_GRAD,
+                        True,
+                        None,
+                        [len(_.pos) for _ in _data.to_data_list()],
+                    )
+                    th.cuda.synchronize()
+
+                elif name.startswith('md_'):
+                    runner: NVT
+                    runner.reset_logger_handler(f"/dev/shm/logs/{name}_paratest.log")
+                    runner.run(
+                        model_test.Energy,
+                        _data.pos,
+                        elem_list,
+                        None,
+                        None,
+                        model_test.Grad,
+                        (_data,),
+                        None,
+                        (_data,),
+                        None,
+                        False,
+                        self.REQUIRE_GRAD,
+                        [len(_.pos) for _ in _data.to_data_list()],
+                        move_to_center_freq=-1
+                    )
+                    th.cuda.synchronize()
+
+                elif name.startswith('mc_'):
+                    runner: MMC
+                    runner.reset_logger_handler(f"/dev/shm/logs/{name}_paratest.log")
+                    runner.run(
+                        model_test.Energy,
+                        _data.pos,
+                        elem_list,
+                        None,
+                        func_args=(_data,),
+                        batch_indices=[len(_.pos) for _ in _data.to_data_list()],
+                        move_to_center_freq=-1
+                    )
+
+                print(
+                    f"BATCH SIZE: {i}, ATOMS: {sum(_ ** 3 for _ in ATOMS)}. "
+                    f"Elapsed time: {(time.perf_counter() - t_st):.2f} s <<<\n"
+                )
+
+            print(f"TASK: {name} TEST DONE.\n" + "*"*89)
+
+
+
+
+
 
 if __name__ == '__main__':
-    test = MainTest()
-    test.test_MD()
+    import sys
+    try:
+        with open('/tmp/paratest.log', 'w') as f:
+            sys.stdout = f
+            test = MainTest()
+            test.setUp()
+            test.test_parallel()
+    finally:
+        sys.stdout = sys.__stdout__

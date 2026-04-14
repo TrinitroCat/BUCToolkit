@@ -466,6 +466,7 @@ class _BaseMD(BaseIO):
         masses = list()
         atomic_numbers = list()
         for _Elem in Element_list:
+            if not isinstance(_Elem, list): raise TypeError(f'Expected `Element_list` of List[List[int|str]], but got List[{type(_Elem)}].')
             atomic_numbers.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else int(__elem) for __elem in _Elem])
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
         masses_short = th.tensor(masses, dtype=th.float32, device=self.device)  # (n_batch, n_atom)
@@ -910,6 +911,7 @@ class _BaseMD(BaseIO):
         masses = list()
         atomic_numbers = list()
         for _Elem in Element_list:
+            if not isinstance(_Elem, list): raise TypeError(f'Expected `Element_list` of List[List[int|str]], but got List[{type(_Elem)}].')
             atomic_numbers.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else ATOMIC_NUMBER[__elem] for __elem in _Elem])
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
         masses_short = th.tensor(masses, dtype=th.float32, device=self.device)  # (n_batch, n_atom)

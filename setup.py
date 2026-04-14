@@ -30,14 +30,14 @@ setup(
         ],
     },
     install_requires=[
-        'joblib~=1.4.2',
-        'numpy~=1.26.4',
-        'PyYAML~=6.0.1',
-        'torch~=2.4.1'
+        'joblib>=1.4.2',
+        'numpy>=1.26.4',
+        'PyYAML>=6.0.1',
+        'torch>=2.4.1'
     ],
     extras_require={
         'dgl': ['dgl', ],
-        'pyg': ['torch_geometric~=2.6.1', ],
-        'prompt-toolkit': ['prompt-toolkit~=3.0.43', ],
+        'pyg': ['torch_geometric>=2.6.1', ],
+        'prompt-toolkit': ['prompt-toolkit>=3.0.43', ],
         }
 )

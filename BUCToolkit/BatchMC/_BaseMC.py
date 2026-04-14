@@ -198,7 +198,7 @@ class _BaseMC(BaseIO):
             else:
                 raise NotImplementedError(F"device {self.device} not supported.")
         finally:
-            pass
+            self.dumper.close()
 
     def __run_on_cuda(
             self,
@@ -401,7 +401,7 @@ class _BaseMC(BaseIO):
             if batch_indices is None:
                 SHAPE_CENTER = th.mean(X, dim=1, keepdim=True)  # (n_batch, 1, n_dim)
             else:
-                SHAPE_CENTER = index_reduce(X, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size) / self.batch_tensor
+                SHAPE_CENTER = index_reduce(X, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size) / self.batch_tensor.unsqueeze(-1)
                 SHAPE_CENTER = SHAPE_CENTER.index_select(1, self.batch_scatter)  # (1, sumN*A, n_dim)
 
             copy_stream = th.cuda.Stream()
@@ -721,7 +721,7 @@ class _BaseMC(BaseIO):
             if batch_indices is None:
                 SHAPE_CENTER = th.mean(X, dim=1, keepdim=True)  # (n_batch, 1, n_dim)
             else:
-                SHAPE_CENTER = index_reduce(X, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size) / self.batch_tensor
+                SHAPE_CENTER = index_reduce(X, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size) / self.batch_tensor.unsqueeze(-1)
                 SHAPE_CENTER = SHAPE_CENTER.index_select(1, self.batch_scatter)  # (1, sumN*A, n_dim)
 
             fl = th.compile(self._main_for_loop_cpu, **self.compile_kwargs, disable=(not self.is_compile))

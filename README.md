@@ -18,5 +18,6 @@ These following third-party libraries are optional:
 - **DGL** (Apache-2.3 License)
 - **torch-geometric** (MIT License)
 - **ASE** (LGPL-v2.1 License) [ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads)
+- **prompt-toolkit** (BSD-3-Clause License)
 
 See [LICENSES/](LICENSES/) for full license texts.
