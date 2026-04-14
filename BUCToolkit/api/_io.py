@@ -26,6 +26,7 @@ from BUCToolkit.utils.setup_loggers import has_any_handler
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BUCToolkit.utils.function_utils import _BaseWrapper
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
+from BUCToolkit.BatchStructures import Batch
 
 
 class _LoggingEnd:
@@ -528,11 +529,11 @@ class _Model_Wrapper_pyg(_BaseWrapper):
 
         """
         super().__init__(model)
-        if check_module('torch_geometric') is None:
-            ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+        #if check_module('torch_geometric') is None:
+        #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
 
-    def Energy(self, X, graph):
+    def Energy(self, X, graph: Batch):
         self.X = X
         graph.pos = self.X.reshape(-1,3).contiguous()
         y = self._model(graph)
@@ -540,7 +541,7 @@ class _Model_Wrapper_pyg(_BaseWrapper):
         self.forces = y['forces']
         return energy
 
-    def Grad(self, X, graph):
+    def Grad(self, X, graph: Batch):
         origin_shape = X.shape
         if (self.X is None) or (not compare_tensors(X, self.X)):
             self.forces = None
@@ -555,7 +556,7 @@ class _Model_Wrapper_pyg(_BaseWrapper):
 
 
 class _Model_Wrapper_pyg_only_X(_BaseWrapper):
-    def __init__(self, model , graph) -> None:
+    def __init__(self, model , graph: Batch) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
         Wrap the model(graph, ...) into f(X)
@@ -569,8 +570,8 @@ class _Model_Wrapper_pyg_only_X(_BaseWrapper):
         """
         super().__init__(model)
         self.graph = graph
-        if check_module('torch_geometric') is None:
-            ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+        #if check_module('torch_geometric') is None:
+        #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
 
     def Energy(self, X,):
@@ -671,9 +672,10 @@ class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
             import torch_geometric.data as _pyg
             self.pygBatch = _pyg.Batch
         else:
-            ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+            #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
+            self.pygBatch = Batch
 
-    def Energy(self, X: th.Tensor, graph):
+    def Energy(self, X: th.Tensor, graph: Batch):
         self.X = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
         batch_size = X.size(0)
         if graph.batch_size == 1:
@@ -684,7 +686,7 @@ class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
         self.forces = y['forces']
         return energy
 
-    def Grad(self, X, graph):
+    def Grad(self, X, graph: Batch):
         if (self.X is None) or (not compare_tensors(X, self.X)):
             self.forces = None
         if self.forces is None:
@@ -980,7 +982,11 @@ class PygBatchUpdater:
 
     def __init__(self):
         self.__check_old = None
-        self.pygData = check_module('torch_geometric.data.batch')
+        _pyg = check_module('torch_geometric.data.batch')
+        if _pyg is None:
+            self.pygData = Batch
+        else:
+            self.pygData = _pyg.Batch
 
     def initialize(self):
         self.__check_old = None
@@ -996,7 +1002,7 @@ class PygBatchUpdater:
         # main
         g = func_args[0]
         g_list = g.index_select(converge_check)
-        g_new = self.pygData.Batch.from_data_list(g_list)
+        g_new = self.pygData.from_data_list(g_list)
         self.__check_old = converge_check
         self.__g_old = g_new
         return (g_new,), func_kwargs, (g_new,), grad_func_kwargs

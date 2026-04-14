@@ -8,7 +8,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='BUCToolkit',
-    version='1.0b0',
+    version='1.0b1',
     #packages=['utils', 'BatchMC', 'BatchMD', 'BatchOptim', 'BatchOptim.TS', 'BatchOptim._utils', 'BatchOptim.minimize',
     #          'BatchGenerate', 'Preprocessing', 'api', 'BatchStructures', 'cli'],
     packages=find_packages(),
@@ -16,7 +16,10 @@ setup(
     license='MIT',
     author='Pu Pengxin, Song xin',
     author_email='',
-    description='Batch-upscaled Catalysis Toolkit (BUCToolkit), which can apply PyTorch-based deep-learning model to perform '
+    include_package_data=True,
+    package_data={"": ["README.md"]},
+    description='Batch-upscaled Catalysis Toolkit (BUCToolkit) is an ai4science software package of computational chemistry, '
+                'which can apply PyTorch-based deep-learning models (of molecular or crystal potentials) to perform '
                 'training, predictions, batched structure optimization, batched molecular dynamics with/without constraints, '
                 'and batched Monte Carlo simulations. Various tools for handling catalyst structure files are also included.',
     python_requires='>= 3.11',

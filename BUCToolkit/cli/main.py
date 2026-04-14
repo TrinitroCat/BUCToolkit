@@ -26,6 +26,7 @@ from BUCToolkit.cli.print_logo import generate_display_art
 import BUCToolkit.api as api
 from BUCToolkit.api.DataLoaders import PyGDataLoader, ISFSPyGDataLoader
 import BUCToolkit.Preprocessing.load_files as load_files
+from BUCToolkit.cli.convert_data import main_convert
 
 
 def parse_center_input_file(path: str):
@@ -334,7 +335,10 @@ def main():
         description=f'BUCToolkit MAIN PROGRAM INTERFACES\n{generate_display_art()}',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('-i', '--input', help='The path to input file.', required=True)
+
+    group = parser.add_mutually_exclusive_group(required=True)
+
+    group.add_argument('-i', '--input', help='The path to input file.', default=None)
     parser.add_argument(
         '-o', '--output',
         help='The path to output file. It will change the stdout. One can also cleanly redirect output by setting '
@@ -343,6 +347,16 @@ def main():
         default=None,
         type=str,
     )
+    group.add_argument(
+        '-c', '--convert', nargs=4,
+        help='Convert the format of structure files to the output file. Need four values. '
+             'Usage: buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`; '
+             '`$input_path` can be one of "bs", "md", "mc", "opt", "outcar", "poscar", "cif", and "ase_traj"; '
+             '`$output_type` can be one of "poscar", "cif", "xyz", "bs".',
+        default=None,
+        type=str,
+        metavar=('input_type'.upper(), 'input_path'.upper(), 'output_type'.upper(), 'output_path'.upper())
+    )
 
     opened_file = None
     try:
@@ -350,14 +364,18 @@ def main():
             bt.cli.run_base_cli()
         else:  # otherwise directly run in one-line command
             args = parser.parse_args()
-            if args.output is not None:
-                _rename = args.output
-                while os.path.exists(_rename):
-                    _rename += '_1'
-                warnings.warn(f'Output file `{args.output}` already exists. Rename to {_rename}.')
-                opened_file = open(args.output, 'w')
-                sys.stdout = opened_file
-            launch_task(args.input)
+            if args.input is not None:
+                if args.output is not None:
+                    _rename = args.output
+                    while os.path.exists(_rename):
+                        _rename += '_1'
+                    warnings.warn(f'Output file `{args.output}` already exists. Rename to {_rename}.')
+                    opened_file = open(args.output, 'w')
+                    sys.stdout = opened_file
+                launch_task(args.input)
+            elif args.convert is not None:
+                inp = args.convert
+                main_convert(*inp)
     finally:
         if opened_file is not None:
             if not opened_file.closed:
