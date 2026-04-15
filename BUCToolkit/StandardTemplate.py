@@ -176,7 +176,7 @@ class StandardInput(ABC):
         'batch': '<i8',
         'cell': '<f4',
         'pos': '<f4',
-        'mask': '|i1',
+        'fixed': '|i1',
         'atomic_numbers': '<i4',
         'x_diff': '<f4',
         'velocity': '<f4',

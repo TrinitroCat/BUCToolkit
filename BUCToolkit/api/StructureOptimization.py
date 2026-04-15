@@ -193,7 +193,7 @@ class StructureOptimization(_CONFIGS):
         """
         self._dimer_init_direction = directions
 
-    def run(self, model, mode: Literal['minimize', 'ts']):
+    def run(self, model, mode: Literal['minimize', 'ts']='minimize'):
         """
         Run structure optimization algorithms to search local minima or saddle point (TS).
         Parameters:

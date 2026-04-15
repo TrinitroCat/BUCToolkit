@@ -254,14 +254,14 @@ def load_data(data_type, data_path, data_loader_kwargs):
         },
         'buildin': {
             'BS': bt.load,
-            'OPT': bt.read_opt_structures,
-            'MD': bt.read_md_traj,
+            'OPT': bt.io.read_opt_structures,
+            'MD': bt.io.read_md_traj,
         }
     }
 
     if data_type in DATA_TYPE['external']:
-        data_reader = DATA_TYPE['external'][data_type](data_path)
-        data = data_reader.read(**data_loader_kwargs)
+        data = DATA_TYPE['external'][data_type](data_path)
+        data.read(**data_loader_kwargs)
     elif data_type in DATA_TYPE['buildin']:
         data_reader = DATA_TYPE['buildin'][data_type]
         data = data_reader(data_path, **data_loader_kwargs)
