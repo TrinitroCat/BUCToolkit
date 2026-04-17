@@ -35,9 +35,9 @@ These following third-party libraries are used:
 
 These following third-party libraries are optional:
 - **DGL** (Apache-2.3 License). Now supports of dgl model are still limited.
-- **torch-geometric** (MIT License). The basic `Data` and `Batch` object have been build-in. 
+- **torch-geometric** (MIT License). The basic `Data` and `Batch` objects have been build-in. 
 One may install the whole torch-geometric for its other advanced functions.
-- **ASE** (LGPL-v2.1 License) [ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads). Some limited function of `ase.Atoms` object is provided.
+- **ASE** (LGPL-v2.1 License) [ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads). Some functions involving `ase.Atoms` object, such as format transformation.
 - **prompt-toolkit** (BSD-3-Clause License). For a better experience of cli. 
 Otherwise, the Python build-in `input(...)` will be used.
 
@@ -216,10 +216,10 @@ runner.run(model)
 #### using low-level functions
 
 While for low-level methods, they are more like general algorithms for optimization, 
-saddle point search, newton dynamics evolution and Monte Carlo samplings. 
-Hence, one should manually set all arguments such as the function, gradient function, 
+saddle point search, Newton dynamics evolution and Monte Carlo samplings. 
+Hence, one should manually set all arguments such as the (potential) function, gradient function, 
 target variables and other variables.
-A typical low-level function of molecular is like:
+A typical use of molecular dyamics low-level function is like:
 ```python
 import BUCToolkit as bt
 
@@ -276,7 +276,7 @@ user@host:/some/path$ buctoolkit
 |    BBBBBB   UUUUU   CCCCC     T     OOOOO   OOOOO  LLLLLLL K     K    II      T       |
 |                                                                                       |
 |                                                                                       |
-|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.          |
+|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, et al.        |
 +=======================================================================================+
    |_________________________________________________________________________________| 
   |___________________________________________________________________________________|
@@ -479,7 +479,7 @@ For API or executables, the output of log file is set by `REDIRECT: true` with `
 the contents are controlled by `VERBOSE`, in the input file. If `REDIRECT` is `false`, outputs will be printed
 to the `sys.stdout`.
 
-For low-level function, it is controlled by logger system. For details, see `BUCToolkit/utils/setup_loggers.py`.
+Low-level functions are controlled by logger system. For details, see `BUCToolkit/utils/setup_loggers.py`.
 
 Because of the large costs of strings processing, the high-level verbosity is NOT recommended. All information 
 is included in the binary database file, such that turning off the logger (by setting verbose = 0) is completely feasible.
