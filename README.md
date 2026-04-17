@@ -16,11 +16,11 @@
     - [Input file template](#input-file-template)
     - [Post-processing]()
 
-## Batch-upscaled Catalysis Toolkit
-Batch-upscaled Catalysis Toolkit (BUCToolkit) is an ai4science software package of computational chemistry, 
-which can apply PyTorch-based deep-learning models (of molecular or crystal potentials) to perform 
-training, predictions, batched structure optimization, batched molecular dynamics with/without constraints, 
-and batched Monte Carlo simulations. Various tools for handling catalyst structure files are also included.
+## Batch-Upscaled Catalysis Toolkit
+BUCToolkit is an AI4Science software package of computational chemistry, 
+which can apply PyTorch-based deep-learning models (of molecular or crystal potentials) to model training, predictions, 
+batched structural optimizations, batched molecular dynamics tasks with/without constraints, and batched Monte Carlo simulations. 
+Various tools for handling catalyst structure files are also included.
 
 Manuals would be completed soon. You can find the current manuals in [Manual](Manual/).
 
@@ -29,34 +29,34 @@ The project is still a beta version and may change in the future.
 ## Installation
 ### Requirements
 These following third-party libraries are used:
-- **PyTorch** (BSD-3-Clause License), Copyright © 2016-present Facebook Inc. 
-- **NumPy** (BSD-3-Clause License), Copyright © 2005-2025 NumPy Developers.
 - **Joblib** (BSD-3-Clause License), Copyright © 2008-2021, The joblib developers.
+- **NumPy** (BSD-3-Clause License), Copyright © 2005-2025 NumPy Developers.
+- **PyTorch** (BSD-3-Clause License), Copyright © 2016-present Facebook Inc.
 
 These following third-party libraries are optional:
-- **DGL** (Apache-2.3 License). Now supports of dgl model are still limited.
-- **torch-geometric** (MIT License). The basic `Data` and `Batch` objects have been build-in. 
-One may install the whole torch-geometric for its other advanced functions.
-- **ASE** (LGPL-v2.1 License) [ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads). Some functions involving `ase.Atoms` object, such as format transformation.
-- **prompt-toolkit** (BSD-3-Clause License). For a better experience of cli. 
-Otherwise, the Python build-in `input(...)` will be used.
+- **DGL** (Apache-2.3 License). Only parts of DGL models are currently supported.
+- **torch-geometric** (MIT License). The basic `Data` and `Batch` object have been built-in.
+For its other advanced functions, the whole torch-geometric can be installed.
+- **ASE** (LGPL-v2.1 License) [ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads). Some functions involving `ase.Atoms` object, format transformation for instance.
+- **prompt-toolkit** (BSD-3-Clause License). For a better experience of CLI.
+Otherwise, the Python built-in `input(...)` will be used.
 
 See [LICENSES/](LICENSES/) for full license texts of requirements.
 
-### pip installation
+### pip Installation
 This is a recommended way to install BUCToolkit:
 ```shell
 pip install --upgrade pip
 pip install BUCToolkit
 ```
-### Installation from the source
+### Installation from the Source Codes
 ```shell
 git clone https://github.com/TrinitroCat/BUCToolkit.git
 pip install ./BUCToolkit
 ```
 
 ## Usage
-### Project Structures
+### Project Structure
 ```shell
 BUCToolkit
 |-- __init__.py
@@ -89,11 +89,11 @@ BUCToolkit
 ```
 ### Using as a Python Package
 
-In BUCToolkit, the advanced APIs that can be called to execute end-to-end tasks 
+In BUCToolkit, the advanced APIs which can be called to execute end-to-end tasks 
 are in the path `api/`, and the classes/functions in the directories of `Batch*/` 
 are low-level methods.
 
-#### using APIs
+#### Using APIs
 
 The APIs can directly handle the structures of catalytic systems by converting
 them from text files such as `POSCAR` `OUTCAR` `ExtXyz` and `cif` to a torch-geometric Data
@@ -101,7 +101,7 @@ format, and output text log files and binary database format files after running
 Users only need to import their own torch model class and prepare an input file 
 (see [Input File Template](#input-file-template)).
 
-An example of using the api functions is shown as follows:
+An example of using the API functions is shown as follows:
 ```python
 """
 The example of model training & structure optimizations & molecular dynamics
@@ -213,13 +213,13 @@ runner.set_dataloader(dataloader)
 runner.run(model)
 ```
 
-#### using low-level functions
+#### Using Low-level Functions
 
-While for low-level methods, they are more like general algorithms for optimization, 
+As for low-level methods, they are more like general algorithms for optimization, 
 saddle point search, Newton dynamics evolution and Monte Carlo samplings. 
-Hence, one should manually set all arguments such as the (potential) function, gradient function, 
-target variables and other variables.
-A typical use of molecular dyamics low-level function is like:
+Hence, all arguments (such as the function, gradient function, 
+target variables and other variables) should be set manually.
+A typical low-level function of molecular dynamics is like:
 ```python
 import BUCToolkit as bt
 
@@ -276,7 +276,7 @@ user@host:/some/path$ buctoolkit
 |    BBBBBB   UUUUU   CCCCC     T     OOOOO   OOOOO  LLLLLLL K     K    II      T       |
 |                                                                                       |
 |                                                                                       |
-|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, et al.        |
+|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.          |
 +=======================================================================================+
    |_________________________________________________________________________________| 
   |___________________________________________________________________________________|
@@ -302,16 +302,16 @@ run       : Launch a task in the cli.
 
 >>> 
 ```
-Some prepared template of input files can be called by the `task` option, 
-and existing input file can be also interactively inquired and modified 
+Some prepared input file template can be called by the `task` option, 
+and existing input file can also be interactively inquired and modified 
 in the sub-cli of the `edit` option.
 
 ### Input File Template
-The input file should be a YAML format file.
+The input file should be in YAML format.
 
-Here is a completed input file template that contain all supported tasks.
-The variables started with "###" are the additions only required by 
-using BUCToolkit as an executable program, and started with "#" are normal comments.
+Here is a completed input file template that contains all supported tasks.
+The variables starts with "###" are the additions only required by 
+using BUCToolkit as an executable program, and those that starts with "#" are normal comments.
 ```yaml
 
 # input template
@@ -472,26 +472,24 @@ MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CO
 ```
 
 ### Post-processing
-There are two outputs of BUCToolkit tasks, that are text log file and binary database file.
+There are two outputs of BUCToolkit tasks, text log file and binary database file.
 
-#### Log files
-For API or executables, the output of log file is set by `REDIRECT: true` with `OUTPUT_PATH` and `OUTPUT_POSTFIX`, and
-the contents are controlled by `VERBOSE`, in the input file. If `REDIRECT` is `false`, outputs will be printed
-to the `sys.stdout`.
+#### Log Files
+For API or executables, the output of log file is set by `REDIRECT: true` with `OUTPUT_PATH` and `OUTPUT_POSTFIX`, and the contents are controlled by `VERBOSE` in the input file. If `REDIRECT` is `false`, outputs will be printed to `sys.stdout`.
 
-Low-level functions are controlled by logger system. For details, see `BUCToolkit/utils/setup_loggers.py`.
+Low-level functions are controlled by the logger system. For details, see `BUCToolkit/utils/setup_loggers.py`.
 
-Because of the large costs of strings processing, the high-level verbosity is NOT recommended. All information 
-is included in the binary database file, such that turning off the logger (by setting verbose = 0) is completely feasible.
+Because of the large costs of string processing, high-level verbosity is NOT recommended. All information 
+is included in the binary database file, so turning off the logger (by setting verbose = 0) is completely feasible.
 
-#### Binary database
-It is a specially designed binary format to efficiently dump arrays. Memory-mapping is supported for both writing
-and reading. Its specific format is shown in the class `ArrayDumper` in `BUCToolkit/BatchStructure/StructureIO.py`.
+#### Binary Database
+This is a specially designed binary format to efficiently dump arrays. Memory-mapping is supported for both writing
+and reading. Its specific format is shown in the class `ArrayDumper` of `BUCToolkit/BatchStructure/StructureIO.py`.
 
 To control the binary file output, args of `SAVE_PREDICTIONS: true` with a `PREDICTIONS_SAVE_FILE` should
 be set in the input file. For low-level functions, `output_file` is the related argument.
 
-For the binary file output from structure optimization, molecular dynamics, and Monte Carlo simulations, 
+For the binary output files from structure optimization, molecular dynamics, and Monte Carlo simulations, 
 one can load & convert them in the shell as follows:
 ```shell
 buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
@@ -501,7 +499,7 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 This command will convert all files in `$input_path` with assumed format of `$input_type` into 
 `$output_path` in the format of `$output_type`.
 
-To realize finer control, following python script can be used:
+For a finer control, following python script can be used:
 ```python
 import BUCToolkit as bt
 from BUCToolkit.io import read_opt_structures, read_md_traj, read_mc_traj
@@ -531,15 +529,15 @@ data = CreatePygData().feat2data_list(bs3)
 graph = CreateDglData().feat2graph_list(bs3)
 
 ```
-wherein, the args of `indices` specifies the selected part to read and write, instead of all files.
+Wherein, the args of `indices` specify the selected part to read and write, instead of all files.
 
-## Contact
+## Contact Us
 
-If you have any questions, please contact us at ppx@buctoolkit.freeqiye.com
+If you have any questions, please contact us at **ppx@buctoolkit.freeqiye.com**
 
-For bugs or feature requests, please use [GitHub Issues](https://github.com/TrinitroCat/BUCToolkit/issues).
+For bug reports or feature requests, please use [GitHub Issues](https://github.com/TrinitroCat/BUCToolkit/issues).
 
 ## License
 
-The BUCToolkit code is published and distributed under the [MIT License](LICENSE).
+The code of BUCToolkit is published and distributed under the **[MIT License](https://github.com/TrinitroCat/BUCToolkit/blob/main/LICENSE)**.
 
