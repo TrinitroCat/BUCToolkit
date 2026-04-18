@@ -413,7 +413,8 @@ def write_cif(
         file_name_list: str | Sequence[str] = 'POSCAR',
         system_list: str | Sequence[str] = 'untitled',
         coord_type: List[Literal['C', 'D']] | Literal['C', 'D'] = 'C',
-        n_core: int = -1
+        n_core: int = -1,
+        append_suffix: bool = False
     ) -> None:
     """
     Convert coordinates matrices to POSCAR format, and write files to the "output_path".
@@ -497,11 +498,13 @@ def write_cif(
     # loading data
     n_batch = len(cells)
     if file_name_list is None:
-        filename_list = [f'{_}.cif' for _ in range(n_batch)]
+        file_name_list = [f'{_}.cif' for _ in range(n_batch)]
     elif not isinstance(file_name_list, (List, Tuple)):
         raise TypeError(f'Invalid type of `filename_list`: {type(file_name_list)}')
     elif len(file_name_list) != n_batch:
         raise ValueError(f'Number of file names ({len(file_name_list)}) and structures ({n_batch}) does not match')
+    if append_suffix:
+        file_name_list = [f'{_}.cif' for _ in file_name_list]
     # check n_core
     if n_core == -1:
         n_core = jb.cpu_count(True)
