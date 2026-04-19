@@ -370,7 +370,11 @@ class _CONFIGS(object):
         # logging.getLogger().disabled = True
         self.logger = logging.getLogger('Main')
         self.logger.propagate = False
-        self.logger.setLevel(logging.INFO)
+        is_debug = getattr(self.logger, 'DEBUG_MODE', False)
+        if is_debug:
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
         # remove existing handlers
         for _hdl in list(self.logger.handlers):
             self.logger.removeHandler(_hdl)
@@ -423,7 +427,6 @@ class _CONFIGS(object):
 
         # output info
         self.REDIRECT = self.config.get('REDIRECT', True)
-        self.SAVE_CHK = self.config.get('SAVE_CHK', False)
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
@@ -445,10 +448,6 @@ class _CONFIGS(object):
         if self.REDIRECT:
             self.OUTPUT_PATH = self.config.get('OUTPUT_PATH', './')
             self.OUTPUT_POSTFIX = self.config.get('OUTPUT_POSTFIX', 'Untitled')
-        self.CHK_SAVE_PATH = self.config.get('CHK_SAVE_PATH', './')
-        self.CHK_SAVE_POSTFIX = self.config.get('CHK_SAVE_POSTFIX', '')
-        if self.CHK_SAVE_POSTFIX != '': self.CHK_SAVE_POSTFIX = '_' + self.CHK_SAVE_POSTFIX  # use '_' to delimit chk name.
-        if not isinstance(self.CHK_SAVE_PATH, str): raise TypeError('CHK_SAVE_PATH must be a str.')
 
         # debug mode
         self.DEBUG_MODE = self.config.get('DEBUG_MODE', False)

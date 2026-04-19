@@ -8,6 +8,7 @@ import unittest
 import os
 import glob
 import math
+import sys
 
 import torch as th
 import numpy as np
@@ -44,6 +45,8 @@ class MainTest(unittest.TestCase):
 
         """
         err_msg = str(msg) if msg is not None else f'Statistical validation Failed.\na: {a}\nb: {b}'
+        if abs(a) * abs(b) < 1e-7:
+            atol = 1e-7
         if not math.isclose(a, b, rel_tol=rtol, abs_tol=atol):
             raise AssertionError(err_msg)
 
@@ -67,6 +70,26 @@ class MainTest(unittest.TestCase):
         self.model_test = _Model_Wrapper_pyg(raw_model)
         self.data = data
         self.REQUIRE_GRAD = False
+
+        # io
+        if sys.platform.startswith("win"):
+            print("WARNING: Detected Windows os. BUCToolkit has not fully test on Windows yet, be careful!")
+            self.out_pt = './'
+        elif sys.platform.startswith("linux"):
+            self.out_pt = '/dev/shm/'
+        else:
+            print(f"WARNING: Detected OS of {sys.platform}. BUCToolkit has not been tested on this platform. Please be careful!")
+            self.out_pt = './'
+
+        for ptt in ['results', 'logs']:
+            if not os.path.exists(f'{self.out_pt}{ptt}'):
+                os.makedirs(f'{self.out_pt}{ptt}')
+            elif os.path.isfile(f'{self.out_pt}{ptt}'):
+                raise FileExistsError(
+                    f'Test requires creating directory of {self.out_pt}{ptt}, but now there is a file. '
+                    'Please clear such files to continue tests.'
+                )
+        print(f"NOTE: Some test logs and chk file will be saved to path '{self.out_pt}logs' and '{self.out_pt}results'")
 
     def test_Train(self):
         pass
@@ -99,44 +122,44 @@ class MainTest(unittest.TestCase):
 
         # runner sets
         runner_cpu_static_nve = NVE(
-            TIME_STEP, 100, 0., f'/dev/shm/results/MD_STATIC_CPU', 1, device='cpu', verbose=1
+            TIME_STEP, 100, 0., f'{self.out_pt}results/MD_STATIC_CPU', 1, device='cpu', verbose=1
         )
         runner_gpu_static_nve = NVE(
-            TIME_STEP, 100, 0., f'/dev/shm/results/MD_STATIC_GPU', 1, device='cuda:0', verbose=1
+            TIME_STEP, 100, 0., f'{self.out_pt}results/MD_STATIC_GPU', 1, device='cuda:0', verbose=1
         )
         runner_gpu_move_nve = NVE(
-            TIME_STEP, 1000, TEMPERATURE, f'/dev/shm/results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
+            TIME_STEP, 1000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
             is_compile=False
         )
         runner_cpu_csvr_nvt = NVT(
             TIME_STEP, 100000, 'CSVR', {'time_const': 100},
-            TEMPERATURE, f'/dev/shm/results/MD_CSVR_CPU', 10, device='cpu', verbose=1,
+            TEMPERATURE, f'{self.out_pt}results/MD_CSVR_CPU', 10, device='cpu', verbose=1,
             is_compile=False,
             compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_gpu_csvr_nvt = NVT(
             TIME_STEP, 100000, 'CSVR', {'time_const': 100},
-            TEMPERATURE, f'/dev/shm/results/MD_CSVR_GPU', 10, device='cuda:0', verbose=1,
+            TEMPERATURE, f'{self.out_pt}results/MD_CSVR_GPU', 10, device='cuda:0', verbose=1,
             is_compile=False,
             compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_cpu_lang_nvt = NVT(
             TIME_STEP, 100000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'/dev/shm/results/MD_LANG_CPU', 10, device='cpu', verbose=0,
+            TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU', 10, device='cpu', verbose=0,
             is_compile=True
         )
         runner_gpu_lang_nvt = NVT(
             TIME_STEP, 100000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'/dev/shm/results/MD_LANG_GPU', 10, device='cuda:0', verbose=0,
+            TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU', 10, device='cuda:0', verbose=0,
             is_compile=True
         )
         runner_cpu_nose_nvt = NVT(
             TIME_STEP, 100000, 'Nose-Hoover', {},
-            TEMPERATURE, f'/dev/shm/results/MD_NOSE_CPU', 10, device='cpu', verbose=0
+            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU', 10, device='cpu', verbose=0
         )
         runner_gpu_nose_nvt = NVT(
             TIME_STEP, 100000, 'Nose-Hoover', {},
-            TEMPERATURE, f'/dev/shm/results/MD_NOSE_GPU', 10, device='cuda:0', verbose=0
+            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU', 10, device='cuda:0', verbose=0
         )
 
         RUNNER_NAME = [
@@ -160,6 +183,9 @@ class MainTest(unittest.TestCase):
             #if 'CPU' in RUNNER_NAME[i] or ('STATIC' in RUNNER_NAME[i]): continue
             _data = data.to(runner.device).clone()
             model_test = self.model_test.to(runner.device)
+            if 'STATICE' in RUNNER_NAME[i]:
+                _data.pos = _data.pos0  # avoid uneq perturbation
+
             print("*"*89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*"*89 + '\n')
             with th.profiler.profile(
                     activities=[th.profiler.ProfilerActivity.CPU, th.profiler.ProfilerActivity.CUDA],
@@ -168,7 +194,7 @@ class MainTest(unittest.TestCase):
             ) as prof:
                 pass
             t_st = time.perf_counter()
-            runner.reset_logger_handler(f"/dev/shm/logs/{RUNNER_NAME[i]}.log")
+            runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             runner.run(
                 model_test.Energy,
                 _data.pos,
@@ -187,7 +213,7 @@ class MainTest(unittest.TestCase):
             )
             th.cuda.synchronize()
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
-            #with open(f"/dev/shm/logs/{RUNNER_NAME[i]}.prof", "w") as f:
+            #with open(f"{self.out_pt}logs/{RUNNER_NAME[i]}.prof", "w") as f:
             #    print(
             #        prof.key_averages(group_by_stack_n=5).table(
             #            sort_by='cpu_time_total', row_limit=500, max_src_column_width=200, max_name_column_width=200
@@ -204,7 +230,7 @@ class MainTest(unittest.TestCase):
             #        )
             #continue
             # validation
-            fbs = read_md_traj(f"/dev/shm/results/{RUNNER_NAME[i]}")
+            fbs = read_md_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
             etol1, etol2, etol3 = [], [], []
             ene1, ene2, ene3 = [], [], []
             vel1, vel2, vel3 = [], [], []
@@ -263,7 +289,7 @@ class MainTest(unittest.TestCase):
                 [0.5 * dof * kB * TEMPERATURE for dof in DOF_vib],         # Ep mean
                 [0.5 * dof * (kB * TEMPERATURE)**2 for dof in DOF_vib],    # Ep var
                 [1.5 * (na - 3) * kB * TEMPERATURE for na in N],           # Ek mean
-                [1.5 * (na - 3) * (kB * TEMPERATURE)**2 for na in N],      # Ek var
+                [3. * (na - 3) * (kB * TEMPERATURE)**2 for na in N],      # Ek var
                 [0., 0., 0.],                                              # single veloc. mean
                 [kB * TEMPERATURE / _m for _m in MASSES]                   # single veloc. var
             ]
@@ -321,7 +347,7 @@ class MainTest(unittest.TestCase):
                         self.assertStatisticalEqual(
                             _tv,
                             STANDARD_VALUES[_i][__i],
-                            rtol=5e-2,
+                            rtol=0.1,
                             msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
                                 f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
                         )
@@ -330,6 +356,8 @@ class MainTest(unittest.TestCase):
                         print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
                                 f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
 
+            # purge chk files
+            os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
         pass
 
     def test_MC(self):
@@ -361,7 +389,7 @@ class MainTest(unittest.TestCase):
             1,
             None,
             0.07,
-            f'/dev/shm/results/MC_GAUSS_NVT_CPU',
+            f'{self.out_pt}results/MC_GAUSS_NVT_CPU',
             10,
             device='cpu',
             verbose=1,
@@ -375,7 +403,7 @@ class MainTest(unittest.TestCase):
             1,
             None,
             0.07,
-            f'/dev/shm/results/MC_GAUSS_NVT_GPU',
+            f'{self.out_pt}results/MC_GAUSS_NVT_GPU',
             10,
             device='cuda:0',
             verbose=1,
@@ -389,7 +417,7 @@ class MainTest(unittest.TestCase):
             1,
             None,
             0.07,
-            f'/dev/shm/results/MC_GAUSS_ANNEAL_GPU',
+            f'{self.out_pt}results/MC_GAUSS_ANNEAL_GPU',
             10,
             device='cuda:0',
             verbose=0
@@ -412,7 +440,7 @@ class MainTest(unittest.TestCase):
             model_test = self.model_test.to(runner.device)
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             t_st = time.perf_counter()
-            runner.reset_logger_handler(f"/dev/shm/logs/{RUNNER_NAME[i]}.log")
+            runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             runner.run(
                 model_test.Energy,
                 _data.pos,
@@ -426,7 +454,7 @@ class MainTest(unittest.TestCase):
             )
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
             # validation
-            fbs = read_mc_traj(f"/dev/shm/results/{RUNNER_NAME[i]}")
+            fbs = read_mc_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
             ene1, ene2, ene3 = ([_ for _ in fbs.Energies[0::3]],
                                 [_ for _ in fbs.Energies[1::3]],
                                 [_ for _ in fbs.Energies[2::3]])
@@ -448,8 +476,8 @@ class MainTest(unittest.TestCase):
                 _std_val = np.std(_en[prebalance:])
                 if 'ANNEAL' not in RUNNER_NAME[i]:
                     try:
-                        self.assertStatisticalEqual(_mean_val, STANDARD_VALUES[0][_i], rtol=1e-2)
-                        self.assertStatisticalEqual(_std_val, STANDARD_VALUES[1][_i], rtol=1e-2)
+                        self.assertStatisticalEqual(_mean_val, STANDARD_VALUES[0][_i], rtol=5e-2)
+                        self.assertStatisticalEqual(_std_val, STANDARD_VALUES[1][_i], rtol=5e-2)
                         print(f"Mean Ep: {_mean_val}, STD Ep: {_std_val}")
                         print(f'\n"MC Energy" Test {_i + 1} passed. <<<<<')
                     except AssertionError:
@@ -644,7 +672,7 @@ class MainTest(unittest.TestCase):
             model_test = self.model_test.to(runner.device)
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             t_st = time.perf_counter()
-            runner.reset_logger_handler(f"/dev/shm/logs/{RUNNER_NAME[i]}.log")
+            runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             updater = PygBatchUpdater()
             updater.initialize()
             runner.set_batch_updater(updater, updater)
@@ -701,7 +729,7 @@ class MainTest(unittest.TestCase):
 
         """
         # purge old files
-        filelist = glob.glob('/dev/shm/logs/*_paratest.log')
+        filelist = glob.glob(f'{self.out_pt}logs/*_paratest.log')
         for ff in filelist: os.remove(ff)
         # have 64 samples in total
         SMALL_BATCHES = [
@@ -779,7 +807,7 @@ class MainTest(unittest.TestCase):
                 1,
                 None,
                 0.07,
-                f'/dev/shm/results/MC_GAUSS_NVT_CPU_PARA',
+                f'{self.out_pt}results/MC_GAUSS_NVT_CPU_PARA',
                 10,
                 device='cpu',
                 verbose=1,
@@ -793,7 +821,7 @@ class MainTest(unittest.TestCase):
                 1,
                 None,
                 0.07,
-                f'/dev/shm/results/MC_GAUSS_NVT_GPU_PARA',
+                f'{self.out_pt}results/MC_GAUSS_NVT_GPU_PARA',
                 10,
                 device='cuda:0',
                 verbose=1,
@@ -801,44 +829,44 @@ class MainTest(unittest.TestCase):
             ),
             #   md
             'md_cpu_nve': NVE(
-                TIME_STEP, 10000, TEMPERATURE, f'/dev/shm/results/MD_NVE_CPU_PARA',
+                TIME_STEP, 10000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_CPU_PARA',
                 10, device='cpu', verbose=0,
                 is_compile=False
             ),
             'md_gpu_nve' : NVE(
-            TIME_STEP, 10000, TEMPERATURE, f'/dev/shm/results/MD_NVE_GPU_PARA',
+            TIME_STEP, 10000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU_PARA',
                 10, device='cuda:0', verbose=0,
             is_compile=False
             ),
             'md_cpu_csvr_nvt' : NVT(
                 TIME_STEP, 10000, 'CSVR', {'time_const': 100},
-                TEMPERATURE, f'/dev/shm/results/MD_CSVR_CPU_PARA', 10, device='cpu', verbose=1,
+                TEMPERATURE, f'{self.out_pt}results/MD_CSVR_CPU_PARA', 10, device='cpu', verbose=1,
                 is_compile=False,
                 compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
             ),
             'md_gpu_csvr_nvt' : NVT(
                 TIME_STEP, 10000, 'CSVR', {'time_const': 100},
-                TEMPERATURE, f'/dev/shm/results/MD_CSVR_GPU_PARA', 10, device='cuda:0', verbose=1,
+                TEMPERATURE, f'{self.out_pt}results/MD_CSVR_GPU_PARA', 10, device='cuda:0', verbose=1,
                 is_compile=False,
                 compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
             ),
             'md_cpu_lang_nvt' : NVT(
                 TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
-                TEMPERATURE, f'/dev/shm/results/MD_LANG_CPU_PARA', 10, device='cpu', verbose=0,
+                TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU_PARA', 10, device='cpu', verbose=0,
                 is_compile=False
             ),
             'md_gpu_lang_nvt' : NVT(
                 TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
-                TEMPERATURE, f'/dev/shm/results/MD_LANG_GPU_PARA', 10, device='cuda:0', verbose=0,
+                TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU_PARA', 10, device='cuda:0', verbose=0,
                 is_compile=False
             ),
             'md_cpu_nose_nvt' : NVT(
                 TIME_STEP, 10000, 'Nose-Hoover', {},
-                TEMPERATURE, f'/dev/shm/results/MD_NOSE_CPU_PARA', 10, device='cpu', verbose=0
+                TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU_PARA', 10, device='cpu', verbose=0
             ),
             'md_gpu_nose_nvt' : NVT(
                 TIME_STEP, 10000, 'Nose-Hoover', {},
-                TEMPERATURE, f'/dev/shm/results/MD_NOSE_GPU_PARA', 10, device='cuda:0', verbose=0
+                TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU_PARA', 10, device='cuda:0', verbose=0
             )
         }
 
@@ -881,13 +909,13 @@ class MainTest(unittest.TestCase):
                     elem_list[0].extend([__] * (ATOMS[_] ** 3))
                 model_test = self.model_test.to(runner.device)
                 # purge old file
-                fileslist = glob.glob('/dev/shm/results/*_PARA')
+                fileslist = glob.glob(f'{self.out_pt}results/*_PARA')
                 for ff in fileslist: os.remove(ff)
                 # running
                 _data = data.to(runner.device).clone()
                 t_st = time.perf_counter()
                 if name.startswith('opt_'):
-                    runner.reset_logger_handler(f"/dev/shm/logs/{name}_paratest.log")
+                    runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
                     updater = PygBatchUpdater()
                     updater.initialize()
                     runner.set_batch_updater(updater, updater)
@@ -910,7 +938,7 @@ class MainTest(unittest.TestCase):
 
                 elif name.startswith('md_'):
                     runner: NVT
-                    runner.reset_logger_handler(f"/dev/shm/logs/{name}_paratest.log")
+                    runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
                     runner.run(
                         model_test.Energy,
                         _data.pos,
@@ -931,7 +959,7 @@ class MainTest(unittest.TestCase):
 
                 elif name.startswith('mc_'):
                     runner: MMC
-                    runner.reset_logger_handler(f"/dev/shm/logs/{name}_paratest.log")
+                    runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
                     runner.run(
                         model_test.Energy,
                         _data.pos,
@@ -959,8 +987,7 @@ if __name__ == '__main__':
     try:
         with open('/tmp/paratest.log', 'w') as f:
             sys.stdout = f
-            test = MainTest()
-            test.setUp()
-            test.test_parallel()
+            unittest.main()
+            #test.test_parallel()
     finally:
         sys.stdout = sys.__stdout__

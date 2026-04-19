@@ -88,5 +88,3 @@ class NVE(_BaseMD):
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
 
         return X, V, Energy, Force
-
-        return X, V, Energy, Force

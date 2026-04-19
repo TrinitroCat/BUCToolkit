@@ -4,6 +4,25 @@
 #  File: __init__.py
 #  Environment: Python 3.12
 
+import warnings
+import sys
+
+if sys.platform.startswith("win"):
+    warnings.warn(
+        "WARNING: Detected Windows os. "
+        "BUCToolkit has not fully test on Windows yet, be careful!",
+        Warning
+    )
+elif sys.platform.startswith("linux"):
+    pass
+else:
+    warnings.warn(
+        f"WARNING: Detected OS of {sys.platform}. "
+        f"BUCToolkit has not been tested on this platform. Please be careful!",
+        Warning
+    )
+
+
 from BUCToolkit.BatchStructures.BatchStructuresBase import BatchStructures as Structures
 from BUCToolkit import utils
 from BUCToolkit.utils._Element_info import TRANSITION_METALS, TRANSITION_P_METALS, NOBLE_METALS, NONRADIOACTIVE_METALS
