@@ -4,7 +4,7 @@
 ## Table of contents
 - [BUCToolkit](#BUCToolkit)
   - [Table of contents](#table-of-contents)
-  - [About BUCToolkit](#Batch-upscaled-Catalysis-Toolkit)
+  - [About BUCToolkit](#about-batch-upscaled-catalysis-toolkit)
   - [Installation](#installation)
     - [requirements](#requirements)
     - [pip installation](#pip-installation)
@@ -14,13 +14,30 @@
     - [Using as a Python package](#using-as-a-python-package)
     - [Using as an executable program](#using-as-an-executable-program)
     - [Input file template](#input-file-template)
-    - [Post-processing]()
+    - [Post-processing](#post-processing)
+  - [Features](#features)
+    - [Flexible function interfaces](#flexible-function-interfaces)
+    - [Batched parallel scheme](#batched-parallel-scheme)
+  - [Contact Us](#contact-us)
+  - [License](#license)
 
-## Batch-Upscaled Catalysis Toolkit
-BUCToolkit is an AI4Science software package of computational chemistry, 
-which can apply PyTorch-based deep-learning models (of molecular or crystal potentials) to model training, predictions, 
-batched structural optimizations, batched molecular dynamics tasks with/without constraints, and batched Monte Carlo simulations. 
-Various tools for handling catalyst structure files are also included.
+## About Batch-Upscaled Catalysis Toolkit
+BUCToolkit is a PyTorch-based high-performance AI4Science software package of computational chemistry, 
+which can perform ***structural optimizations*** (both minimization and transition state search), 
+***molecular dynamics*** with/without constraints, and ***Monte Carlo simulations*** by 
+using any python function with an interface of `func(X, *args, **kwargs)` that returns energy and
+`grad_func(X, *args, **kwargs)` that returns energy gradient (i.e., the negative forces).
+The most typical input functions are PyTorch-based **deep-learning models** (of molecular or crystal potentials).
+For them, BUCToolkit also provided training and prediction APIs. 
+
+All above functions support **multi-structure batch parallelism** for both **regular batches** 
+(structures with the same atom numbers) and **irregular batches** (structures with different atom numbers).
+These core functions are highly optimized by operator fusing, cudaGraphs replaying, 
+asynchronized dumping/logging by cuda-stream pipelines, and in-place memory calculations.
+(see section [Features](#features) for details),
+
+Various tools for handling catalyst structure files and data format to preprocess and postprocess
+are also included.
 
 Manuals would be completed soon. You can find the current manuals in [Manual](Manual/).
 
@@ -533,9 +550,71 @@ graph = CreateDglData().feat2graph_list(bs3)
 ```
 Wherein, the args of `indices` specify the selected part to read and write, instead of all files.
 
+## Features
+
+BUCToolkit employed highly optimized PyTorch code, including fused operators, cudaGraphs replaying, 
+asynchronized dumping/logging by cuda-stream pipelines, and in-place memory calculations. 
+
+### Flexible function interfaces
+Major low-level functions use very flexible interfaces as follows 
+(also see [Using Low-level Functions](#using-low-level-functions)):
+```
+function(
+    func=func,
+    X=X,
+    grad_func=grad_func,
+    func_args=[],
+    func_kwargs=None,
+    grad_func_args=[],
+    grad_func_kwargs=None,
+    is_grad_func_contain_y=False,
+    require_grad=False,
+    ...
+)
+```
+where the `X` is the target variable to update (e.g., the atom positions for molecular dynamics 
+and structure optimizations), `func_args` and `func_kwargs` are other necessary arguments and 
+keyword arguments for the `func`. Hence, any `func`, as long as it can be wrapped as
+`func(X, *args, **kwargs)`, is valid. For example, one may write a function that submits ab initio 
+computations (e.g., VASP, Gaussian) and convert the results (energy and forces) into torch.Tensor format, 
+and BUCToolkit functions can execute with these inputs normally.
+
+The `grad_func` has a similar design. 
+The argument `is_grad_func_contain_y` controls two ways to calculate the gradient of `func`. 
+`is_grad_func_contain_y = True` is to use auto-gradient format, that actually uses 
+`grad_func(X, y, *grad_func_args, **grad_func_kwargs)` internally 
+(Note: user would not manually put `y` into the `grad_func_args`), otherwise, interfaces of 
+`grad_func(X, *grad_func_args, **grad_func_kwargs)` are used. At last, `require_grad` controls the
+gradient context of PyTorch. When `require_grad = False`, computation of `func` and `grad_func` is under
+the context of `torch.no_grad` to reduce memory cost. Otherwise, gradient will be turned on explicitly
+by `torch.enable_grad`.
+
+### Highly customizable algorithms
+All methods/algorithms are object-oriented modularized. They have `_Base*` abstract base classes 
+that implement highly optimized main loop routines, and are specialized by modifying few methods like 
+`self.initialize*(...)` and `self._update*(...)` in subclasses. Hence, one can develop and implement any 
+custom new algorithm by simply overriding these update methods without modifying the main loop process.
+
+### Batch parallelism scheme
+Most functions, including structure optimization, transition state search, molecular dynamics, and 
+Monte Carlo simulation, support the parallel for **both regular batched samples 
+(stacked samples with the same atom numbers) and irregular batched samples 
+(concatenated samples with different atom numbers)**. 
+Input Tensors (of atom coordinates, forces, fixation masks, etc.) should be 3-dimensional. For regular batches,
+their shapes are **(batch_size, n_atom, n_dim)**, where `n_dim` is usually be 3. For irregular batches, their 
+shapes are **(1, $\sum_{i}$n_atom$_{i}$, n_dim)**, where $i$ is the sample index, and users should provide 
+another variable `batch_indices` that records atom numbers of each sample. For example, 
+`batch_indices = [64, 56, 72, 83, 102]` means samples have 64, 56, 72, 83, 102 atoms, respectively, and 
+corresponding shapes of atom coordinates should be `(1, 377, 3)`.
+
+For structure optimization and transition state search, BUCToolkit applies a **dynamic samples approach**, that 
+is dynamically removing the converged samples in one batch before starting next iteration steps 
+by maintaining a convergence mask and `indexed_select`/`indexed_copy_` functions. It could significantly reduce
+the waste of repeatedly calculating the converged data.
+
 ## Contact Us
 
-If you have any questions, please contact us at **ppx@buctoolkit.freeqiye.com**
+If you have any questions, please contact us at **buctoolkit@163.com**
 
 For bug reports or feature requests, please use [GitHub Issues](https://github.com/TrinitroCat/BUCToolkit/issues).
 

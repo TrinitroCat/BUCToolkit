@@ -87,6 +87,18 @@ class Trainer(_CONFIGS):
             self.logger.critical('** ERROR: Training task is required without setting args `TRAIN`. Task aborted. BYE!!! **')
             raise RuntimeError('** ERROR: Training task is required without setting args `TRAIN`. Task aborted. BYE!!! **')
 
+        # io
+        self.SAVE_CHK = bool(trn_config.get('SAVE_CHK', False))
+        if not self.SAVE_CHK:
+            self.logger.warnings(
+                f"WARNING: The model is training but NO CHECKPOINT FILE WILL BE SAVED. "
+                f"I HOPE YOU KNOW WHAT YOU ARE DOING!!!"
+            )
+        self.CHK_SAVE_PATH = self.config.get('CHK_SAVE_PATH', './')
+        self.CHK_SAVE_POSTFIX = self.config.get('CHK_SAVE_POSTFIX', '')
+        if self.CHK_SAVE_POSTFIX != '': self.CHK_SAVE_POSTFIX = '_' + self.CHK_SAVE_POSTFIX  # use '_' to delimit chk name.
+        if not isinstance(self.CHK_SAVE_PATH, str): raise TypeError('CHK_SAVE_PATH must be a str.')
+
         # epoches & validation set
         self.EPOCH: int = int(trn_config.get('EPOCH', 0))
         self.ACCUMULATE_STEP = trn_config.get('ACCUMULATE_STEP', 1)

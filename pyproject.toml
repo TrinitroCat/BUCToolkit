@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "BUCToolkit"
+version = "1.0b2"
+description = """
+BUCToolkit is a PyTorch-based high-performance AI4Science software package of computational chemistry,
+which can perform structural optimizations (both minimization and transition state search),
+molecular dynamics with/without constraints, and Monte Carlo simulations with multi-structure batch parallelism.
+The input functions of energy and forces have very flexible interfaces, and
+the most typical input functions are PyTorch-based **deep-learning models** (of molecular or crystal potentials).
+For these nn.Module objects, BUCToolkit also provided training and prediction APIs.
+"""
+license = {text = "MIT"}
+authors = [
+    {name = "Pu Pengxin", email = "buctoolkit@163.com"},
+    {name = "Song Xin"}
+]
+requires-python = ">=3.11"
+dependencies = [
+    "joblib>=1.4.2",
+    "numpy>=1.26.4",
+    "PyYAML>=6.0.1",
+    "torch>=2.4.1"
+]
+
+[project.urls]
+Homepage = "https://github.com/TrinitroCat/BUCToolkit"
+
+[project.scripts]
+buctoolkit = "BUCToolkit.cli.main:main"
+bckt = "BUCToolkit.cli.main:main"
+
+[project.entry-points."buctoolkit.cli"]
+bckt_cli = "BUCToolkit.cli.__init__:run_base_cli"
+
+[project.optional-dependencies]
+dgl = ["dgl"]
+pyg = ["torch_geometric>=2.6.1"]
+prompt-toolkit = ["prompt-toolkit>=3.0.43"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*", "dist*", "Manual*"]
+
+[tool.setuptools.package-data]
+"*" = ["README.md"]
