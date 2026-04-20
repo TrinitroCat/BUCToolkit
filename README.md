@@ -6,42 +6,42 @@
   - [Table of contents](#table-of-contents)
   - [About BUCToolkit](#about-batch-upscaled-catalysis-toolkit)
   - [Installation](#installation)
-    - [requirements](#requirements)
-    - [pip installation](#pip-installation)
-    - [Installation from the source](#installation-from-the-source)
+    - [Requirements](#requirements)
+    - [pip Installation](#pip-installation)
+    - [Installation from the Source Codes](#installation-from-the-source-codes)
   - [Usage](#usage)
-    - [Project structures](#project-structures)
-    - [Using as a Python package](#using-as-a-python-package)
-    - [Using as an executable program](#using-as-an-executable-program)
-    - [Input file template](#input-file-template)
+    - [Project Structure](#project-structure)
+    - [Using as a Python Package](#using-as-a-python-package)
+    - [Using as an Executable Program](#using-as-an-executable-program)
+    - [Input File Template](#input-file-template)
     - [Post-processing](#post-processing)
   - [Features](#features)
-    - [Flexible function interfaces](#flexible-function-interfaces)
-    - [Batched parallel scheme](#batched-parallel-scheme)
+    - [Flexible Function Interfaces](#flexible-function-interfaces)
+    - [Highly Customizable Algorithms](#highly-customizable-algorithms)
+    - [Batch Parallelism Scheme](#batch-parallelism-scheme)
   - [Contact Us](#contact-us)
   - [License](#license)
 
 ## About Batch-Upscaled Catalysis Toolkit
 BUCToolkit is a PyTorch-based high-performance AI4Science software package of computational chemistry, 
-which can perform ***structural optimizations*** (both minimization and transition state search), 
+which is capable of performing ***structural optimizations*** (both minimization and transition state search), 
 ***molecular dynamics*** with/without constraints, and ***Monte Carlo simulations*** by 
-using any python function with an interface of `func(X, *args, **kwargs)` that returns energy and
-`grad_func(X, *args, **kwargs)` that returns energy gradient (i.e., the negative forces).
+using any python function with an interface of `func(X, *args, **kwargs)` and `grad_func(X, *args, **kwargs)`
+that return energy and energy gradient respectively (i.e., the negative forces).
 The most typical input functions are PyTorch-based **deep-learning models** (of molecular or crystal potentials).
-For them, BUCToolkit also provided training and prediction APIs. 
+For them, BUCToolkit provides training and prediction APIs as well.
 
-All above functions support **multi-structure batch parallelism** for both **regular batches** 
-(structures with the same atom numbers) and **irregular batches** (structures with different atom numbers).
+All the functions above support **multi-structure batch parallelism** for both **regular batches** 
+(structures sharing the same atom numbers) and **irregular batches** (structures with different atom numbers).
 These core functions are highly optimized by operator fusing, cudaGraphs replaying, 
 asynchronized dumping/logging by cuda-stream pipelines, and in-place memory calculations.
-(see section [Features](#features) for details),
+(See section [Features](#features) for details).
 
-Various tools for handling catalyst structure files and data format to preprocess and postprocess
-are also included.
+Various tools capable of handling catalyst structure files and data formats for preprocessing and postprocessing are also included.
 
-Manuals would be completed soon. You can find the current manuals in [Manual](Manual/).
+Manuals will be completed soon. The current manuals can be found in [Manual](Manual/).
 
-The project is still a beta version and may change in the future.
+Please note that the project is still a beta version and may change in the future.
 
 ## Installation
 ### Requirements
@@ -54,7 +54,7 @@ These following third-party libraries are optional:
 - **DGL** (Apache-2.3 License). Only parts of DGL models are currently supported.
 - **torch-geometric** (MIT License). The basic `Data` and `Batch` object have been built-in.
 For its other advanced functions, the whole torch-geometric can be installed.
-- **ASE** (LGPL-v2.1 License) [ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads). Some functions involving `ase.Atoms` object, format transformation for instance.
+- **[ASE (LGPL-v2.1 License)](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads)**. Some functions involving `ase.Atoms` object, format transformation for instance.
 - **prompt-toolkit** (BSD-3-Clause License). For a better experience of CLI.
 Otherwise, the Python built-in `input(...)` will be used.
 
@@ -274,7 +274,7 @@ runner.run(
 BUCTookit can also be directly applied as a normal executable program. 
 By setting some additional args in the input file (see [Input File Template](#input-file-template))
 to specify the data path, data type, model file, and task type, 
-users can directly launch the tasks in the shell like:
+users can directly launch tasks in a shell like:
 ```shell
 buctoolkit -i './input_file.inp'
 ```
@@ -327,7 +327,7 @@ in the sub-CLI of the `edit` option.
 The input file should be in YAML format.
 
 Here is a completed input file template that contains all supported tasks.
-The variables start with "###" are the additions only required by 
+The variables that start with "###" are the additional args only required by 
 using BUCToolkit as an executable program, and those that start with "#" are normal comments.
 ```yaml
 
@@ -491,10 +491,11 @@ MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CO
 ```
 
 ### Post-processing
-There are two outputs of BUCToolkit tasks, text log file and binary database file.
+There are two outputs of BUCToolkit tasks: a text log file and a binary database file.
 
 #### Log Files
-For API or executables, the output of log file is set by `REDIRECT: true` with `OUTPUT_PATH` and `OUTPUT_POSTFIX`, and the contents are controlled by `VERBOSE` in the input file. If `REDIRECT` is `false`, outputs will be printed to `sys.stdout`.
+For API or executables, the output of a log file is set by `REDIRECT: true` with `OUTPUT_PATH` and `OUTPUT_POSTFIX`,
+and the contents are controlled by `VERBOSE` in the input file. If `REDIRECT` is `false`, outputs will be printed to `sys.stdout`.
 
 Low-level functions are controlled by the logger system. For details, see `BUCToolkit/utils/setup_loggers.py`.
 
@@ -508,8 +509,8 @@ and reading. Its specific format is shown in the class `ArrayDumper` of `BUCTool
 To control the binary file output, args of `SAVE_PREDICTIONS: true` with a `PREDICTIONS_SAVE_FILE` should
 be set in the input file. For low-level functions, `output_file` is the related argument.
 
-For the binary output files from structure optimization, molecular dynamics, and Monte Carlo simulations, 
-one can load & convert them in the shell as follows:
+For the binary output files from structural optimization, molecular dynamics, and Monte Carlo simulations, 
+one can load & convert them in shell as follows:
 ```shell
 buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 # `$input_path` can be one of "bs", "md", "mc", "opt", "outcar", "poscar", "cif", and "ase_traj"
@@ -518,7 +519,7 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 This command will convert all files in `$input_path` with assumed format of `$input_type` into 
 `$output_path` in the format of `$output_type`.
 
-For a finer control, the following python script can be used:
+For a finer control, the following Python script can be used:
 ```python
 import BUCToolkit as bt
 from BUCToolkit.io import read_opt_structures, read_md_traj, read_mc_traj
@@ -552,12 +553,12 @@ Wherein, the args of `indices` specify the selected parts to read and write inst
 
 ## Features
 
-BUCToolkit employed highly optimized PyTorch code, including fused operators, cudaGraphs replaying, 
-asynchronized dumping/logging by cuda-stream pipelines, and in-place memory calculations. 
+BUCToolkit employs highly optimized PyTorch code including fused operators, cudaGraphs replaying, 
+asynchronized dumping/logging by cuda-stream pipelines, and in-place memory calculations.
 
-### Flexible function interfaces
+### Flexible Function Interfaces
 Major low-level functions use very flexible interfaces as follows 
-(also see [Using Low-level Functions](#using-low-level-functions)):
+(see also [Using Low-level Functions](#using-low-level-functions)):
 ```
 function(
     func=func,
@@ -572,44 +573,44 @@ function(
     ...
 )
 ```
-where the `X` is the target variable to update (e.g., the atom positions for molecular dynamics 
-and structure optimizations), `func_args` and `func_kwargs` are other necessary arguments and 
-keyword arguments for the `func`. Hence, any `func`, as long as it can be wrapped as
+where the `X` is the target variable to update (e.g., the atom positions in molecular dynamics 
+and structural optimizations), `func_args` and `func_kwargs` are other necessary arguments and 
+keyword arguments for the `func`. Hence, any `func`, as long as able to be wrapped as
 `func(X, *args, **kwargs)`, is valid. For example, one may write a function that submits ab initio 
 computations (e.g., VASP, Gaussian) and convert the results (energy and forces) into torch.Tensor format, 
-and BUCToolkit functions can execute with these inputs normally.
+and BUCToolkit functions will be executed with these inputs normally.
 
 The `grad_func` has a similar design. 
 The argument `is_grad_func_contain_y` controls two ways to calculate the gradient of `func`. 
-`is_grad_func_contain_y = True` is to use auto-gradient format, that actually uses 
+`is_grad_func_contain_y = True` is to use auto-gradient format, which actually uses 
 `grad_func(X, y, *grad_func_args, **grad_func_kwargs)` internally 
-(Note: user would not manually put `y` into the `grad_func_args`), otherwise, interfaces of 
-`grad_func(X, *grad_func_args, **grad_func_kwargs)` are used. At last, `require_grad` controls the
+(Note: users would not manually put `y` into `grad_func_args`). Otherwise, interfaces of 
+`grad_func(X, *grad_func_args, **grad_func_kwargs)` will be used. At last, `require_grad` controls the
 gradient context of PyTorch. When `require_grad = False`, computation of `func` and `grad_func` is under
 the context of `torch.no_grad` to reduce memory cost. Otherwise, gradient will be turned on explicitly
 by `torch.enable_grad`.
 
-### Highly customizable algorithms
+### Highly Customizable Algorithms
 All methods/algorithms are object-oriented modularized. They have `_Base*` abstract base classes 
-that implement highly optimized main loop routines, and are specialized by modifying few methods like 
+that implement highly optimized main loop routines, and are specialized by modifying several methods like 
 `self.initialize*(...)` and `self._update*(...)` in subclasses. Hence, one can develop and implement any 
 custom new algorithm by simply overriding these update methods without modifying the main loop process.
 
-### Batch parallelism scheme
-Most functions, including structure optimization, transition state search, molecular dynamics, and 
-Monte Carlo simulation, support the parallel for **both regular batched samples 
+### Batch Parallelism Scheme
+Most functions, such as structural optimization, transition state search, molecular dynamics and 
+Monte Carlo simulation, support the parallel computing of **both regular batched samples 
 (stacked samples with the same atom numbers) and irregular batched samples 
 (concatenated samples with different atom numbers)**. 
 Input Tensors (of atom coordinates, forces, fixation masks, etc.) should be 3-dimensional. For regular batches,
-their shapes are **(batch_size, n_atom, n_dim)**, where `n_dim` is usually be 3. For irregular batches, their 
+their shapes are **(batch_size, n_atom, n_dim)**, where `n_dim` is usually 3. For irregular batches, their 
 shapes are **(1, $\sum_{i}$n_atom$_{i}$, n_dim)**, where $i$ is the sample index, and users should provide 
 another variable `batch_indices` that records atom numbers of each sample. For example, 
-`batch_indices = [64, 56, 72, 83, 102]` means samples have 64, 56, 72, 83, 102 atoms, respectively, and 
+`batch_indices = [64, 56, 72, 83, 102]` means that the samples have 64, 56, 72, 83, 102 atoms, respectively, and 
 corresponding shapes of atom coordinates should be `(1, 377, 3)`.
 
-For structure optimization and transition state search, BUCToolkit applies a **dynamic samples approach**, that 
-is dynamically removing the converged samples in one batch before starting next iteration steps 
-by maintaining a convergence mask and `indexed_select`/`indexed_copy_` functions. It could significantly reduce
+For structural optimization and transition state search, BUCToolkit applies a **dynamic samples approach**
+which dynamically removes the converged samples in one batch before starting the next iteration step 
+by maintaining a convergence mask and applying `indexed_select`/`indexed_copy_` functions. It could significantly reduce
 the waste of repeatedly calculating the converged data.
 
 ## Contact Us
