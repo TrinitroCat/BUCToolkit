@@ -180,7 +180,11 @@ class VibrationAnalysis(_CONFIGS):
                         th.eq(val_data.batch, th.arange(0, val_data.batch_size, dtype=th.int64, device=self.DEVICE).unsqueeze(-1)), dim=-1
                     )
                     if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
+                        batch = getattr(val_data, 'batch', None)
+                        if batch is not None:
+                            batch_indx = th.bincount(batch).tolist()
+                        else:
+                            batch_indx = [len(dat.pos) for dat in val_data.to_data_list()]
                     else:
                         batch_indx = val_data.batch_num_nodes('atom')
                         # initial atom coordinates

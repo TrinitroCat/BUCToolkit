@@ -404,7 +404,8 @@ class _BaseMD(BaseIO):
             else:
                 raise NotImplementedError(F"device {self.device} not supported.")
         finally:
-            pass
+            if not self._HOLD_DUMPER:
+                self.dumper.close()
 
     def __run_on_cuda(
             self,
@@ -751,8 +752,6 @@ class _BaseMD(BaseIO):
                     move_to_center_freq,
                     mass_center_graph
                 )
-                if not self._HOLD_DUMPER:
-                    dumper.close()
                 th.cuda.synchronize()
                 if self.verbose > 0:
                     self.logger.info(f'MAIN LOOP DONE. Elapsed time: {time.perf_counter() - t_main_loop:>5.4f} s')
@@ -1122,8 +1121,6 @@ class _BaseMD(BaseIO):
                 is_fix_mass_center,
                 move_to_center_freq,
             )
-            if not self._HOLD_DUMPER:
-                dumper.close()
 
         del self.Ekt_vir
         #return ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
