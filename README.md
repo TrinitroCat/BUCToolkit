@@ -529,7 +529,7 @@ data = CreatePygData().feat2data_list(bs3)
 graph = CreateDglData().feat2graph_list(bs3)
 
 ```
-Wherein, the args of `indices` specify the selected parts to read and write, instead of all files.
+Wherein, the args of `indices` specify the selected parts to read and write instead of all files.
 
 ## Contact Us
 
