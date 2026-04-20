@@ -332,6 +332,8 @@ STRICT_LOAD: !!bool true  # whether to strictly load model parameter
 REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
 SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
 ###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD']. BS is the build-in structures format obtained by `Structures().save(...)`
+CHK_SAVE_PATH: your/model/checkpoint/file/path/to/save
+CHK_SAVE_POSTFIX: your_saved_chk_file_suffix
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
 ###FSDATA_PATH: !!str your/final/state/data/path  # used for calc. requiring both initial and final states, e.g., CI-NEB
