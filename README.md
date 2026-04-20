@@ -319,16 +319,16 @@ run       : Launch a task in the cli.
 
 >>> 
 ```
-Some prepared input file template can be called by the `task` option, 
+Some prepared input file templates can be called by the `task` option, 
 and existing input file can also be interactively inquired and modified 
-in the sub-cli of the `edit` option.
+in the sub-CLI of the `edit` option.
 
 ### Input File Template
 The input file should be in YAML format.
 
 Here is a completed input file template that contains all supported tasks.
-The variables starts with "###" are the additions only required by 
-using BUCToolkit as an executable program, and those that starts with "#" are normal comments.
+The variables start with "###" are the additions only required by 
+using BUCToolkit as an executable program, and those that start with "#" are normal comments.
 ```yaml
 
 # input template
@@ -518,7 +518,7 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 This command will convert all files in `$input_path` with assumed format of `$input_type` into 
 `$output_path` in the format of `$output_type`.
 
-For a finer control, following python script can be used:
+For a finer control, the following python script can be used:
 ```python
 import BUCToolkit as bt
 from BUCToolkit.io import read_opt_structures, read_md_traj, read_mc_traj
@@ -548,7 +548,7 @@ data = CreatePygData().feat2data_list(bs3)
 graph = CreateDglData().feat2graph_list(bs3)
 
 ```
-Wherein, the args of `indices` specify the selected part to read and write, instead of all files.
+Wherein, the args of `indices` specify the selected parts to read and write instead of all files.
 
 ## Features
 
