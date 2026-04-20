@@ -115,7 +115,7 @@ def generate_display_art() -> str:
     screen_content = ["".join(row) for row in screen_lines]
 
     copyright_lines = (f"  BUCToolkit {__version__}. Copyright (c) 2024-{time.strftime("%Y")} "
-                       f"Authors: Pu Pengxin, Song Xin, etc.  " + " "*8)
+                       f"Authors: Pu Pengxin, Song Xin, et al.  " + " "*8)
     screen_content.append(copyright_lines)
 
     # Monitor Edges
@@ -139,7 +139,7 @@ def generate_display_art() -> str:
     bordered_lines.append(foot_line)
 
     # Copyright info
-    #copyright_lines = f"   BUCToolkit {__version__}. Copyright (c) 2024-{time.strftime("%Y")} Authors: Pu Pengxin, Song Xin, etc."
+    #copyright_lines = f"   BUCToolkit {__version__}. Copyright (c) 2024-{time.strftime("%Y")} Authors: Pu Pengxin, Song Xin, et al."
     #bordered_lines.append(copyright_lines)
 
     return "\n".join(bordered_lines)

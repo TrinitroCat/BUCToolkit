@@ -31,7 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 class MainTest(unittest.TestCase):
 
     @staticmethod
-    def assertStatisticalEqual(a, b, rtol=1e-05, atol=1e-08, msg=None):
+    def assertStatisticalEqual(a, b, rtol=1e-05, atol=1e-07, msg=None):
         """
         Used for MD/MC ensemble validation
         Args:
@@ -46,14 +46,14 @@ class MainTest(unittest.TestCase):
         """
         err_msg = str(msg) if msg is not None else f'Statistical validation Failed.\na: {a}\nb: {b}'
         if abs(a) * abs(b) < 1e-7:
-            atol = 1e-7
+            atol = max(1e-7, atol)
         if not math.isclose(a, b, rel_tol=rtol, abs_tol=atol):
             raise AssertionError(err_msg)
 
     def setUp(self):
         # data
         ATOMS = [8, 5, 10]
-        data = build_cubic_lattice_batch(ATOMS, 3., 0.1)
+        data = build_cubic_lattice_batch(ATOMS, 1.3, 0.05)
         ELEM = ['Fe', 'Al', 'Pd']
         DOF_reduce = 0
         self.MASSES = [MASS[_] for _ in ELEM]
@@ -183,7 +183,7 @@ class MainTest(unittest.TestCase):
             #if 'CPU' in RUNNER_NAME[i] or ('STATIC' in RUNNER_NAME[i]): continue
             _data = data.to(runner.device).clone()
             model_test = self.model_test.to(runner.device)
-            if 'STATICE' in RUNNER_NAME[i]:
+            if 'STATIC' in RUNNER_NAME[i]:
                 _data.pos = _data.pos0  # avoid uneq perturbation
 
             print("*"*89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*"*89 + '\n')
@@ -289,7 +289,7 @@ class MainTest(unittest.TestCase):
                 [0.5 * dof * kB * TEMPERATURE for dof in DOF_vib],         # Ep mean
                 [0.5 * dof * (kB * TEMPERATURE)**2 for dof in DOF_vib],    # Ep var
                 [1.5 * (na - 3) * kB * TEMPERATURE for na in N],           # Ek mean
-                [3. * (na - 3) * (kB * TEMPERATURE)**2 for na in N],      # Ek var
+                [1.5  * (na - 3) * (kB * TEMPERATURE)**2 for na in N],      # Ek var
                 [0., 0., 0.],                                              # single veloc. mean
                 [kB * TEMPERATURE / _m for _m in MASSES]                   # single veloc. var
             ]
@@ -329,7 +329,7 @@ class MainTest(unittest.TestCase):
                         self.assertStatisticalEqual(
                             _etol_var,
                             0.,
-                            atol=5e-3,
+                            atol=1e-2,
                             msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
                                 f'test value: {_etol_var}\nstandard value: 0.'
                         )

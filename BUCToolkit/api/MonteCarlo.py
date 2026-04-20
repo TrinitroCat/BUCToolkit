@@ -152,7 +152,12 @@ class MonteCarlo(_CONFIGS):
                     return mask
 
                 def get_batch_indx(data):
-                    return [len(dat.pos) for dat in data.to_data_list()]
+                    batch = getattr(data, 'batch', None)
+                    if batch is not None:
+                        n_batch_ = th.bincount(batch).tolist()
+                    else:
+                        n_batch_ = [len(dat.pos) for dat in data.to_data_list()]
+                    return n_batch_
 
                 def get_init_veloc(data):
                     veloc = getattr(data, 'velocity', None)

@@ -155,7 +155,12 @@ class Predictor(_CONFIGS):
                     return _indx
 
                 def get_batch_indx(data):
-                    return [len(dat.pos) for dat in data.to_data_list()]
+                    batch = getattr(data, 'batch', None)
+                    if batch is not None:
+                        n_batch_ = th.bincount(batch).tolist()
+                    else:
+                        n_batch_ = [len(dat.pos) for dat in data.to_data_list()]
+                    return n_batch_
             else:
                 def get_indx(data):
                     _indx: dict = data.nodes['atom'].data

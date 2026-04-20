@@ -685,6 +685,8 @@ class _ArrayDumperPlaceHolder:
 class ArrayDumpReader:
     """
     Reading the mmap file dumped by class `ArrayDumper`.
+    The file will be lazily opened and read at the first time calling `read`.
+
     """
     def __init__(self, path: str):
         """
@@ -785,6 +787,7 @@ class ArrayDumpReader:
         else:
             raise TypeError(f'`groups` must be a list or int, but got {type(groups)}.')
 
+        self._ptr = 16  # reset file _ptr
         _grp_ptr = 0
         _n_select_groups = len(groups)
         output_arrs = dict()
@@ -1031,6 +1034,8 @@ def read_md_traj(
             X[sX]        (coordinates)
             V[sX]        (velocities)
             F[sX]        (forces)
+    Note: All groups will be loaded, and `indices` controls the loaded frame numbers in each group.
+
     Args:
         path: the path to the dump file.
         indices: the indices in each group of the arrays to read. A negative number means read all.
@@ -1042,10 +1047,11 @@ def read_md_traj(
 
     """
     reader = ArrayDumpReader(path)
-    raw_results = reader.read(groups=-1, indices=indices, is_copy=is_copy)
+    raw_headers = reader.read(groups=slice(0, None, 2), is_copy=is_copy)
+    raw_results = reader.read(groups=slice(1, None, 2), indices=indices, is_copy=is_copy)
     n_grp = len(raw_results)
-    if n_grp % 2 != 0:
-        raise EOFError(f"Molecular dynamics file must contain even number of groups, but got {n_grp}.")
+    if len(raw_headers) != n_grp:
+        raise EOFError(f"Group number of headers ({len(raw_headers)} and data ({n_grp}) does not match. The file may be corrupted.")
 
     smp_ids = list()
     cell_list = list()
@@ -1058,17 +1064,18 @@ def read_md_traj(
     energy_list = list()
     force_list = list()
 
-    for i in range(0, n_grp, 2):
-        i_head = i
-        i_content = i + 1
-        i_cyc = i_head // 2
-        if len(raw_results[f'group{i_head}'][0]) == 3:  # no irregular batch_indices
+    for i in range(n_grp):
+        i_cyc = i
+        i_head = 2 * i
+        i_content = 2 * i + 1
+        #i_cyc = i_head // 2
+        if len(raw_headers[f'group{i_head}'][0]) == 3:  # no irregular batch_indices
             batch_indices_tensor = None
             (
                 cell_vec,
                 atomic_numbers,
                 fixed_mask
-            ) = raw_results[f'group{i_head}'][0]
+            ) = raw_headers[f'group{i_head}'][0]
             n_batch = len(cell_vec)
             _elements = list()
             _numbers = list()
@@ -1098,13 +1105,13 @@ def read_md_traj(
                 force_list.extend(_f)
                 kk += 1
 
-        elif len(raw_results[f'group{i_head}'][0]) == 4:  # irregular situation
+        elif len(raw_headers[f'group{i_head}'][0]) == 4:  # irregular situation
             (
                 batch_indices_tensor,
                 cell_vec,
                 atomic_numbers,
                 fixed_mask
-            ) = raw_results[f'group{i_head}'][0]
+            ) = raw_headers[f'group{i_head}'][0]
             n_batch = len(batch_indices_tensor)
             _split_indices = np.cumsum(batch_indices_tensor)[:-1]
             _cells = [_ for _ in cell_vec]
@@ -1137,7 +1144,7 @@ def read_md_traj(
                 force_list.extend(_f)
                 kk += 1
         else:
-            raise ValueError(f"Invalid file format: {path}. It may be not a MD dump file.")
+            raise ValueError(f"Invalid file format: {path}. It may be not an MD dump file.")
 
     bs = BatchStructures()
     bs.append_from_lists(
@@ -1185,10 +1192,11 @@ def read_mc_traj(
 
     """
     reader = ArrayDumpReader(path)
-    raw_results = reader.read(groups=-1, indices=indices, is_copy=is_copy)
+    raw_headers = reader.read(groups=slice(0, None, 2), is_copy=is_copy)
+    raw_results = reader.read(groups=slice(1, None, 2), indices=indices, is_copy=is_copy)
     n_grp = len(raw_results)
-    if n_grp % 2 != 0:
-        raise EOFError(f"Molecular dynamics file must contain even number of groups, but got {n_grp}.")
+    if len(raw_headers) != n_grp:
+        raise EOFError(f"Group number of headers ({len(raw_headers)} and data ({n_grp}) does not match. The file may be corrupt.")
 
     smp_ids = list()
     cell_list = list()
@@ -1199,17 +1207,17 @@ def read_mc_traj(
     fixed_list = list()
     energy_list = list()
 
-    for i in range(0, n_grp, 2):
-        i_head = i
-        i_content = i + 1
-        i_cyc = i_head // 2
-        if len(raw_results[f'group{i_head}'][0]) == 3:  # no irregular batch_indices
+    for i in range(n_grp):
+        i_cyc = i
+        i_head = 2 * i
+        i_content = 2 * i + 1
+        if len(raw_headers[f'group{i_head}'][0]) == 3:  # no irregular batch_indices
             batch_indices_tensor = None
             (
                 cell_vec,
                 atomic_numbers,
                 fixed_mask
-            ) = raw_results[f'group{i_head}'][0]
+            ) = raw_headers[f'group{i_head}'][0]
             n_batch = len(cell_vec)
             _elements = list()
             _numbers = list()
@@ -1235,13 +1243,13 @@ def read_mc_traj(
                 energy_list.extend(en.tolist())
                 kk += 1
 
-        elif len(raw_results[f'group{i_head}'][0]) == 4:  # irregular situation
+        elif len(raw_headers[f'group{i_head}'][0]) == 4:  # irregular situation
             (
                 batch_indices_tensor,
                 cell_vec,
                 atomic_numbers,
                 fixed_mask
-            ) = raw_results[f'group{i_head}'][0]
+            ) = raw_headers[f'group{i_head}'][0]
             n_batch = len(batch_indices_tensor)
             _split_indices = np.cumsum(batch_indices_tensor)[:-1]
             _cells = [_ for _ in cell_vec]
@@ -1270,7 +1278,7 @@ def read_mc_traj(
                 energy_list.extend(en.tolist())
                 kk += 1
         else:
-            raise ValueError(f"Invalid file format: {path}. It may be not a MD dump file.")
+            raise ValueError(f"Invalid file format: {path}. It may be not an MC dump file.")
 
     bs = BatchStructures()
     bs.append_from_lists(
