@@ -302,7 +302,7 @@ run       : Launch a task in the cli.
 
 >>> 
 ```
-Some prepared input file template can be called by the `task` option, 
+Some prepared input file templates can be called by the `task` option, 
 and existing input file can also be interactively inquired and modified 
 in the sub-CLI of the `edit` option.
 
