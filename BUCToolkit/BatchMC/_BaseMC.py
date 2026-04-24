@@ -21,13 +21,14 @@ from torch import nn
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils._Element_info import ATOMIC_SYMBOL
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseIO
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers
+from BUCToolkit.Bases.BaseMotion import BaseMotion
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 
 
-class _BaseMC(BaseIO):
+class _BaseMC(BaseMotion):
     def __init__(
             self,
             iter_scheme: str,

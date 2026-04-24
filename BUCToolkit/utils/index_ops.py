@@ -70,7 +70,7 @@ def index_reduce(
         dim: reduce dimension
         ops: reduce operation
         init_value: default value of the output tensor that reduced values filled in.
-        out_size: size of the output tensor at the given dim. if None, it is equal to `batch_indices.max().item() + 1`
+        out_size: size of the output tensor at the given dim. if None, it is equal to `batch_indices.max() + 1`
         include_self: whether to let `init_value` really participate in the reduction.
         out: the output tensor. If None, a new one will be returned.
 
@@ -80,7 +80,7 @@ def index_reduce(
     assert batch_indices.dim() == 1, f'Invalid dimension of batch indices: {batch_indices.shape}. It must be 1D.'
     dim = dim if dim >= 0 else src.dim() + dim
     output_size = list(src.shape)
-    output_size[dim] = (batch_indices.max().item() + 1) if out_size is None else out_size
+    output_size[dim] = (batch_indices.max() + 1) if out_size is None else out_size
 
     out = th.full(output_size, init_value, device=src.device, dtype=src.dtype) if out is None else out.fill_(init_value)
     if ops == 'sum' and include_self:
@@ -146,7 +146,7 @@ def indices_pairwise_dist(
 
     Returns:
         Tuple[indices: Tensor[int64], batch_tensor of dist: Tensor[int64]] |
-        Tuple[indices: Tensor[int64], distance: Tensor, batch_tensor of dist: Tensor[int64]]
+        Tuple[indices: Tensor[(2, E), int64], distance: Tensor[(E, )], batch_tensor of dist: Tensor[(E, ), int64]]
 
     """
     # check

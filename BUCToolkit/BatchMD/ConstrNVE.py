@@ -1,23 +1,23 @@
 """ Micro canonical ensemble (NVE) Molecular Dynamics via Verlet algo. """
 
-#  Copyright (c) 2024-2025.7.4, BUCToolkit.
+#  Copyright (c) 2024-2026.4.25, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
-#  File: NVE.py
+#  Version: 1.0b
+#  File: ConstrNVE.py
 #  Environment: Python 3.12
 
-# ruff: noqa: E701, E702, E703
+
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
 import torch as th
 from torch import nn
 import numpy as np
 
-from ._ConstrBaseMD import _rConstrBase
+from BUCToolkit.BatchMD._BaseConstrMD import _BaseConstrMD
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 
 
-class ConstrNVE(_rConstrBase):
+class ConstrNVE(_BaseConstrMD):
     """
     Constrained micro canonical ensemble (NVE) molecular dynamics implemented via velocity Verlet algo.
 
@@ -43,7 +43,6 @@ class ConstrNVE(_rConstrBase):
             constr_threshold: float = 1e-5,
             T_init: float = 298.15,
             output_file: str | None = None,
-            dump_path: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
             verbose: int = 2
@@ -56,7 +55,6 @@ class ConstrNVE(_rConstrBase):
             constr_val,
             constr_threshold,
             output_file,
-            dump_path,
             output_structures_per_step,
             device,
             verbose
@@ -118,52 +116,20 @@ class ConstrNVE(_rConstrBase):
                 self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             # Update V
-            with th.set_grad_enabled(self.require_grad):
-                X.requires_grad_(self.require_grad)
-                Energy = func(X, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-
+            Energy, Force = self._calc_EF(
+                X,
+                func,
+                func_args,
+                func_kwargs,
+                grad_func_,
+                grad_func_args,
+                grad_func_kwargs,
+                self.require_grad,
+                is_grad_func_contain_y
+            )
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             V.copy_(self._project1(V))
 
         return X, V, Energy, Force
-
-    def __updateXV(
-            self, X, V, Force,
-            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
-        """
-        TESTING...
-        Here the returned X, V, Force and Energy are all the quantities at the midpoint.
-        And the quantities in the end point are additionally stored in external attr. self._X, self._V,
-        and these attributes would be updated in-place within `self.implicit_midpoint_step`
-        """
-        # predict the new endpoint by last midpoint and endpoint
-        X0 = self._X
-        V0 = self._V
-        f_constr = th.einsum('bijk, bi -> bjk', self.jac, self.lamb)
-        V_mid_pred = V.add((Force + f_constr) / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
-        X_mid_pred = X.add(V_mid_pred, alpha=self.time_step)
-        self._V = 2 * V_mid_pred - self._V
-        self._X = 2 * X_mid_pred - self._X
-
-        X, V, E, F, lamb = self.implicit_midpoint_step(
-            X0, self._X, V0, self._V, Force, self.lamb,
-            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y,
-        )
-        self.logger.info(
-            f'Constraint forces \\lambda: {np.array2string(lamb.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
-        )
-        jac, y = self._jacobian(X)
-        self._debug_X_check.append(abs(y[0].item()))
-        self._debug_V_check.append(abs(th.sum(jac * V.unsqueeze(1), dim=(-2, -1))[0].item()))
-        print(abs(th.sum(jac * V.unsqueeze(1), dim=(-2, -1))[0].item()))
-
-        return X, V, E, F
 

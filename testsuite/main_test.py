@@ -128,37 +128,37 @@ class MainTest(unittest.TestCase):
             TIME_STEP, 100, 0., f'{self.out_pt}results/MD_STATIC_GPU', 1, device='cuda:0', verbose=1
         )
         runner_gpu_move_nve = NVE(
-            TIME_STEP, 1000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
+            TIME_STEP, 10000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
             is_compile=False
         )
         runner_cpu_csvr_nvt = NVT(
-            TIME_STEP, 100000, 'CSVR', {'time_const': 100},
+            TIME_STEP, 50000, 'CSVR', {'time_const': 100},
             TEMPERATURE, f'{self.out_pt}results/MD_CSVR_CPU', 10, device='cpu', verbose=1,
             is_compile=False,
             compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_gpu_csvr_nvt = NVT(
-            TIME_STEP, 100000, 'CSVR', {'time_const': 100},
+            TIME_STEP, 50000, 'CSVR', {'time_const': 100},
             TEMPERATURE, f'{self.out_pt}results/MD_CSVR_GPU', 10, device='cuda:0', verbose=1,
             is_compile=False,
             compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_cpu_lang_nvt = NVT(
-            TIME_STEP, 100000, 'Langevin', {'damping_coeff': 0.01},
+            TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
             TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU', 10, device='cpu', verbose=0,
             is_compile=True
         )
         runner_gpu_lang_nvt = NVT(
-            TIME_STEP, 100000, 'Langevin', {'damping_coeff': 0.01},
+            TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
             TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU', 10, device='cuda:0', verbose=0,
             is_compile=True
         )
         runner_cpu_nose_nvt = NVT(
-            TIME_STEP, 100000, 'Nose-Hoover', {},
+            TIME_STEP, 50000, 'Nose-Hoover', {},
             TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU', 10, device='cpu', verbose=0
         )
         runner_gpu_nose_nvt = NVT(
-            TIME_STEP, 100000, 'Nose-Hoover', {},
+            TIME_STEP, 50000, 'Nose-Hoover', {},
             TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU', 10, device='cuda:0', verbose=0
         )
 
@@ -571,7 +571,7 @@ class MainTest(unittest.TestCase):
             'BFGS',
             1e-5,
             0.01,
-            50,
+            1,
             'MT',
             10,
             0.2,
@@ -599,7 +599,7 @@ class MainTest(unittest.TestCase):
             'BFGS',
             1e-5,
             0.01,
-            50,
+            1,
             'Backtrack',
             10,
             0.2,

@@ -2198,7 +2198,7 @@ class BatchStructures(object):
         """
         # check key
         if isinstance(key, int):
-            if key >= len(self): raise IndexError(f'key {key} is out of range {len(self)}')
+            if key < -len(self) or key >= len(self): raise IndexError(f'key {key} is out of range {len(self)}.')
             indx = slice(key, key + 1) if key != -1 else slice(key, None)
 
         elif isinstance(key, slice):
