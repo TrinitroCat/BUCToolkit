@@ -1,9 +1,9 @@
 """ Canonical ensemble (NVT) Molecular Dynamics via Verlet algo. """
 
-#  Copyright (c) 2024-2025.7.4, BUCToolkit.
+#  Copyright (c) 2024-2026.4.25, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
-#  File: NVT.py
+#  Version: 1.0b
+#  File: ConstrNVT.py
 #  Environment: Python 3.12
 
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
@@ -14,11 +14,11 @@ from torch import nn
 import numpy as np
 
 from BUCToolkit.utils.index_ops import index_reduce
-from ._ConstrBaseMD import _rConstrBase
+from ._BaseConstrMD import _BaseConstrMD
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 
 
-class ConstrNVT(_rConstrBase):
+class ConstrNVT(_BaseConstrMD):
     """
     Canonical ensemble (NVT) molecular dynamics with constraints.
 
@@ -49,7 +49,6 @@ class ConstrNVT(_rConstrBase):
                  constr_threshold: float = 1e-5,
                  T_init: float = 298.15,
                  output_file: str | None = None,
-                 dump_path: str | None = None,
                  output_structures_per_step: int = 1,
                  device: str | th.device = 'cpu',
                  verbose: int = 2) -> None:
@@ -72,7 +71,6 @@ class ConstrNVT(_rConstrBase):
             constr_val,
             constr_threshold,
             output_file,
-            dump_path,
             output_structures_per_step,
             device,
             verbose
@@ -163,6 +161,7 @@ class ConstrNVT(_rConstrBase):
             masses,
             atom_masks,
             is_grad_func_contain_y,
+            batch_indices,
     )-> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         # read thermostat configs
         X = X.detach()
@@ -170,25 +169,33 @@ class ConstrNVT(_rConstrBase):
             alpha = self.alpha
             # half-step
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            self._project2(X)
+            X.add_(V, alpha = 0.5 * self.time_step)
             # stochastic update velocity
             V.mul_(alpha)
             V.add_(th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V))
             # V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
             # the rest half-step
             X.add_(V, alpha=0.5 * self.time_step)
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            # retrack & proj
-            X.add_(V, alpha=0.5 * self.time_step)
-            V.copy_(self._project1(V))
+            Fc = self._project2(X)
+            if self.verbose > 0:
+                self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # update energy & forces
-            with th.set_grad_enabled(self.require_grad):
-                X.requires_grad_(self.require_grad)
-                Energy = func(X, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+            Energy, Force = self._calc_EF(
+                X,
+                func,
+                func_args,
+                func_kwargs,
+                grad_func_,
+                grad_func_args,
+                grad_func_kwargs,
+                self.require_grad,
+                is_grad_func_contain_y
+            )
+            Force.mul_(atom_masks)
+            # last update
+            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            V.copy_(self._project1(V))
+
 
         return X, V, Energy, Force
 
@@ -218,14 +225,19 @@ class ConstrNVT(_rConstrBase):
             if self.verbose > 0:
                 self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            # Update V
-            with th.set_grad_enabled(self.require_grad):
-                X.requires_grad_(self.require_grad)
-                Energy = func(X, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+            # update energy & forces
+            Energy, Force = self._calc_EF(
+                X,
+                func,
+                func_args,
+                func_kwargs,
+                grad_func_,
+                grad_func_args,
+                grad_func_kwargs,
+                self.require_grad,
+                is_grad_func_contain_y
+            )
+            Force.mul_(atom_masks)
 
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
@@ -284,14 +296,19 @@ class ConstrNVT(_rConstrBase):
             if self.verbose > 0:
                 self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            # Update V
-            with th.set_grad_enabled(self.require_grad):
-                X.requires_grad_(self.require_grad)
-                Energy = func(X, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+            # update energy & forces
+            Energy, Force = self._calc_EF(
+                X,
+                func,
+                func_args,
+                func_kwargs,
+                grad_func_,
+                grad_func_args,
+                grad_func_kwargs,
+                self.require_grad,
+                is_grad_func_contain_y
+            )
+            Force.mul_(atom_masks)
 
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
@@ -383,13 +400,19 @@ class ConstrNVT(_rConstrBase):
             if self.verbose > 0:
                 self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
 
-            with th.set_grad_enabled(self.require_grad):
-                X.requires_grad_(self.require_grad)
-                Energy = func(X, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+            # update energy & forces
+            Energy, Force = self._calc_EF(
+                X,
+                func,
+                func_args,
+                func_kwargs,
+                grad_func_,
+                grad_func_args,
+                grad_func_kwargs,
+                self.require_grad,
+                is_grad_func_contain_y
+            )
+            Force.mul_(atom_masks)
 
             if batch_indices is not None:  # for cuda, it would be further optimized by Graph.replay
                 reduced_Ek = th.sum(index_reduce(masses * V ** 2 * 103.642696562621738, self.batch_scatter, 1), dim=-1, keepdim=True)
@@ -429,19 +452,19 @@ class ConstrNVT(_rConstrBase):
 
     def _updateXV(
             self,
-            X,
-            V,
-            Force,
-            func,
-            grad_func_,
-            func_args,
-            func_kwargs,
-            grad_func_args,
-            grad_func_kwargs,
-            masses,
-            atom_masks,
-            is_grad_func_contain_y,
-            batch_indices,
+            X: th.Tensor,
+            V: th.Tensor,
+            Force: th.Tensor,
+            func: Callable,
+            grad_func_: Callable,
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            masses: th.Tensor,
+            atom_masks: th.Tensor,
+            is_grad_func_contain_y: bool,
+            batch_indices: th.Tensor|None,
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
 
         x, v, energy, forces = self.update_scheme(
@@ -457,6 +480,7 @@ class ConstrNVT(_rConstrBase):
             masses,
             atom_masks,
             is_grad_func_contain_y,
+            batch_indices
         )
 
         return x, v, energy, forces

@@ -58,6 +58,7 @@ class NVT(_BaseMD):
             thermostat: str, the thermostat of NVT ensemble.
             thermostat_config: Dict|None, configs of thermostat. {'damping_coeff': float} for Langevin, {'time_const': float} for CSVR, {'virt_mass': float} for Nose-Hoover.
             T_init: initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
+            output_file: the path to the binary file that stores trajectories. If None, tractories will not output.
             output_structures_per_step: int, output structures per output_structures_per_step steps.
             device: device that program run on.
             verbose: control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
@@ -172,9 +173,7 @@ class NVT(_BaseMD):
             V.mul_(alpha)
             V.add_(th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V))
             #V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
-            # the rest half-step
             X.add_(V, alpha = 0.5 * self.time_step)
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             # update energy & forces
             Energy, Force = self._calc_EF(
                 X,
@@ -184,9 +183,13 @@ class NVT(_BaseMD):
                 grad_func_,
                 grad_func_args,
                 grad_func_kwargs,
+                self.require_grad,
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
+            # the rest half-step
+            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+
 
         return X, V, Energy, Force
 
@@ -222,6 +225,7 @@ class NVT(_BaseMD):
                 grad_func_,
                 grad_func_args,
                 grad_func_kwargs,
+                self.require_grad,
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
@@ -235,68 +239,6 @@ class NVT(_BaseMD):
             else:
                 # Rescaling factor
                 alpha = th.sqrt(self.EK_TARGET / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
-                V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
-
-        return X, V, Energy, Force
-
-    def __CSVR_old(
-            self,
-            X,
-            V,
-            Force,
-            func,
-            grad_func_,
-            func_args,
-            func_kwargs,
-            grad_func_args,
-            grad_func_kwargs,
-            masses,
-            atom_masks,
-            is_grad_func_contain_y,
-            batch_indices
-    )-> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        n_batch, n_atom, n_dim = X.shape
-        # read thermostat configs
-        time_const = self.thermostat_config.get('time_const', 10 * self.time_step)  # Unit: fs^-1
-        # NVE Step
-        X: th.Tensor = X.detach()
-        with th.no_grad():
-            #X += V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
-            X.add_(V, alpha=self.time_step)
-            X.add_(Force / (2. * masses), alpha=self.time_step ** 2 * 9.64853329045427e-3)
-            #V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
-            with th.set_grad_enabled(self.require_grad):
-                X.requires_grad_(self.require_grad)
-                Energy = func(X, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-            #V += (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
-            V.add_(Force / (2. * masses), alpha=self.time_step * 9.64853329045427e-3)
-
-            # Kinetic Energy Redistribution, Rescale Velocities
-            # sigma = th.sqrt((2. * masses * self.T_init / (self.time_step * time_const)) * (0.138064853 / (6.022140857 * 1.602176634 ** 2)))
-            sigma = self.time_step ** 0.5
-            if batch_indices is not None:
-                self.Ekt_vir += (
-                        (self.EK_TARGET - self.Ek) * self.time_step / time_const
-                        + 2. * th.sqrt(self.EK_TARGET * self.Ek / ((3 * self.batch_tensor - 3) * time_const))
-                        * th.normal(0., sigma, size=(len(batch_indices),), device=self.device)
-                )  # Unit: eV/Ang
-                self.Ekt_vir = th.where(self.Ekt_vir <= 0., 1e-6, self.Ekt_vir)
-                # Rescaling factor
-                alpha = th.sqrt(self.Ekt_vir / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
-                V *= alpha.transpose(0, 1)[:, self.batch_scatter, :]
-            else:
-                self.Ekt_vir += (
-                        (self.EK_TARGET - self.Ek) * self.time_step / time_const
-                        + 2. * th.sqrt(self.EK_TARGET * self.Ek / ((3 * n_atom - 3) * time_const))
-                        * th.normal(0., sigma, size=(n_batch,), device=self.device)
-                )  # Unit: eV/Ang
-                # Rescaling factor
-                alpha = th.sqrt(self.Ekt_vir / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
                 V *= alpha  # (n_batch, n_atom, n_dim) * (n_batch, 1, 1)
 
         return X, V, Energy, Force
@@ -337,6 +279,7 @@ class NVT(_BaseMD):
                 grad_func_,
                 grad_func_args,
                 grad_func_kwargs,
+                self.require_grad,
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
@@ -427,6 +370,7 @@ class NVT(_BaseMD):
                 grad_func_,
                 grad_func_args,
                 grad_func_kwargs,
+                self.require_grad,
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)

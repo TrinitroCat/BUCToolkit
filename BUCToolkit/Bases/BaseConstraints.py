@@ -1,36 +1,29 @@
-""" Molecular Dynamics base framework with constrains """
-
-#  Copyright (c) 2024-2025.7.4, BUCToolkit.
+#  Copyright (c) 2026.4.24, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
-#  File: NVE.py
+#  Version: 1.0b
+#  File: BaseConstraints.py
 #  Environment: Python 3.12
 
-# ruff: noqa: E701, E702, E703
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
 import torch as th
 from torch import nn
 import numpy as np
 
-from .._BaseMD import _BaseMD
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.grad_functions import bjvp, bhvp
+from BUCToolkit.utils.grad_functions import bhvp
+from BUCToolkit.Bases.BaseMotion import BaseIO
 
 
-class _rConstrBase(_BaseMD):
+class BaseConstr(BaseIO):
     """
-    Constrained Base Dynamics
+    Base Constraints used for constraints MD or optimizations
 
     Args:
-        time_step: float, time per step (ps).
-        max_step: int, maximum steps.
-        T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k. It takes one or more arguments, one of which must be a Tensor, and returns one Tensor with shape (k, ). `None` for identity function. see example below.
         constr_val: Callable[th.Tensor[1], th.Tensor] | th.Tensor, the constraint value of `constr_func`, i.e., constraints are `constr_func(X) = constr_val`.
         By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor, it can be set to the time-dependent constraints.
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
-        output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: str|torch.device, device that program rum on.
         verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
 
@@ -59,29 +52,22 @@ class _rConstrBase(_BaseMD):
     """
     def __init__(
             self,
-            time_step: float,
-            max_step: int,
-            T_init: float = 298.15,
             constr_func: Callable | None = None,
             constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
-            output_file: str | None = None,
-            output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
-            verbose: int = 2
+            verbose: int = 0
     ):
-        super().__init__(
-            time_step,
-            max_step,
-            T_init,
-            output_file,
-            output_structures_per_step,
-            device,
-            verbose
-        )
         if constr_func is None:
             constr_func = lambda X: th.tensor(0.)
         self._lazy_calc_constr_val = False  # use the value of constr_func(X_init) to determine constr_val (and fixed).
+        self.device = th.device(device)
+
+        self.time_now = th.scalar_tensor(0., device=device)
+        self.is_const_constr = False
+        self.constr_val_func_raw = None
+        self.time_step = 0.
+
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
             self.constr_val_func_raw = None
@@ -110,6 +96,10 @@ class _rConstrBase(_BaseMD):
         self.constr_thres = constr_threshold
         self.lamb = None  # constr force, i.e., the mu of Lagrange multipler
 
+        super().__init__()
+        #self.init_logger('Main.Constraints'), Do NOT initialize logger, because BaseConstr will be never independently instantiated.
+        self.verbose = int(verbose)
+
     def initialize(
             self,
             func: Any | nn.Module,
@@ -133,50 +123,22 @@ class _rConstrBase(_BaseMD):
         _y_check = th.vmap(self.constr_func)(X)
         if self._lazy_calc_constr_val:
             self.constr_val_now = _y_check
+        if self.verbose:
+            self.logger.info(
+                f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
+            )
         # check constr_val shape
         if _y_check.shape != self.constr_val_now.shape:
             raise RuntimeError(
                 f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
             )
         jac, y = self._jacobian(X)
-        if self.verbose:
-            self.logger.info(
-                f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
-            )
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
         self._do_qr(jac)
-        ProjV = self._project1(V_init)
-        Ek = th.sum(
-            masses * V_init ** 2,
-            dim=(-2, -1),
-            keepdim=True
-        )
-        Ek_p = th.sum(
-            masses * ProjV ** 2,
-            dim=(-2, -1),
-            keepdim=True
-        )
-        V_init.copy_(th.where(Ek_p < 1e-5, 0., th.sqrt(Ek/Ek_p) * ProjV))
-        self.free_degree -= jac.shape[1]  # reduce the constr. free deg.
-        # recalculate target Ek under constraints
-        _, n_atom, n_dim = X.shape
-        # target kinetic energy for NVT|NPT ensembles
-        if batch_indices:  # Unit: eV/atom. Boltzmann constant kB = 8.6173332621e-5 eV/K
-            self.EK_TARGET = th.tensor(
-                [((self.free_degree / 2.) * 8.617333262145e-5 * self.T_init) for _n_atom in batch_indices],
-                dtype=X.dtype,
-                device=self.device
-            )
-        else:
-            self.EK_TARGET = (self.free_degree / 2.) * 8.617333262145e-5 * self.T_init
         # calc. constr. intensity
         n_batch, n_constr, _ = self.R.shape
         self.lamb = th.zeros((n_batch, n_constr), device=self.device)
-        # debug
-        #self._debug_X_check = list()
-        #self._debug_V_check = list()
-        # ...
 
     def _constr_func_wrapped(self, X, constr_val_now):
         """
@@ -334,7 +296,6 @@ class _rConstrBase(_BaseMD):
             if constr_err < self.constr_thres:
                 # constr. forces lambda
                 Fc = th.linalg.solve_triangular(self.R, _lamb, upper=True)
-                # unit conversion
                 Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
                 return Fc
             # QR factor.
@@ -345,75 +306,19 @@ class _rConstrBase(_BaseMD):
             # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
             corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
             X.add_(corr, alpha=-1.)
-            #V.add_(corr/self.time_step, alpha=-1.)
 
         # if not converged
         self.logger.warning("Projection of X to the manifold is not converged.")
         # constr. forces lambda
         Fc = th.linalg.solve_triangular(self.R, _lamb, upper=True)
-        # unit conversion
+        ######################
+        # FOR MD, the constraint force used for calculate the free energy gradient should be further processed by
+        #   Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
+        ######################
         Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
+
         return Fc
 
-    def _project1_std(self, X:th.Tensor) -> th.Tensor:
-        """
-        Compute the projector for 1st-order quantity (e.g. velocity) of all constrains by QR factorization.
-        for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
-        define the projector: P = M^1/2 Q_2 Q_2^T M^-1/2 = M^1/2 (I - Q_1 Q_1^T) M^-1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
-        Args:
-            X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
-
-        Returns: th.Tensor, the projected X.
-
-        """
-        n_batch, n_atoms, n_dim = X.shape
-        sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
-        negsqrtM = self.negsqrtM  # M^-1/2
-        # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
-        Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
-        Px = th.diag_embed(self.sqrtM.flatten(-2, -1), dim1=1, dim2=2) @ X.reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
-        Px = (Q @ (Q.mT.contiguous() @ Px))  # (n_batch, n_atoms, n_dim)
-        Px = th.diag_embed(self.negsqrtM.flatten(-2, -1), dim1=1, dim2=2) @ Px
-        Px = X - Px.reshape(n_batch, n_atoms, n_dim)
-        # manifold veloc. correction
-        if not self.is_const_constr:  # time-dependent constraints
-            th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr, upper=False, out=self.q)
-            Px.add_(self.negsqrtM * (self.Q @ self.q.unsqueeze(-1)).reshape(n_batch, n_atoms, n_dim))
-
-        return Px
-
-    def _project2_std(self, X:th.Tensor) -> None:
-        """
-        Compute position corrections by directly solving JM^-1J^T q = s(X)
-        Args:
-            X:
-
-        Returns:
-
-        """
-        n_batch, n_atoms, n_dim = X.shape
-        for i in range(0, self.max_proj_iter):
-            # update Jacobian
-            jac, y = self._jacobian(X)  # jac: (n_batch, n_constr, n_atom, n_dim)
-            # print
-            constr_err = th.max(th.abs(y)).item()
-            lamb = 0.
-            if self.verbose > 0:
-                self.logger.info(f'{i: < 3d} Constraint errors are now: {constr_err:.4e}')
-            # threshold
-            if constr_err < self.constr_thres:
-                return
-            # solve J M^-1 J^T q = s
-            Z = jac*self.negsqrtM  # TODO
-            # Q(n_batch, n_atoms * n_dim, n_constr)
-            corr = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1) , upper=False) # (n_batch, n_constr, 1)
-            # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
-            corr = self.negsqrtM * (self.Q @ corr).reshape(n_batch, n_atoms, n_dim)
-            X.add_(corr, alpha=-1.)
-            #V.add_(corr/self.time_step, alpha=-1.)
-
-        # if not converged
-        self.logger.warning("Projection of X to the manifold is not converged.")
 
     def _jacobian_derivative(self, X, v: th.Tensor) -> th.Tensor:
         """
@@ -504,7 +409,6 @@ class _rConstrBase(_BaseMD):
         #    # (n_f, n_f) @ (n_f, n_constr) @ (n_constr, 1) = (n_f, 1)
         #    Gamma = M_sqrt_inv @ Q_mid @ _y
 #
-        #    # 带松弛的更新
         #    v_candidate = v_old - dt * Gamma.reshape(n_atom, n_dim)
         #    v_next = omega * v_candidate + (1 - omega) * v_new
 #
@@ -517,91 +421,3 @@ class _rConstrBase(_BaseMD):
 #
         #print('Not Converged !')
         #return v_new
-
-    def implicit_midpoint_step(
-            self,
-            X0,
-            X,
-            V0,
-            V,
-            F,
-            lamb,
-            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y,
-    ):
-        """
-        Solve manifold dynamics by implicit midpoint method.
-        Here the input X0, V0 are at the endpoint in last step,
-        X, V are the predicted endpoint in this step,
-        input F (the potential forces) and lamb (the constraint forces) are at the midpoint of last step,
-        and returned X_mid, V_mid, Energy, Force and lamb are all at the **midpoint**.
-        The X, V in the end point are updated **in-place** to the input variables.
-        Args:
-            X:
-            X0:
-            V:
-            V0:
-            F:
-            lamb:
-            func:
-            grad_func_:
-            func_args:
-            func_kwargs:
-            grad_func_args:
-            grad_func_kwargs:
-            masses:
-            atom_masks:
-            is_grad_func_contain_y:
-
-        Returns:
-
-        """
-        n_batch, n_atoms, n_dim = X.shape
-        # MAIN LOOP
-        is_converged = False
-        for i in range(self.max_proj_iter):
-            X_mid = 0.5 * (X0 + X)
-            V_mid = 0.5 * (V0 + V)
-            # update Jacobian & QR factor.
-            jac, y = self._jacobian(X_mid)  # (n_batch, n_constr, n_atoms, n_dim)
-            self._do_qr(jac)
-            # 1st forces eval
-            with th.set_grad_enabled(self.require_grad):
-                X_mid.requires_grad_(self.require_grad)
-                E_mid = func(X_mid, *func_args, **func_kwargs)
-                if is_grad_func_contain_y:
-                    F_mid = - grad_func_(X_mid, E_mid, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    F_mid = - grad_func_(X_mid, *grad_func_args, **grad_func_kwargs) * atom_masks
-            # residuals
-            f_constr = th.einsum('bijk, bi -> bjk', jac, lamb)
-            RX = X - X0 - V_mid * self.time_step
-            RV = V - V0 - (F_mid + f_constr) / masses * self.time_step * 9.64853329045427e-3
-            # check thres.
-            norm_X, norm_V, norm_s = th.linalg.norm(RX), th.linalg.norm(RV), th.linalg.norm(y)
-            if self.verbose > 0:
-                self.logger.info(
-                    f'{i} residuals X, V, constraints: {norm_X.item():.4e}, {norm_V.item():.4e}, {norm_s.item():.4e}'
-                )
-            if (norm_X < self.constr_thres) and (norm_V < self.constr_thres) and (norm_s < self.constr_thres):
-                is_converged = True
-                break
-
-            # update V & X by quasi-Newton
-            tinvR_y = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1) , upper=False)  # R^-T y : (n_batch, n_constr, 1)
-            d_lambda = (
-                    - 4./self.time_step * tinvR_y.squeeze(-1)
-                    + 2./self.time_step * th.einsum('bij, bi -> bj', self.Q, (self.sqrtM * RX).flatten(-2, -1))
-                    + th.einsum('bij, bi -> bj', self.Q, (self.sqrtM * (RV - 2*V_mid)).flatten(-2, -1))
-            )
-            d_lambda = 1./(self.time_step * 9.64853329045427e-3) * th.linalg.solve_triangular(self.R, d_lambda.unsqueeze(-1), upper=True).squeeze(-1)
-            ds = 4./self.time_step * self.negsqrtM * (self.Q @ tinvR_y).reshape(n_batch, n_atoms, n_dim)
-            dV = - ds - self._project1(RV) + 2./self.time_step * self._project_norm(RX)
-            dX = 0.5 * self.time_step * dV - RX
-            lamb.add_(d_lambda, alpha=1.)
-            X.add_(dX, alpha=1.)
-            V.add_(dV, alpha=1.)
-        if not is_converged:
-            self.logger.warning('Implicit midpoint method did not converge!')
-
-        return X_mid, V_mid, E_mid, F_mid, lamb

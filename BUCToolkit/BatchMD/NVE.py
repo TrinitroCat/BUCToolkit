@@ -80,6 +80,7 @@ class NVE(_BaseMD):
                 grad_func_,
                 grad_func_args,
                 grad_func_kwargs,
+                self.require_grad,
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)

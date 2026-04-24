@@ -13,6 +13,7 @@ import os
 import torch as th
 
 from BUCToolkit.BatchOptim._BaseOpt import _BaseOpt
+from BUCToolkit.utils.index_ops import indices_pairwise_dist, index_inner_product
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
@@ -115,9 +116,9 @@ class QN(_BaseOpt):
         """
         Override this method to implement X update algorithm.
         Args:
-            g: (n_batch, n_atom*3, 1), the gradient of X at this step
-            g_old: (n_batch, n_atom*3, 1), the gradient of X at last step
-            p: (n_batch, n_atom*3, 1), the update direction of X at last step
+            g: (n_batch, n_atom, 3), the gradient of X at this step
+            g_old: (n_batch, n_atom, 3), the gradient of X at last step
+            p: (n_batch, n_atom, 3), the update direction of X at last step
 
         Returns:
             p: th.Tensor, the new update direction of X.
@@ -135,6 +136,47 @@ class QN(_BaseOpt):
         else:
             raise NotImplementedError
 
+    @staticmethod
+    def _index_outer_prod(u: th.Tensor, v: th.Tensor, big_batch_scatter: th.Tensor):
+        """
+
+        Args:
+            u: (1, sumN, 3)
+            v: (1, sumN, 3)
+            big_batch_scatter:  (1, sumN * 3, 1)
+
+        Returns:
+
+        """
+        # skip check shape for this inner methods
+        _, sumN, n_dim = u.shape
+        u = u.reshape(sumN * n_dim, 1)
+        v = v.reshape(sumN * n_dim, 1)
+        coo, nzv, eid = indices_pairwise_dist(
+            u,
+            v,
+            big_batch_scatter,
+            big_batch_scatter,
+            None,
+            "dot",
+            None,
+            "gt",
+            False,
+            False,
+            True,
+            True,
+        )
+        # I know that coo are square matrix and the last one is the N-1
+        size = (coo[0, -1] + 1, coo[0, -1] + 1)
+        outerv = th.sparse_coo_tensor(
+            coo,
+            nzv,
+            size,
+            device=u.device,
+            is_coalesced=True
+        )
+        return outerv
+
     def _update_algo_param(
             self,
             select_mask: th.Tensor,
@@ -150,48 +192,64 @@ class QN(_BaseOpt):
 
         Returns: None
         """
-        #g = g.flatten(-2, -1).unsqueeze(-1).contiguous()
-        #g_old = g_old.flatten(-2, -1).unsqueeze(-1).contiguous()
-        #displace = displace.flatten(-2, -1).unsqueeze(-1).contiguous()
-
+        g_go = g - g_old
         if self.is_concat_X:
+            # whence H has shape of (1, sumN, n_dim, sumN, n_dim),
+            # selected to (1, N_unconverged, n_dim, N_unconverged, n_dim)
             H_inv_now = self.H_inv[:, select_mask][..., select_mask, :]
             Ident_now = self.Ident[:, select_mask][..., select_mask, :]
+            Ident_now_ = Ident_now.flatten(-2, -1).flatten(-3, -2)  # (1, sumN*D, sumN*D)
+            H_inv_now_ = H_inv_now.flatten(-2, -1).flatten(-3, -2)  # (1, sumN*D, sumN*D)
+            big_batch_scatter = th.repeat_interleave(batch_scatter_indices, self.n_dim)  # for flatten tensors
+            # A diagonal approximation of Powell damping.
+            diag_invH = th.diagonal(H_inv_now_, dim1=-2, dim2=-1).reciprocal_().reshape(1, -1, self.n_dim)  # (1, sumN, D)
+            ss = th.sum(index_inner_product(displace, diag_invH * displace, 1, batch_scatter_indices), dim=-1, keepdim=True)  # (1, B, 1)
+            sy = th.sum(index_inner_product(displace, g_go, 1, batch_scatter_indices), dim=-1, keepdim=True)
+            non_pos_deter_mask = (sy < 0.2 * ss)  # (1, B, 1)
+            if th.any(non_pos_deter_mask):
+                phi = (0.2 * ss - sy)/ss
+                phi.clamp_min_(0.)
+                g_go.addcmul_(phi.index_select(1, batch_scatter_indices), displace)
+                sy = th.sum(index_inner_product(displace, g_go, 1, batch_scatter_indices), dim=-1, keepdim=True)  # (1, B, 1)
+            # main update
+            gamma = (1 / (sy + 1e-20)).index_select(1, big_batch_scatter)  # (1, B*D, 1)
+            _dgo = self._index_outer_prod(displace, g_go, big_batch_scatter).to_dense()  # (B*D, B*D) in sparse COO
+            # TODO: Now applied dense metrix H_inv. Could be fully converted to sparse coo in future and use spmm. handling shape is complex.
+            #   now the dense scheme cost 1 GB memory for 64 samples with 85 atoms (float32) in a batch.
+            #   Tolerable, compared with common deep learning potential models.
+            I_gamma_dgo = th.addcmul(Ident_now_, gamma, _dgo, value=-1.)[0]
+            I_gamma_god = th.addcmul(Ident_now_, gamma, _dgo.mT, value=-1.)[0]
+            gdd = gamma * self._index_outer_prod(displace, displace, big_batch_scatter).to_dense()
+            th.addmm(gdd[0], I_gamma_dgo, H_inv_now_[0] @ I_gamma_god, out=H_inv_now_[0])
+            H_inv_now = H_inv_now_.reshape(H_inv_now.shape)
         else:
-            H_inv_now = self.H_inv[select_mask]
+            H_inv_now = self.H_inv[select_mask]  # simply: (N_unconverged, n_atom, n_dim, n_atom, n_dim)
             Ident_now = self.Ident[select_mask]
-
-        # update H_inv
-        g_go = g - g_old
-        # check & ensure the positive determination of BFGS Matrix
-        ss = th.sum(displace**2, dim=(-2, -1), keepdim=True)
-        sy = th.sum(displace * g_go, dim=(-2, -1), keepdim=True)
-        non_pos_deter_mask = (sy < 0.2 * ss)
-        # damped BFGS
-        if th.any(non_pos_deter_mask):
-            phi = (0.2 * ss - sy)/ss
-            phi = th.where(phi > 0., phi, 0.)
-            g_go = th.where(non_pos_deter_mask, g_go + phi * displace, g_go)
+            H_inv_now_ = H_inv_now.flatten(-2, -1).flatten(-3, -2)  # (B, A*D, A*D)
+            diag_invH = th.diagonal(H_inv_now_, dim1=-2, dim2=-1).reciprocal_().reshape(-1, self.n_atom, self.n_dim)  # (B, A*D)
+            ss = th.sum(displace * diag_invH * displace, dim=(-2, -1), keepdim=True)  # (B, 1, 1)
             sy = th.sum(displace * g_go, dim=(-2, -1), keepdim=True)
-        gamma = 1 / (sy + 1e-20)  # (n_batch, n_atom, 3) * (n_batch, n_atom, 3) -sum-> (n_batch, 1, 1), 1e-20 to avoid 1/0
-        gamma = gamma.reshape(-1, 1, 1, 1, 1)
-        # BFGS Scheme:
-        # ((n_batch, n_atom*n_dim, n_atom*n_dim) - (n_batch, 1, 1) * (n_batch, n_atom*n_dim, 1)@(n_batch, 1, n_atom*n_dim)) -> (B, AD, AD)
-        # (B, AD, AD) @ (B, AD, AD)
-        # ((B, A, D, A, D) - (B, 1, 1, 1, 1) * (B, A, D, A, D)) @ (B, A, D, A, D) -(-2, -1)-> (B, A, D)
-
-        '''self.H_inv = (
-                (self.Ident - gamma * displace @ g_go.mT) @ H_inv_now @ (self.Ident - gamma * g_go @ displace.mT) + gamma * displace @ displace.mT
-        )'''
-        H_inv_now = th.einsum(
-            'mijkl, mklqr -> mijqr',
-            th.einsum(
+            non_pos_deter_mask = (sy < 0.2 * ss)  # (B, 1, 1)
+            if th.any(non_pos_deter_mask):
+                phi = (0.2 * ss - sy) / ss
+                phi.clamp_min_(0.)
+                g_go.addcmul_(phi, displace)
+                sy = th.sum(displace * g_go, dim=(-2, -1), keepdim=True)  # (B, 1, 1)
+            gamma = 1 / (sy + 1e-20)  # (n_batch, n_atom, 3) * (n_batch, n_atom, 3) -sum-> (n_batch, 1, 1), 1e-20 to avoid 1/0
+            gamma = gamma.reshape(-1, 1, 1, 1, 1)
+            # BFGS Scheme:
+            # ((n_batch, n_atom*n_dim, n_atom*n_dim) - (n_batch, 1, 1) * (n_batch, n_atom*n_dim, 1)@(n_batch, 1, n_atom*n_dim)) -> (B, AD, AD)
+            # (B, AD, AD) @ (B, AD, AD)
+            # ((B, A, D, A, D) - (B, 1, 1, 1, 1) * (B, A, D, A, D)) @ (B, A, D, A, D) -(-2, -1)-> (B, A, D)
+            H_inv_now = th.einsum(
                 'mijkl, mklqr -> mijqr',
-                (Ident_now - gamma * th.einsum('ijk, ilm-> ijklm', displace, g_go)),
-                H_inv_now
-            ),
-            (Ident_now - gamma * th.einsum('ijk, ilm-> ijklm', g_go, displace))
-        ) + gamma * th.einsum('ijk, ilm-> ijklm', displace, displace)
+                th.einsum(
+                    'mijkl, mklqr -> mijqr',
+                    (Ident_now - gamma * th.einsum('ijk, ilm-> ijklm', displace, g_go)),
+                    H_inv_now
+                ),
+                (Ident_now - gamma * th.einsum('ijk, ilm-> ijklm', g_go, displace))
+            ) + gamma * th.einsum('ijk, ilm-> ijklm', displace, displace)
 
         if self.is_concat_X:
             tmp = self.H_inv[:, select_mask]

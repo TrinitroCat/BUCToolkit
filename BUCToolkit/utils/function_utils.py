@@ -116,7 +116,7 @@ class _BaseWrapper(ABC):
         Returns: None
 
         """
-        if hasattr(self._model, 'eval'):
+        if hasattr(self._model, 'eval') and callable(self._model.eval):
             self._model.eval()
 
 
@@ -145,3 +145,20 @@ def preload_func(func: Callable, device: Any) -> Callable:
             func.zero_grad()
 
     return func
+
+def compare_tensors(X1: th.Tensor, X2: th.Tensor):
+    """Compare two tensors. Return True if they are the same, False otherwise."""
+    char1 = (X1.untyped_storage().data_ptr(),
+             X1.storage_offset(),
+             tuple(X1.shape),
+             tuple(X1.stride()),
+             X1.device,
+             X1.dtype)
+    char2 = (X2.untyped_storage().data_ptr(),
+             X2.storage_offset(),
+             tuple(X2.shape),
+             tuple(X2.stride()),
+             X2.device,
+             X2.dtype)
+
+    return char1 == char2

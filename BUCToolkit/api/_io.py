@@ -24,7 +24,7 @@ from BUCToolkit.utils._CheckModules import check_module
 from BUCToolkit.cli.print_logo import generate_display_art
 from BUCToolkit.utils.setup_loggers import has_any_handler
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
-from BUCToolkit.utils.function_utils import _BaseWrapper
+from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 from BUCToolkit.BatchStructures import Batch
 
@@ -491,23 +491,6 @@ class _CONFIGS(object):
             return
         self._PREDICTIONS_SAVE_FILE = value
         self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
-
-def compare_tensors(X1: th.Tensor, X2: th.Tensor):
-    """Compare two tensors. Return True if they are the same, False otherwise."""
-    char1 = (X1.untyped_storage().data_ptr(),
-             X1.storage_offset(),
-             tuple(X1.shape),
-             tuple(X1.stride()),
-             X1.device,
-             X1.dtype)
-    char2 = (X2.untyped_storage().data_ptr(),
-             X2.storage_offset(),
-             tuple(X2.shape),
-             tuple(X2.stride()),
-             X2.device,
-             X2.dtype)
-
-    return char1 == char2
 
 
 class _Model_Wrapper_pyg(_BaseWrapper):

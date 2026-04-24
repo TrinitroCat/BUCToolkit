@@ -106,17 +106,18 @@ class BiasedMD(NVT):
             func: Any | nn.Module,
             X: th.Tensor,
             Element_list: List[List[str]] | List[List[int]],
+            Cell_vector: th.Tensor | None = None,
             V_init: th.Tensor | None = None,
             grad_func: Any | nn.Module = None,
-            func_args: Tuple|List = tuple(),
+            func_args: Tuple = tuple(),
             func_kwargs: Dict | None = None,
-            grad_func_args: Tuple|List = tuple(),
+            grad_func_args: Tuple = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
-            is_fix_mass_center: bool = False
+            move_to_center_freq: int = -1
     ) -> None:
         """
 
@@ -124,6 +125,7 @@ class BiasedMD(NVT):
             func:
             X:
             Element_list:
+            Cell_vector,
             V_init:
             grad_func:
             func_args:
@@ -134,7 +136,7 @@ class BiasedMD(NVT):
             require_grad:
             batch_indices:
             fixed_atom_tensor:
-            is_fix_mass_center:
+            move_to_center_freq:
 
         Returns:
 
@@ -173,6 +175,7 @@ class BiasedMD(NVT):
                 wrapped_func,
                 X,
                 Element_list,
+                Cell_vector,
                 V_init,
                 wrapped_grad_func,
                 wrapped_args,
@@ -183,7 +186,7 @@ class BiasedMD(NVT):
                 require_grad,
                 batch_indices,
                 fixed_atom_tensor,
-                is_fix_mass_center
+                move_to_center_freq
             )
 
             return res

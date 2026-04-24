@@ -18,12 +18,12 @@ from torch import nn
 from BUCToolkit.BatchOptim._utils._line_search import LineSearch
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils.function_utils import preload_func
-from BUCToolkit.utils.setup_loggers import BaseIO
+from BUCToolkit.Bases.BaseMotion import BaseMotion
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
 
 
-class _BaseOpt(BaseIO, ABC):
+class _BaseOpt(BaseMotion, ABC):
     def __init__(
             self,
             iter_scheme: str,
@@ -211,29 +211,34 @@ class _BaseOpt(BaseIO, ABC):
             if n_batch != 1:
                 raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
             if isinstance(batch_indices, (th.Tensor, np.ndarray)):
+                self.batch_tensor = batch_indices
                 batch_indices = batch_indices.tolist()
-            elif not isinstance(batch_indices, (Tuple, List)):
+            elif not isinstance(batch_indices, (List, Tuple)):
                 raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
-                                f'It must be Sequence[int] | th.Tensor | np.ndarray | None')
+                                f'It must be List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None')
             for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            n_true_batch = len(batch_indices)   # the true batch size for irregular batches
             batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)
+            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)  # the tensor version of batch_indices which is a List.
             self.batch_scatter = th.repeat_interleave(
                 th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
                 self.batch_tensor,
                 dim=0
-            )
+            )  # scatter mask of the int tensor with the same shape as X.shape[1], which the data in one batch have one index.
+            n_true_batch = len(batch_indices)   # the true batch size for irregular batches
             # steplength
             steplength_tensor = th.full(
                 (1, n_true_batch, 1), fill_value=self.steplength, device=self.device, dtype=th.float32
             )  # (n_batch, sumN, 1), initial step length
+            batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
         else:
             n_true_batch = n_batch
             # steplength
             steplength_tensor = th.full(
                 (n_batch, 1, 1), fill_value=self.steplength, device=self.device, dtype=th.float32
             )  # (n_batch, sumN, 1), initial step length
+            batch_tensor_indx_cache = None
+            batch_slice_indx = None
+
         # initialize vars
         self.n_true_batch = n_true_batch
         maxiter = self.maxiter
@@ -243,26 +248,15 @@ class _BaseOpt(BaseIO, ABC):
         self.converge_mask = None  # (n_true_batch, )
         X_grad_old = th.full_like(X, 1e-20, dtype=th.float32, device=self.device)  # like X, initial old grad.
         displace = th.full_like(X_grad_old, 0.)  # like X, the X displacement
-        # handle grad func
-        if grad_func is None:
-            is_grad_func_contain_y = True
-            require_grad = True
-            def grad_func_(y, x, grad_shape=None):
-                if grad_shape is None:
-                    grad_shape = th.ones_like(y)
-                _g = th.autograd.grad(y, x, grad_shape)
-                return _g[0]
-        else:
-            grad_func_ = grad_func
+        # grad_func
+        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(
+            grad_func,
+            is_grad_func_contain_y,
+            require_grad,
+        )
         self._line_search.require_grad = require_grad  # set linear search
         # Selective dyamics
-        if fixed_atom_tensor is None:
-            atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
-        #atom_masks = atom_masks.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
+        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)  # has the same shape as X
         # other check
         if (not isinstance(maxiter, int)) or (maxiter <= 0):
             raise ValueError(f'Invalid value of maxiter: {maxiter}. It would be an integer greater than 0.')
@@ -307,7 +301,7 @@ class _BaseOpt(BaseIO, ABC):
                 self.is_concat_X = (batch_indices is not None)
                 # calc. grad
                 if is_grad_func_contain_y:
-                    X_grad = grad_func_(energies, X, *grad_func_args, **grad_func_kwargs)
+                    X_grad = grad_func_(X, energies, *grad_func_args, **grad_func_kwargs)
                 else:
                     X_grad = grad_func_(X, *grad_func_args, **grad_func_kwargs)
                 if X_grad.shape != X.shape:
@@ -320,7 +314,6 @@ class _BaseOpt(BaseIO, ABC):
             # Section: initialize custom algorithm state.
             self.initialize_algo_param()
             # cache for dynamically changed batch indices due to convergence, avoiding reallocate mem.
-            batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
             for numit in range(maxiter):
                 # Calc. Criteria
                 E_diff = energies - energies_old
@@ -414,6 +407,7 @@ class _BaseOpt(BaseIO, ABC):
                         )
                     else:
                         select_mask = ~converge_check
+                        select_mask_short = select_mask
                         energies_ = energies[select_mask]
                         X_grad_ = X_grad[select_mask, ...]
                         X_grad_old_ = X_grad_old[select_mask, ...]
@@ -526,13 +520,21 @@ class _BaseOpt(BaseIO, ABC):
                 # update old grad
                 X_grad_old_ = X_grad_  # (n_batch, n_atom, n_dim)
                 # calc. new energy & grad.
-                with th.set_grad_enabled(require_grad):
-                    X_.requires_grad_(require_grad)
-                    energies_: th.Tensor = func(X_, *func_args_, **func_kwargs_)
-                    if is_grad_func_contain_y:
-                        X_grad_ = grad_func_(energies_, X_, *grad_func_args_, **grad_func_kwargs_)
-                    else:
-                        X_grad_ = grad_func_(X_, *grad_func_args_, **grad_func_kwargs_)
+                if not self._line_search.HAS_GRAD:
+                    energies_, X_grad_ = self._calc_y_grad(
+                        X_,
+                        func,
+                        func_args_,
+                        func_kwargs_,
+                        grad_func_,
+                        grad_func_args_,
+                        grad_func_kwargs_,
+                        require_grad,
+                        is_grad_func_contain_y
+                    )
+                else:
+                    energies_ = self._line_search.STORE_Y
+                    X_grad_ = self._line_search.STORE_GRAD
                 energies_ = energies_.detach()
                 X_grad_ = X_grad_.detach()
                 X_grad_.mul_(atom_masks_)
@@ -554,6 +556,7 @@ class _BaseOpt(BaseIO, ABC):
 
                     else:
                         select_indices = th.where(select_mask)[0]
+                        select_indices_short = th.where(select_mask_short)[0]
                         energies.index_copy_(0, select_indices, energies_)
                         X_grad.index_copy_(0, select_indices, X_grad_)
                         X_grad_old.index_copy_(0, select_indices, X_grad_old_)
@@ -563,14 +566,15 @@ class _BaseOpt(BaseIO, ABC):
                         #atom_masks.index_copy_(0, select_indices, atom_masks_)
                         #steplength_tensor.index_copy_(0, select_indices, steplength_)
                 else:
-                    #select_indices = th.where(select_mask)[0]
-                    #select_indices_short = th.where(select_mask_short)[0]
+                    select_indices = th.where(select_mask)[0]
+                    select_indices_short = th.where(select_mask_short)[0]
                     energies = energies_
                     X_grad = X_grad_
                     X_grad_old = X_grad_old_
                     p = p_
                     X = X_
                     displace = displace_
+                    #steplength_tensor = steplength_
                 # Section: update batch information of algos if necessary
                 self._update_algo_batches(select_indices, select_indices_short)
                 # Check NaN

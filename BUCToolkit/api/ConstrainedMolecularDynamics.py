@@ -14,7 +14,7 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.BatchMD.constrained_md import ConstrNVT, ConstrNVE
+from BUCToolkit.BatchMD import ConstrNVT, ConstrNVE
 from BUCToolkit.utils._CheckModules import check_module
 from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
