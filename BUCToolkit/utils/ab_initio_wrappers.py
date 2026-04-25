@@ -57,7 +57,7 @@ class VASP_Model(_BaseWrapper):
         self.step = 0  # steps of VASP static calculation
         self.is_reuse_WAVECAR = bool(is_reuse_WAVECAR)
         self.data: bt.Structures | None = None  # data storage container
-        self.X = None
+        self._X_check_cache = None  # used for check the consistency of input X in `Energy` and `Grad`, ensuring the correctness of F_cache
         self.F_tensor: th.Tensor | None = None  # A cache
 
         # initialize 1st step
@@ -110,16 +110,16 @@ class VASP_Model(_BaseWrapper):
 
     def Energy(self, X) -> th.Tensor:
 
-        if self.X is None:
+        if self._X_check_cache is None:
             # first step
             self._submit_task()
-            self.X = X
+            self._X_check_cache = X
 
         else:
             self.data.Coords[-1] = X.squeeze(0).numpy(force=True)  # read updated X
             self.data[-1].write2text(f"{self.input_path}/{self.step}", file_format='POSCAR', file_name_list=['POSCAR'], n_core=1)
             self._submit_task()
-            self.X = X
+            self._X_check_cache = X
 
         E_tensor = th.as_tensor(self.data.Energies[-1:], device=X.device)
         self.F_tensor = th.as_tensor(self.data.Forces[-1], device=X.device).unsqueeze(0)
@@ -128,7 +128,7 @@ class VASP_Model(_BaseWrapper):
 
     def Grad(self, X) -> th.Tensor:
         origin_shape = X.shape
-        if self.X is None or (not compare_tensors(self.X, X)):
+        if self._X_check_cache is None or (not compare_tensors(self._X_check_cache, X)):
             self.F_tensor = None
 
         if self.F_tensor is None:

@@ -207,6 +207,7 @@ class _BaseOpt(BaseMotion, ABC):
             n_batch, n_atom, n_dim = X.shape
         else:
             raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
+
         if batch_indices is not None:
             if n_batch != 1:
                 raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')

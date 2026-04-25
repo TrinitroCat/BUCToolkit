@@ -19,7 +19,7 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARR
 from BUCToolkit.utils.grad_functions import bjvp, bhvp
 
 
-class _BaseConstrMD(_BaseMD, BaseConstr):
+class _BaseConstrMD(_BaseMD):
     """
     Constrained Base Dynamics
 
@@ -71,8 +71,7 @@ class _BaseConstrMD(_BaseMD, BaseConstr):
             device: str | th.device = 'cpu',
             verbose: int = 2
     ):
-        BaseConstr.__init__(
-            self,
+        self._constr = BaseConstr(
             constr_func,
             constr_val,
             constr_threshold,
@@ -90,6 +89,36 @@ class _BaseConstrMD(_BaseMD, BaseConstr):
             verbose,
             is_compile=False,
         )
+
+    def __getattr__(self, name):
+        """
+        Do a proxy that transmits methods in BaseConstr.
+
+        """
+        if '_constr' in self.__dict__:
+            constr = self._constr
+            if hasattr(constr, name):
+                return getattr(constr, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    # I should synchronize the homonymous attr manually.
+    @property
+    def time_step(self):
+        return self.__dict__['time_step']
+
+    @time_step.setter
+    def time_step(self, value):
+        self.__dict__['time_step'] = value
+        self._constr.time_step = value
+
+    @property
+    def time_now(self):
+        return self.__dict__['time_now']
+
+    @time_now.setter
+    def time_now(self, value):
+        self.__dict__['time_now'] = value
+        self._constr.time_now = value
 
     def initialize(
             self,
@@ -109,11 +138,11 @@ class _BaseConstrMD(_BaseMD, BaseConstr):
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
     ):
-        self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
-        self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
+        self._constr.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
+        self._constr.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
         _y_check = th.vmap(self.constr_func)(X)
         if self._lazy_calc_constr_val:
-            self.constr_val_now = _y_check
+            self._constr.constr_val_now = _y_check
         # check constr_val shape
         if _y_check.shape != self.constr_val_now.shape:
             raise RuntimeError(
@@ -153,4 +182,4 @@ class _BaseConstrMD(_BaseMD, BaseConstr):
             self.EK_TARGET = (self.free_degree / 2.) * 8.617333262145e-5 * self.T_init
         # calc. constr. intensity
         n_batch, n_constr, _ = self.R.shape
-        self.lamb = th.zeros((n_batch, n_constr), device=self.device)
+        self._constr.lamb = th.zeros((n_batch, n_constr), device=self.device)

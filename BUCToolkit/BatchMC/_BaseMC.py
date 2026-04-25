@@ -284,12 +284,7 @@ class _BaseMC(BaseMotion):
         is_fix_mass_center = (move_to_center_freq > 0)
 
         # Selective dyamics
-        if fixed_atom_tensor is None:
-            self.atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            self.atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
+        self.atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
         # other check
         if (not isinstance(maxiter, int)) or (maxiter <= 0):
             raise ValueError(f'Invalid value of maxiter: {maxiter}. It would be an integer greater than 0.')
@@ -618,12 +613,7 @@ class _BaseMC(BaseMotion):
         is_fix_mass_center = (move_to_center_freq > 0)
 
         # Selective dynamics
-        if fixed_atom_tensor is None:
-            self.atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            self.atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
+        self.atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
         self.fixed_indices = th.where(th.any(self.atom_masks, dim=-1))[1]  # COO sumN or n_atom dim
         # other check
         if (not isinstance(maxiter, int)) or (maxiter <= 0):

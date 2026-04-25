@@ -17,7 +17,7 @@ from BUCToolkit.cli.main import launch_task
 from BUCToolkit.BatchStructures import read_md_traj, read_opt_structures, read_mc_traj
 from BUCToolkit.api._io import _Model_Wrapper_pyg
 from BUCToolkit.BatchMD import NVE, NVT
-from BUCToolkit.BatchMD.constrained_md import ConstrNVE, ConstrNVT
+from BUCToolkit.BatchMD import ConstrNVE, ConstrNVT
 from BUCToolkit.BatchOptim import QN, CG, FIRE, Frequency
 from BUCToolkit.BatchMC import MMC
 from BUCToolkit.utils.AtomicNumber2Properties import MASS

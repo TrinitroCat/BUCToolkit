@@ -16,6 +16,7 @@ from torch import nn
 
 from BUCToolkit.utils._Element_info import MASS, N_MASS
 from .._BaseOpt import _BaseOpt
+from BUCToolkit.Bases.BaseConstraints import BaseConstr
 from BUCToolkit.utils.index_ops import index_inner_product
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -308,3 +309,202 @@ class FIRE(_BaseOpt):
 
         return _results
 
+
+class ConstrFIRE(FIRE):
+    """
+    FIRE optimization under constraints
+    """
+    def __init__(
+            self,
+            E_threshold: float = 1e-3,
+            F_threshold: float = 0.05,
+            maxiter: int = 100,
+            steplength: float = 1.,
+            constr_func: Callable | None = None,
+            constr_val: th.Tensor | None = None,
+            constr_threshold: float = 1e-5,
+            alpha: float = 0.1,
+            alpha_fac: float = 0.99,
+            fac_inc: float = 1.1,
+            fac_dec: float = 0.5,
+            N_min: int = 5,
+            output_file: str | None = None,
+            device: str | th.device = 'cpu',
+            verbose: int = 2,
+            _hold_samples: bool = False,
+            **kwargs
+    ):
+        if constr_val is not None:
+            try:
+                constr_val = th.as_tensor(constr_val)
+            except Exception as e:
+                raise RuntimeError(
+                    f"For constraint FIRE, only the Tensor format constr_val is allowed.\n"
+                    f"An error occurred when trying to convert {constr_val} to Tensor: {e}"
+                )
+
+        self._constr = BaseConstr(
+            constr_func,
+            constr_val,
+            constr_threshold,
+            device,
+            verbose
+        )
+        super().__init__(
+            E_threshold,
+            F_threshold,
+            maxiter,
+            steplength,
+            alpha,
+            alpha_fac,
+            fac_inc,
+            fac_dec,
+            N_min,
+            output_file,
+            device,
+            verbose,
+        )
+        self._zero_placeholder = th.scalar_tensor(0., device=self.device)
+
+    def __getattr__(self, name):
+        """
+        Do a proxy that transmits methods in BaseConstr.
+
+        """
+        if '_constr' in self.__dict__:
+            constr = self._constr
+            if hasattr(constr, name):
+                return getattr(constr, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def _update_direction(
+            self,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
+            X: th.Tensor,
+            batch_scatter_indices: th.Tensor | None,
+    ) -> th.Tensor:
+        self.v_: th.Tensor
+        self.v_.addcdiv_(g * self.t_, self.masses_, value=-9.64853329045427e-3)
+        # trick: not really return the displacement, but return 0. as a placeholder
+        # instead, update X in-place
+        X.addcmul_(self.v_, self.t_)
+        self._project2(X)
+        self.v_.copy_(self._project1(self.v_))
+
+        return self._zero_placeholder
+
+    def _calc_y_grad(
+            self,
+            X: th.Tensor,
+            func: Callable[[th.Tensor, Any, ...], th.Tensor],
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_: Callable[[th.Tensor, Any, ...], th.Tensor],
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            require_grad: bool,
+            is_grad_func_contain_y: bool,
+    ) -> Tuple[th.Tensor, th.Tensor]:
+        """
+        Must override it to apply Riemann gradient instead of common gradient to reach the correct convergence check.
+        """
+        y, g = super()._calc_y_grad(
+            X,
+            func,
+            func_args,
+            func_kwargs,
+            grad_func_,
+            grad_func_args,
+            grad_func_kwargs,
+            require_grad,
+            is_grad_func_contain_y,
+        )
+        g.copy_(self._project1(g))
+
+        return y, g
+
+    def run(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            grad_func: Any | nn.Module = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            grad_func_args: Sequence = tuple(),
+            grad_func_kwargs: Dict | None = None,
+            is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
+            output_grad: bool = False,
+            fixed_atom_tensor: Optional[th.Tensor] = None,
+            batch_indices: None | List[int] | Tuple[int, ...] | th.Tensor = None,
+            elements: List[List[str | int]] | None = None,
+    ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        r"""
+        Run the Conjugate gradient
+
+        Args:
+            func: the main function of instantiated torch.nn.Module class.
+            X: Tensor[n_batch, n_atom, 3], the optimization variables (e.g., atom coordinates) that input to func.
+            grad_func: user-defined function that grad_func(X, ...) returns the func's gradient at X. if None, grad_func(X, ...) = th.autograd.grad(func(X, ...), X).
+            func_args: optional, other input of func.
+            func_kwargs: optional, other input of func.
+            grad_func_args: optional, other input of grad_func.
+            grad_func_kwargs: optional, other input of grad_func.
+            is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X i.e., grad = grad_func(X, y, ...), else grad = grad_func(X, ...)
+            require_grad: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs) calculation.
+            output_grad: bool, whether output gradient of last step.
+            fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed. An integer tensor with the same shape as X where 1 is for free and 0 is for fixation.
+            batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
+                the format of batch_indices is the same as `split_size_or_sections` in torch.split:
+                batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
+            elements: Optional[List[List[str | int]]], the Element of each given atom in X.
+
+        Returns:
+            min func: Tensor(n_batch, ), the minimum of func.
+            argmin func: Tensor(X.shape), the X corresponds to min func.
+            grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
+        """
+        # manage Atomic Type & Masses
+        if len(X.shape) == 2:
+            X = X.unsqueeze(0)
+        elif len(X.shape) != 3:
+            raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
+        X = X.to(self.device)
+        if elements is None:
+            self.masses = th.ones_like(X)
+        elif isinstance(elements, Sequence):
+            masses = list()
+            for _Elem in elements:
+                masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
+            masses = th.tensor(masses, dtype=th.float32, device=self.device)
+            self.masses = masses.unsqueeze(-1).expand_as(X).clone()  # (n_batch, n_atom, n_dim)
+        else:
+            raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
+        self.v = th.zeros_like(X, device=self.device)
+        self._zero_placeholder = self._zero_placeholder.broadcast_to(X.shape)
+
+        self.initialize(
+            func,
+            X,
+            None,
+            self.masses,
+        )  # other arguments are not used at all in `initialize`, hence simply using the defaults.
+
+        _results = super().run(
+            func,
+            X,
+            grad_func,
+            func_args,
+            func_kwargs,
+            grad_func_args,
+            grad_func_kwargs,
+            is_grad_func_contain_y=is_grad_func_contain_y,
+            require_grad=require_grad,
+            output_grad=output_grad,
+            fixed_atom_tensor=fixed_atom_tensor,
+            batch_indices=batch_indices,
+        )
+
+        return _results

@@ -85,7 +85,7 @@ class _BaseWrapper(ABC):
     def __init__(self, model):
         self._model = model
         self.forces = None
-        self.X = None
+        self._X_check_cache = None
 
     @abstractmethod
     def Energy(self, *args, **kwargs) -> th.Tensor:
