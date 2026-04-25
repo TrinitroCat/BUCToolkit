@@ -17,15 +17,33 @@ from BUCToolkit.Bases.BaseMotion import BaseIO
 
 class BaseConstr(BaseIO):
     """
-    Base Constraints used for constraints MD or optimizations
+    Base Constraints used for constraints MD or optimizations.
+    It can be combined into any normal gradient-based algorithms by applying `project1` to gradient or any other tangent space vectors,
+     and `project2` as a retraction mapping to coordinates or any other vectors on the manifold.
+
+     I strongly suggest that using combination with proxy instead of inheritance when it is applied in other class.
+     e.g., define following method in the class with aligning `self._constr = BaseConstr(...)` in the self.__init__ method.
+     ```python
+        def __getattr__(self, name):
+            if '_constr' in self.__dict__:
+                constr = self._constr
+                if hasattr(constr, name):
+                    return getattr(constr, name)
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    ```
 
     Args:
-        constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k. It takes one or more arguments, one of which must be a Tensor, and returns one Tensor with shape (k, ). `None` for identity function. see example below.
-        constr_val: Callable[th.Tensor[1], th.Tensor] | th.Tensor, the constraint value of `constr_func`, i.e., constraints are `constr_func(X) = constr_val`.
-        By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor, it can be set to the time-dependent constraints.
+        constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k.
+            It takes one or more arguments, one of which must be a Tensor, and returns one Tensor with shape (k, ).
+            `None` for constant function that always return [0., ]. It should support auto-gradient ops. see example below.
+        constr_val: Callable[th.Tensor[1], th.Tensor] | th.Tensor, the constraint value of `constr_func`,
+            i.e., constraints are `constr_func(X) = constr_val`.
+            By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor,
+            it can be set to the time-dependent constraints.
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
         device: str|torch.device, device that program rum on.
-        verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+        verbose: int, control the detailed degree of output information.
+            0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
 
     Examples for constrains:
         def constr_func(X):
@@ -66,7 +84,7 @@ class BaseConstr(BaseIO):
         self.time_now = th.scalar_tensor(0., device=device)
         self.is_const_constr = False
         self.constr_val_func_raw = None
-        self.time_step = 0.
+        self.time_step = 1.
 
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
@@ -96,16 +114,18 @@ class BaseConstr(BaseIO):
         self.constr_thres = constr_threshold
         self.lamb = None  # constr force, i.e., the mu of Lagrange multipler
 
+        self._X_qr_cache = None  # check the consistency of X in project1, ensuring it is the new tangent space projection
+
         super().__init__()
-        #self.init_logger('Main.Constraints'), Do NOT initialize logger, because BaseConstr will be never independently instantiated.
+        self.init_logger('Main.Constraints')
         self.verbose = int(verbose)
 
     def initialize(
             self,
             func: Any | nn.Module,
             X: th.Tensor,
-            Element_list: List[List[str]] | List[List[int]],
-            masses: th.Tensor,
+            Element_list: List[List[str]] | List[List[int]] | None,
+            masses: th.Tensor | None,
             V_init: th.Tensor | None = None,
             grad_func: Any | nn.Module = None,
             func_args: Sequence = tuple(),
@@ -118,6 +138,7 @@ class BaseConstr(BaseIO):
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
     ):
+        if masses is None: masses = th.ones_like(X)
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
         _y_check = th.vmap(self.constr_func)(X)
@@ -236,6 +257,12 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = X.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
+        # check consistency
+        if (self._X_qr_cache is None) or (not th.allclose(X, self._X_qr_cache)):
+            jac, y = self._jacobian(X)
+            self._do_qr(jac)
+            self._X_qr_cache = X.clone()
+
         # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
         Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
         Px = (sqrtM * X).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
@@ -263,6 +290,12 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = X.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
+        # check consistency
+        if (self._X_qr_cache is None) or (not th.allclose(X, self._X_qr_cache)):
+            jac, y = self._jacobian(X)
+            self._do_qr(jac)
+            self._X_qr_cache = X
+
         # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
         Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
         Px = (sqrtM * X).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
@@ -289,14 +322,15 @@ class BaseConstr(BaseIO):
             # update Jacobian
             jac, y = self._jacobian(X)
             # print
-            constr_err = th.max(th.abs(y)).item()
+            constr_err = th.max(th.abs(y))
             if self.verbose > 0:
                 self.logger.info(f'{i: < 3d} Constraint errors are now: {constr_err:.4e}')
             # threshold
-            if constr_err < self.constr_thres:
+            if th.all(constr_err < self.constr_thres):
                 # constr. forces lambda
                 Fc = th.linalg.solve_triangular(self.R, _lamb, upper=True)
                 Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
+                self._X_qr_cache = X.clone()
                 return Fc
             # QR factor.
             self._do_qr(jac)
@@ -316,6 +350,7 @@ class BaseConstr(BaseIO):
         #   Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
         ######################
         Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
+        self._X_qr_cache = X.clone()
 
         return Fc
 

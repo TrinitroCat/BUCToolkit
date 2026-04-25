@@ -119,7 +119,7 @@ class BaseMotion(BaseIO):
     ):
         """
         normalize format of atom_masks
-        Returns:
+        Returns: the standardized atom_masks
 
         """
         if fixed_atom_tensor is None:
@@ -172,7 +172,7 @@ class BaseMotion(BaseIO):
             n_batch: the length of 1st dimension of X.
             device: torch device
 
-        Returns:
+        Returns: n_true_batch, batch_tensor, batch_scatter, batch_slice_indx;
             n_true_batch: the true batch size
             batch_tensor: the batch_indices in torch.Tensor format
             batch_scatter: the batch indices in the form of Tensor[0, 0, 0, ..., 1, 1, ..., N - 1]
