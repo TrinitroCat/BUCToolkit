@@ -420,7 +420,7 @@ class _BaseMD(BaseMotion):
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
 
-        n_true_batch, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
             batch_indices, n_batch, device=self.device
         )
         self.scatter_dim_out_size = self.batch_scatter.max().item() + 1
@@ -846,7 +846,7 @@ class _BaseMD(BaseMotion):
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
         # Check batch indices
-        n_true_batch, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
             batch_indices, n_batch, device=self.device
         )
         self.scatter_dim_out_size = self.batch_scatter.max().item() + 1
