@@ -174,6 +174,7 @@ class BaseMotion(BaseIO):
 
         Returns: n_true_batch, batch_tensor, batch_scatter, batch_slice_indx;
             n_true_batch: the true batch size
+            batch_indices: the batch_indices in List format
             batch_tensor: the batch_indices in torch.Tensor format
             batch_scatter: the batch indices in the form of Tensor[0, 0, 0, ..., 1, 1, ..., N - 1]
             batch_slice_indx: the batch indices in the form of ptr List[0, n_0, n_0 + n_1, ..., \sum n_i]
@@ -201,7 +202,7 @@ class BaseMotion(BaseIO):
             batch_scatter = None
             batch_slice_indx = None
 
-        return n_true_batch, batch_tensor, batch_scatter, batch_slice_indx
+        return n_true_batch, batch_indices, batch_tensor, batch_scatter, batch_slice_indx
 
     def _calc_EF(
             self,

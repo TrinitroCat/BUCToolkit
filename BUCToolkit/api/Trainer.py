@@ -90,7 +90,7 @@ class Trainer(_CONFIGS):
         # io
         self.SAVE_CHK = bool(trn_config.get('SAVE_CHK', False))
         if not self.SAVE_CHK:
-            self.logger.warnings(
+            self.logger.warning(
                 f"WARNING: The model is training but NO CHECKPOINT FILE WILL BE SAVED. "
                 f"I HOPE YOU KNOW WHAT YOU ARE DOING!!!"
             )

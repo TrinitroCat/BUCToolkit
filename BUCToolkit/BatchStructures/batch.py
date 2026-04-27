@@ -254,3 +254,11 @@ class Batch(Data):
             return int(self.batch.max()) + 1
         else:
             raise ValueError
+
+    @property
+    def batch_size(self) -> int:
+        r"""Alias for :obj:`num_graphs`."""
+        return self.num_graphs
+
+    def __len__(self) -> int:
+        return self.num_graphs
