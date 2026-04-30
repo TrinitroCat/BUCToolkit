@@ -564,7 +564,7 @@ class CreatePygData:
         else:
             if self.verbose: print(f'Converting ase Atoms to pyg Batch in parallel with {n_core} cores...')
             _para = jb.Parallel(n_jobs=n_core, verbose=self.verbose)
-            data_list: List | None = _para(jb.delayed(self.single_ase2data)(_atom) for _atom in atom_list)
+            data_list: List | None = _para(jb.delayed(CreatePygData.single_ase2data)(_atom) for _atom in atom_list)
         if data_list is None: raise RuntimeError('Occurred None data.')
 
         if self.verbose: print('Done.')

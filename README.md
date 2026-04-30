@@ -11,6 +11,7 @@
     - [Installation from the Source Codes](#installation-from-the-source-codes)
   - [Usage](#usage)
     - [Project Structure](#project-structure)
+    - [Unit Convention](#unit-convention)
     - [Using as a Python Package](#using-as-a-python-package)
     - [Using as an Executable Program](#using-as-an-executable-program)
     - [Input File Template](#input-file-template)
@@ -19,6 +20,7 @@
     - [Flexible Function Interfaces](#flexible-function-interfaces)
     - [Highly Customizable Algorithms](#highly-customizable-algorithms)
     - [Batch Parallelism Scheme](#batch-parallelism-scheme)
+    - [Powerful Constraints Solver by Auto-gradient](#powerful-constraints-solver-by-auto-gradient)
   - [Contact Us](#contact-us)
   - [License](#license)
 
@@ -95,6 +97,7 @@ BUCToolkit
 |   |-- Trainer.py
 |   `-- VibrationAnalysis.py
 |-- cli/...
+|-- Bases/...
 |-- BatchGenerate/...
 |-- BatchMC/...
 |-- BatchMD/...
@@ -104,6 +107,16 @@ BUCToolkit
 |-- utils/...
 `-- _version.py
 ```
+
+### Unit Convention
+BUCToolkit does not provide automatic unit conversion. 
+All units have made the following conventions:
+* Length: Angstrom (`Å`)
+* Energy: electron Volt (`eV`)
+* Mass: atomic mass unit (`amu`), numerically equal to molar mass (`g/mol`)
+* Time: femtosecond (`fs`)
+* Temperature: Kelvin (`K`)
+
 ### Using as a Python Package
 
 In BUCToolkit, the advanced APIs which can be called to execute end-to-end tasks 
@@ -118,7 +131,8 @@ format, and output text log files and binary database format files after running
 Users only need to import their own torch model class and prepare an input file 
 (see [Input File Template](#input-file-template)).
 
-An example of using the API functions is shown as follows:
+An example of using the API functions to **train** a torch-geometric based model is shown as follows:
+
 ```python
 """
 The example of model training & structure optimizations & molecular dynamics
@@ -126,11 +140,12 @@ The example of model training & structure optimizations & molecular dynamics
 import torch as th
 
 from BUCToolkit import Structures
-from BUCToolkit.io import POSCARs2Feat, OUTCAR2Feat, ExtXyz2Feat, ASETraj2Feat
+from BUCToolkit.io import POSCARs2Feat, OUTCAR2Feat, ExtXyz2Feat, ASETraj2Feat, Cif2Feat
 from BUCToolkit.Preprocessing.preprocessing import CreatePygData
 from BUCToolkit.api.DataLoaders import PyGDataLoader
 from BUCToolkit.api.Trainer import Trainer
-#from YOUR_MODEL_PATH import YOUR_MODEL  # Here import your torch-based model file
+
+# from YOUR_MODEL_PATH import YOUR_MODEL  # Here import your torch-based model file
 # * The model would receive a `torch-geometric.Batch`-like object 
 # * and return a dict of {'energy': torch.Tensor, 'forces': torch.Tensor, ...}
 YOUR_MODEL = 'your imported model'
@@ -140,34 +155,61 @@ YOUR_MODEL = 'your imported model'
 # -----------------------------------------------------
 
 # Set the data path
-YOUR_OUTCAR_FILE_PATH = '/your/data/path'
+YOUR_DATA_PATH = '/your/data/path'
 
-# Load Data
+#############
+# Load Data #
+#############
+#   Load the BatchStructure format data (a build-in format of BUCToolkit)   <<<<<<<
 f = Structures()
 f.load('/your/training/data/path')  # path of files saved by f.save(`path`)
 g = Structures()
 g.load('/your/training/data/path')
-#g = g.contain_only_in(BUCToolkit.TRANSITION_P_METALS | {'C', 'H'})  # select by elements
-#g = g.select_by_sample_id(r'[^_].*')  # select by file name, support regular expression
+# g = g.contain_only_in(BUCToolkit.TRANSITION_P_METALS | {'C', 'H'})  # select by elements
+# g = g.select_by_sample_id(r'[^_].*')  # select by file name, support regular expression
 
-f = OUTCAR2Feat(YOUR_OUTCAR_FILE_PATH)  # Also can load OUTCAR-format files in parallel, only input path
-f.read(['OUTCAR1', '2OUTCAR2', 'OUTCAR3'])  # specific files to read, default to read all files in this path
+#   Load OUTCAR-format files in parallel   <<<<<<<
+f = OUTCAR2Feat(YOUR_DATA_PATH)  # Here only input the path to OUTCARs
+f.read(['OUTCAR1', '2OUTCAR2', 'OUTCAR3'], n_core=1)  # specific files to read, default to read all files in given path
 
-f = ExtXyz2Feat(YOUR_OUTCAR_FILE_PATH)  # Also can load extxyz-format files in parallel, only input path
-f.read(['1.xyz', '2.xyz', '3.xyz'])  # specific files to read, default to read all files in this path
+#   Load extxyz-format files in parallel   <<<<<<<
+f = ExtXyz2Feat(YOUR_DATA_PATH)  # only input the path to extxyz files.
+# one may specify each following tag name at the head information line of extxyz files
+f.read(
+  ['1.xyz', '2.xyz', '3.xyz'],  # specific files to read, default to read all files in this path.
+  lattice_tag='lattice',
+  energy_tag='energy',
+  column_info_tag='properties',
+  element_tag='species',
+  coordinates_tag='pos',
+  forces_tag=None,
+  fixed_atom_tag=None
+)
 
-f = ASETraj2Feat(YOUR_OUTCAR_FILE_PATH)  # Also can load ase-trajectory files in parallel, only input path
-f.read()  # the same above
+#   Load cif files in parallel   <<<<<<<
+f = Cif2Feat(YOUR_DATA_PATH)
+f.read(['1.cif', '2.cif', '3.cif'], n_core=1)  # the same as above
 
-f = POSCARs2Feat(YOUR_OUTCAR_FILE_PATH)  # Also can load POSCAR-format files in parallel, only input path
-f.read(['POSCAR1', 'POSCAR2', ...])  # but for training, POSCAR has no Energy and forces information, that is not suitable.
+#   Load ASE trajectory file (required installation of ASE)   <<<<<<<
+f = ASETraj2Feat(YOUR_DATA_PATH)
+f.read(['1.trj', '2.trj', '3.trj'], n_core=1)  # the same above
 
-# Load Model
-model = YOUR_MODEL
+#   Load POSCAR files   <<<<<<<
+# but for training, POSCAR has no Energy and forces information, that is not suitable.
+f = POSCARs2Feat(YOUR_DATA_PATH)
+f.read(['POSCAR1', 'POSCAR2', ...])
+
+##############
+# Load Model #
+##############
+model = YOUR_MODEL  # load by `import`
 inp_file_for_train = './template_train.inp'  # Prepare an input file for training tasks. SEE BELOW.
 
-# Convert Data
-train_data_list = CreatePygData(1).feat2data_list(f, n_core=1)  # transfer to torch-geometric Data-like format
+################
+# Convert Data #
+################
+# transfer to torch-geometric Data-like format
+train_data_list = CreatePygData(1).feat2data_list(f, n_core=1)
 val_data_list = CreatePygData(1).feat2data_list(g, n_core=1)
 
 trn_ener = [f[atm.idx].Energies[0] for atm in train_data_list]
@@ -176,58 +218,73 @@ val_ener = [g[atm.idx].Energies[0] for atm in val_data_list]
 val_forc = [g[atm.idx].Forces[0] for atm in val_data_list]
 # Finally set data into such dictionary format to input
 #   Format: Dict['data': List[Data], 'labels': Dict['energy': List[float], 'forces': List[numpy.ndarray]]]
-train_data = {'data':train_data_list, 'labels':{'energy':trn_ener, 'forces':trn_forc}}
-valid_data = {'data':val_data_list, 'labels':{'energy':val_ener, 'forces':val_forc}}
+train_data = {'data': train_data_list, 'labels': {'energy': trn_ener, 'forces': trn_forc}}
+valid_data = {'data': val_data_list, 'labels': {'energy': val_ener, 'forces': val_forc}}
 
-# set data loader
+###################
+# set data loader #
+###################
 dataloader = PyGDataLoader
 
-# set trainer
+###############
+# set trainer #
+###############
 trainer = Trainer(inp_file_for_train)
-trainer.set_dataset(train_data, valid_data) # required, set dataset
-trainer.set_dataloader(dataloader, {'shuffle':True})  # required, set dataloader
-#trainer.set_loss_fn(Energy_Force_Loss, {'coeff_F':0.})  # optional, set loss manually
-#trainer.set_lr_scheduler(lr_scheduler, lr_scheduler_config)  # optional, set scheduler manually
+trainer.set_dataset(train_data, valid_data)  # required, set dataset
+trainer.set_dataloader(dataloader, {'shuffle': True})  # required, set dataloader
+# trainer.set_loss_fn(Energy_Force_Loss, {'coeff_F':0.})  # optional, set custom loss manually
+# trainer.set_lr_scheduler(lr_scheduler, lr_scheduler_config)  # optional, set custom scheduler manually
 trainer.set_layerwise_optim_config(
-    {'force_block.*': {'lr': 1.e-3}, 'energy_block.*': {'lr': 1.e-3}}
+  {'force_block.*': {'lr': 1.e-3}, 'energy_block.*': {'lr': 1.e-3}}
 )  # optional, set different learning-rate for diff. layers; layer name input supports regular expression
 
-# training
-trainer.train(model)
+############
+# training #
+############
+trainer.train(model)  # Only input the class, DO NOT instantiate
+```
+Then, this trained model can be used to **structure optimizations** and
+**molecular dynamics** simulations as follows:
 
+```python
+import BUCToolkit as bt
+from BUCToolkit.Preprocessing import preprocessing
+import your_model_file as your_model_class
+
+YOUR_DATA_PATH = '/your/data/path'
 # ----------------------------------
 #   FOR STRUCTURE OPTIMIZATION
 # ----------------------------------
 from BUCToolkit.api.StructureOptimization import StructureOptimization
 
-f = POSCARs2Feat(YOUR_OUTCAR_FILE_PATH)  # For example of POSCARs as the input
+f = bt.io.POSCARs2Feat(YOUR_DATA_PATH)  # For example of POSCARs as the input
 f.read(['POSCAR1', 'POSCAR2', ...])
-data_list = CreatePygData(1).feat2data_list(f, n_core=1)
+data_list = preprocessing.CreatePygData().feat2data_list(f, n_core=1)
 data_for_opt = {'data': data_list}  # only required the key of 'data'
 inp_file_for_opt = './template_opt.inp'  # input file for optimization
-dataloader = PyGDataLoader  # use the same dataloader
+dataloader = bt.api.DataLoaders.PyGDataLoader  # use the same dataloader
 
 optimizer = StructureOptimization(inp_file_for_opt)
 optimizer.set_dataset(data_for_opt)
 optimizer.set_dataloader(dataloader)
-optimizer.relax(model)
+optimizer.relax(your_model_class)  # Only input the class, DO NOT instantiate
 
 # ----------------------------------
 #   FOR MOLECULAR DYNAMICS
 # ----------------------------------
 from BUCToolkit.api.MolecularDynamics import MolecularDynamics
 
-f = POSCARs2Feat(YOUR_OUTCAR_FILE_PATH)  # Also use POSCARs as the example
+f = bt.io.POSCARs2Feat(YOUR_DATA_PATH)  # Also use POSCARs as the example
 f.read(['POSCAR1', 'POSCAR2', ...])
-data_list = CreatePygData(1).feat2data_list(f, n_core=1)
+data_list = preprocessing.CreatePygData().feat2data_list(f, n_core=1)
 data_for_md = {'data': data_list}  # only required the key of 'data'
 inp_file_for_md = './template_md.inp'  # input file for MD
-dataloader = PyGDataLoader  # use the same dataloader
+dataloader = bt.api.DataLoaders.PyGDataLoader  # use the same dataloader
 
-runner = MolecularDynamics(inp_file_for_opt)
+runner = MolecularDynamics(inp_file_for_md)
 runner.set_dataset(data_for_md)
 runner.set_dataloader(dataloader)
-runner.run(model)
+runner.run(your_model_class)  # Only input the class, DO NOT instantiate
 ```
 
 #### Using Low-level Functions
@@ -271,7 +328,7 @@ runner.run(
 ```
 
 ### Using as an Executable Program
-BUCTookit can also be directly applied as a normal executable program. 
+BUCToolkit can also be directly applied as a normal executable program. 
 By setting some additional args in the input file (see [Input File Template](#input-file-template))
 to specify the data path, data type, model file, and task type, 
 users can directly launch tasks in a shell like:
@@ -349,8 +406,10 @@ STRICT_LOAD: !!bool true  # whether to strictly load model parameter
 REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
 SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
 ###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD']. BS is the build-in structures format obtained by `Structures().save(...)`
-CHK_SAVE_PATH: your/model/checkpoint/file/path/to/save
-CHK_SAVE_POSTFIX: your_saved_chk_file_suffix
+SAVE_CHK: !!bool true  # whether to save checkpoints during training.
+CHK_SAVE_PATH: !!str your/model/checkpoint/file/path/to/save  # path of saving checkpoints during training. 
+CHK_SAVE_POSTFIX: !!str your_saved_chk_file_suffix  # postfix of checkpoint file name.
+
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
 ###FSDATA_PATH: !!str your/final/state/data/path  # used for calc. requiring both initial and final states, e.g., CI-NEB
@@ -406,7 +465,7 @@ TRAIN:
 # relaxation
 RELAXATION:
   ALGO: !!str 'FIRE'  # options: CG, BFGS, FIRE
-  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'PR', 'WYL'
+  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'PR'
   E_THRES: !!float 1.e4  # threshold of Energy difference
   F_THRES: !!float 0.05  # threshold of max Force
   MAXITER: !!int 300     # maximum iteration
@@ -553,11 +612,11 @@ Wherein, the args of `indices` specify the selected parts to read and write inst
 
 ## Features
 
-BUCToolkit employs highly optimized PyTorch code including fused operators, cudaGraphs replaying, 
+BUCToolkit employs highly optimized PyTorch code including fused operators, CUDA graph replaying, 
 asynchronized dumping/logging by cuda-stream pipelines, and in-place memory calculations.
 
 ### Flexible Function Interfaces
-Major low-level functions use very flexible interfaces as follows 
+Major low-level functions use very flexible SciPy-style interfaces as follows 
 (see also [Using Low-level Functions](#using-low-level-functions)):
 ```
 function(
@@ -581,37 +640,155 @@ computations (e.g., VASP, Gaussian) and convert the results (energy and forces) 
 and BUCToolkit functions will be executed with these inputs normally.
 
 The `grad_func` has a similar design. 
-The argument `is_grad_func_contain_y` controls two ways to calculate the gradient of `func`. 
-`is_grad_func_contain_y = True` is to use auto-gradient format, which actually uses 
-`grad_func(X, y, *grad_func_args, **grad_func_kwargs)` internally 
-(Note: users would not manually put `y` into `grad_func_args`). Otherwise, interfaces of 
-`grad_func(X, *grad_func_args, **grad_func_kwargs)` will be used. At last, `require_grad` controls the
+`is_grad_func_contain_y` controls the signature used to invoke `grad_func`.
+- If `True`, the program calls `grad_func(X, y, *grad_func_args, **grad_func_kwargs)`,
+  where `y = func(X, ...)`. This enables gradient functions that need the function value
+  (e.g., energies).
+- If `False`, the program calls `grad_func(X, *grad_func_args, **grad_func_kwargs)` directly.
+
+and `require_grad` controls the
 gradient context of PyTorch. When `require_grad = False`, computation of `func` and `grad_func` is under
-the context of `torch.no_grad` to reduce memory cost. Otherwise, gradient will be turned on explicitly
+the context of `torch.no_grad` to reduce the memory cost. Otherwise, gradient will be turned on explicitly
 by `torch.enable_grad`.
 
 ### Highly Customizable Algorithms
 All methods/algorithms are object-oriented modularized. They have `_Base*` abstract base classes 
 that implement highly optimized main loop routines, and are specialized by modifying several methods like 
-`self.initialize*(...)` and `self._update*(...)` in subclasses. Hence, one can develop and implement any 
-custom new algorithm by simply overriding these update methods without modifying the main loop process.
+`self.initialize*(...)` and `self._update*(...)` in subclasses. All input data and states are transmitted
+explicitly. Hence, one can develop and implement any 
+custom new algorithm by simply overriding these polymorphism methods without modifying the main loop process.
 
 ### Batch Parallelism Scheme
 Most functions, such as structural optimization, transition state search, molecular dynamics and 
 Monte Carlo simulation, support the parallel computing of **both regular batched samples 
 (stacked samples with the same atom numbers) and irregular batched samples 
 (concatenated samples with different atom numbers)**. 
-Input Tensors (of atom coordinates, forces, fixation masks, etc.) should be 3-dimensional. For regular batches,
-their shapes are **(batch_size, n_atom, n_dim)**, where `n_dim` is usually 3. For irregular batches, their 
-shapes are **(1, $\sum_{i}$n_atom$_{i}$, n_dim)**, where $i$ is the sample index, and users should provide 
-another variable `batch_indices` that records atom numbers of each sample. For example, 
-`batch_indices = [64, 56, 72, 83, 102]` means that the samples have 64, 56, 72, 83, 102 atoms, respectively, and 
+Input Tensors (of atom coordinates, forces, fixation masks, etc.) should be 3-dimensional. 
+- For regular batches, their shapes are **(batch_size, n_atom, n_dim)**, where `n_dim` is usually 3. 
+- For irregular batches, their shapes are **(1, $\sum_{i}$n_atom$_{i}$, n_dim)**, 
+where $i$ is the sample index, and users should provide another variable `batch_indices` 
+that records atom numbers of each sample. Note that here the 1st dim should keep "1".
+For example, `batch_indices = [64, 56, 72, 83, 102]` means that 
+the samples have 64, 56, 72, 83, 102 atoms, respectively, and 
 corresponding shapes of atom coordinates should be `(1, 377, 3)`.
 
 For structural optimization and transition state search, BUCToolkit applies a **dynamic samples approach**
 which dynamically removes the converged samples in one batch before starting the next iteration step 
 by maintaining a convergence mask and applying `indexed_select`/`indexed_copy_` functions. It could significantly reduce
 the waste of repeatedly calculating the converged data.
+
+### Powerful Constraints Solver by Auto-gradient
+Based on PyTorch auto-gradient techniques, BUCToolkit implemented a very powerful constraints solver
+that can be used in MD & structure optimization. 
+Wherein, ***ANY PyTorch supported differentiable function*** *S*
+can be used as the constraints in the form of 
+$$
+S(X) = q(t)
+$$
+where ***X*** is the (batched) atom coordinates, *q* is the constraints target values, 
+and *t* is the accumulated simulation time. For time-independent constraints, 
+q is a simple constant.
+
+For instance, constraints can be defined as:
+```python
+import torch as th
+
+def constr_func(X):
+    y = list()
+    # X: shape(N, D), Note the batch dimension would NOT be considered in constraints calculation of X.
+    
+    ################
+    # CONSTRAINT 1 #
+    ################
+    # fix the distance between atoms (2, 4), (3, 7), (5, 8) to the value of `constr_val[:3]`
+    y.append(th.linalg.norm(X[[2, 3, 5]] - X[[4, 7, 8]], dim=-1))
+
+    ################
+    # CONSTRAINT 2 #
+    ################
+    # fix the angle of atom7-atom5-atom8 and atom11-atom9-atom12 to the value of `constr_val[3:5]`
+    x1 = X[[5, 9]]
+    x2 = X[[7, 11]]
+    x3 = X[[8, 12]]
+    y.append(
+        (
+            th.sum((x2 - x1) * (x3 - x1))
+        ) / (th.linalg.norm(x2 - x1) * th.linalg.norm(x3 - x1))
+    )
+    
+    ################
+    # CONSTRAINT 3 #
+    ################
+    # fix the soft coordination number for atoms No.14 and No.18 to the value of `constr_val[5:7]` 
+    r0 = 1.5; sigma = 0.2
+    # pairwise distance: (2, 1, D) - (1, N, D) -norm-> (2, N)
+    r_ij = th.linalg.norm(X[[14, 18]].unsqueeze(1) - X.unsqueeze(0), dim=-1)
+    s_i = th.sum(0.5 * (1 + th.erf( (r_ij - r0) / sigma )), dim=-1)
+    y.append(s_i)
+    
+    ################
+    # CONSTRAINT 4 #
+    ################
+    # fix the standard deviation of all bonds to `constr_val[7:8]`
+    R_ij = th.linalg.norm(X.unsqueeze(0) - X.unsqueeze(1), dim=-1)
+    R_std = th.std(R_ij, unbiased=True)
+    y.append(R_std)
+    
+    ###############################
+    # Concatenate all constraints #
+    ###############################
+    z = th.cat(y)
+    
+    return z
+
+# Execute the constraint MD
+import BUCToolkit as bt
+
+DEVICE = 'cuda:0'  # or cpu
+
+runner = bt.BatchMD.ConstrNVT(
+  time_step=1.,
+  max_step=10000,
+  thermostat='CSVR',
+  thermostat_config={'time_const': 100.},
+  constr_func=constr_func,
+  constr_val=th.full((7, ), 1.5, device=DEVICE),  # for example, all constraint targets value are 1.5
+  constr_threshold=1.e-5,
+  T_init=298.15,
+  output_file='/your/dumped/file',
+  output_structures_per_step=20,
+  device=DEVICE,
+  verbose=0
+)
+# `constr_val` can also be a Callable[[ScalarTensor], Tensor] to express the time-dependent constraints. 
+
+runner.run(...)   # See the section `Using as a Python Package` above
+
+```
+All constraints function are simultaneously solved by QR factorization 
+of mass-weighted Jacobian matrix (shape: (n_constr, n_atoms * n_dim)) 
+in parallel instead of serially iterating each constraint.
+* Vectors on the (co)tangent bundle (e.g., velocities, gradients) is **projected** to keep constrains:
+$$
+Q R = J_{\rm constraints}^T M^{-1/2}; Q = [Q_1, Q_2]
+$$
+$$
+P = M^{-1/2} Q_2 Q_2^T M^{1/2} = M^{-1/2} (I - Q_1 Q_1^T) M^{1/2}
+$$
+$$
+v = P \tilde{v}
+$$
+* Points on the constraint manifold (e.g., atom positions) is iteratively applied **retraction mapping**:
+$$
+y^{(i)} = S(X^{(i-1)})
+$$
+$$
+X^{(i)} = X^{(i-1)} - M^{-1/2} Q R^{-T} y^{(i)}
+$$
+until constraint error is less than the threshold. This is a Newton iterative form thus leading to 
+a quadratic convergence rate.
+
+Note that complicated constraint functions may be computationally expensive.
 
 ## Contact Us
 
