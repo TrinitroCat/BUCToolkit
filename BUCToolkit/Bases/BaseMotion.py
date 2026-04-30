@@ -15,6 +15,7 @@ import numpy as np
 
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers
+from BUCToolkit.utils._print_formatter import SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT, FLOAT_ARRAY_FORMAT
 
 
 class BaseIO:
@@ -172,7 +173,7 @@ class BaseMotion(BaseIO):
             n_batch: the length of 1st dimension of X.
             device: torch device
 
-        Returns: n_true_batch, batch_tensor, batch_scatter, batch_slice_indx;
+        Returns: n_true_batch, batch_indices, batch_tensor, batch_scatter, batch_slice_indx;
             n_true_batch: the true batch size
             batch_indices: the batch_indices in List format
             batch_tensor: the batch_indices in torch.Tensor format
@@ -203,6 +204,60 @@ class BaseMotion(BaseIO):
             batch_slice_indx = None
 
         return n_true_batch, batch_indices, batch_tensor, batch_scatter, batch_slice_indx
+
+    @staticmethod
+    def handle_arrays_print(
+            logger: logging.Logger | Any,
+            batch_indices: List[int],
+            batch_slice_indx: List[int],
+            arrays: List[List[th.Tensor]] | Tuple[Tuple[th.Tensor, ...]],
+            array_names: List[List[str]] | Tuple[Tuple[str, ...]],
+            verbose: int
+    ):
+        """
+        Logging function for printing arrays with corresponding names controlled by the verbosity level.
+        Args:
+            logger: logger object
+            batch_indices: input batch_indices that each element is the atom number of each sample
+            batch_slice_indx: the batch_indices in ptr slice format
+            arrays: input arrays. Format: [[tensors11, tensors12, ...], [tensors21, ...], ...],
+                the i-th List in the outer list corresponds to the i-th verbosity level to log,
+                and the tensors in the inner list will be all logged.
+            array_names: input arrays names. Format: [[name11, name12, ...], [name21, ...], ...],
+            verbose: verbosity level
+
+        Returns:
+
+        """
+        if len(arrays) != len(array_names):
+            raise ValueError(f'arrays and array_names must have the same length, but got {len(arrays)} and {len(array_names)}.')
+        if batch_indices is not None:
+            for v_lev in range(len(arrays)):
+                if verbose > v_lev + 1:  # "+ 1" is a fixed offset to make that `verbose < 2` does not log large arrays.
+                    for na, arr in enumerate(arrays[v_lev]):
+                        X_np = arr.numpy(force=True)
+                        X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
+                        logger.info(f" {array_names[v_lev][na]}:\n")
+                        X_str = [
+                            np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                            for xi in X_tup
+                        ]
+                        for x_str in X_str: logger.info(f'{x_str}\n')
+                else:
+                    break  # logging verbosity level higher than input verbose, thus directly break to avoid useless loop
+        else:
+            for v_lev in range(len(arrays)):
+                if verbose > v_lev + 1:  # "+ 1" is a fixed offset
+                    for na, arr in enumerate(arrays[v_lev]):
+                        X_tup = (arr.numpy(force=True),)
+                        logger.info(f" {array_names[v_lev][na]}:\n")
+                        X_str = [
+                            np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                            for xi in X_tup
+                        ]
+                        for x_str in X_str: logger.info(f'{x_str}\n')
+                else:
+                    break
 
     def _calc_EF(
             self,
