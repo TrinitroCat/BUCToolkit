@@ -665,7 +665,7 @@ Monte Carlo simulation, support the parallel computing of **both regular batched
 (concatenated samples with different atom numbers)**. 
 Input Tensors (of atom coordinates, forces, fixation masks, etc.) should be 3-dimensional. 
 - For regular batches, their shapes are **(batch_size, n_atom, n_dim)**, where `n_dim` is usually 3. 
-- For irregular batches, their shapes are **(1, $\sum_{i}$n_atom$_{i}$, n_dim)**, 
+- For irregular batches, their shapes are **(1, $\sum_{i}$ n_atom $_{i}$, n_dim)**, 
 where $i$ is the sample index, and users should provide another variable `batch_indices` 
 that records atom numbers of each sample. Note that here the 1st dim should keep "1".
 For example, `batch_indices = [64, 56, 72, 83, 102]` means that 
@@ -682,9 +682,11 @@ Based on PyTorch auto-gradient techniques, BUCToolkit implemented a very powerfu
 that can be used in MD & structure optimization. 
 Wherein, ***ANY PyTorch supported differentiable function*** *S*
 can be used as the constraints in the form of 
+
 $$
 S(X) = q(t)
 $$
+
 where ***X*** is the (batched) atom coordinates, *q* is the constraints target values, 
 and *t* is the accumulated simulation time. For time-independent constraints, 
 q is a simple constant.
@@ -769,6 +771,7 @@ All constraints function are simultaneously solved by QR factorization
 of mass-weighted Jacobian matrix (shape: (n_constr, n_atoms * n_dim)) 
 in parallel instead of serially iterating each constraint.
 * Vectors on the (co)tangent bundle (e.g., velocities, gradients) is **projected** to keep constrains:
+
 $$
 Q R = J_{\rm constraints}^T M^{-1/2}; Q = [Q_1, Q_2]
 $$
@@ -778,13 +781,16 @@ $$
 $$
 v = P \tilde{v}
 $$
+
 * Points on the constraint manifold (e.g., atom positions) is iteratively applied **retraction mapping**:
+
 $$
 y^{(i)} = S(X^{(i-1)})
 $$
 $$
 X^{(i)} = X^{(i-1)} - M^{-1/2} Q R^{-T} y^{(i)}
 $$
+
 until constraint error is less than the threshold. This is a Newton iterative form thus leading to 
 a quadratic convergence rate.
 
