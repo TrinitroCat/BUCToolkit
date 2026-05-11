@@ -94,8 +94,8 @@ class Trainer(_CONFIGS):
                 f"WARNING: The model is training but NO CHECKPOINT FILE WILL BE SAVED. "
                 f"I HOPE YOU KNOW WHAT YOU ARE DOING!!!"
             )
-        self.CHK_SAVE_PATH = self.config.get('CHK_SAVE_PATH', './')
-        self.CHK_SAVE_POSTFIX = self.config.get('CHK_SAVE_POSTFIX', '')
+        self.CHK_SAVE_PATH = trn_config.get('CHK_SAVE_PATH', './')
+        self.CHK_SAVE_POSTFIX = trn_config.get('CHK_SAVE_POSTFIX', '')
         if self.CHK_SAVE_POSTFIX != '': self.CHK_SAVE_POSTFIX = '_' + self.CHK_SAVE_POSTFIX  # use '_' to delimit chk name.
         if not isinstance(self.CHK_SAVE_PATH, str): raise TypeError('CHK_SAVE_PATH must be a str.')
 
