@@ -394,9 +394,6 @@ STRICT_LOAD: !!bool true  # 是否严格加载模型参数
 REDIRECT: !!bool true    # 是否将训练日志重定向到 OUTPUT_PATH，还是直接打印到屏幕
 SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出到转储文件
 ###DATA_TYPE: !!str BS  # 可选值：'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD'。BS 是 Structures().save(...) 保存的内置结构格式
-SAVE_CHK: !!bool true  # 训练过程中是否保存检查点
-CHK_SAVE_PATH: !!str your/model/checkpoint/file/path/to/save  # 检查点保存路径
-CHK_SAVE_POSTFIX: !!str your_saved_chk_file_suffix  # 检查点文件后缀
 
 ###DATA_PATH: !!str /your/data/path # 用于计算的数据路径；如果是训练，将被视为训练集
 ###DATA_NAME_SELECTOR: !!str ".*$"  # 用于选择数据名称的正则表达式，仅加载匹配的名称
@@ -411,6 +408,9 @@ CHK_SAVE_POSTFIX: !!str your_saved_chk_file_suffix  # 检查点文件后缀
 TRAIN:
   # 轮次和验证集
   EPOCH: !!int 10
+  SAVE_CHK: !!bool true  # 训练过程中是否保存检查点
+  CHK_SAVE_PATH: !!str your/model/checkpoint/file/path/to/save  # 检查点保存路径
+  CHK_SAVE_POSTFIX: !!str your_saved_chk_file_suffix  # 检查点文件后缀
   VAL_BATCH_SIZE: !!int 20  # 验证时的批大小，默认与 BATCH_SIZE 相同
   VAL_PER_STEP: !!int 100   # 每 VAL_PER_STEP 步验证一次。步数 = BATCH_SIZE * ACCUMULATE_STEP
   VAL_IF_TRN_LOSS_BELOW: !!float 1.e5  # 仅当训练损失低于该值时进行验证
