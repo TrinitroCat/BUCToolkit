@@ -406,9 +406,6 @@ STRICT_LOAD: !!bool true  # whether to strictly load model parameter
 REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
 SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
 ###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD']. BS is the build-in structures format obtained by `Structures().save(...)`
-SAVE_CHK: !!bool true  # whether to save checkpoints during training.
-CHK_SAVE_PATH: !!str your/model/checkpoint/file/path/to/save  # path of saving checkpoints during training. 
-CHK_SAVE_POSTFIX: !!str your_saved_chk_file_suffix  # postfix of checkpoint file name.
 
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
@@ -423,6 +420,9 @@ CHK_SAVE_POSTFIX: !!str your_saved_chk_file_suffix  # postfix of checkpoint file
 TRAIN:
   # epoches & val set
   EPOCH: !!int 10
+  SAVE_CHK: !!bool true  # whether to save checkpoints during training.
+  CHK_SAVE_PATH: !!str your/model/checkpoint/file/path/to/save  # path of saving checkpoints during training. 
+  CHK_SAVE_POSTFIX: !!str your_saved_chk_file_suffix  # postfix of checkpoint file name.
   VAL_BATCH_SIZE: !!int 20  # batch size for validation. default is the same as BATCH_SIZE
   VAL_PER_STEP: !!int 100   # validate every `VAL_PER_STEP` steps. step = `BATCH_SIZE` * `ACCUMULATE_STEP`
   VAL_IF_TRN_LOSS_BELOW: !!float 1.e5  # only validating after training loss < `VAL_IF_TRN_LOSS_BELOW`
