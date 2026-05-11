@@ -497,7 +497,7 @@ class _Model_Wrapper_pyg(_BaseWrapper):
 
     __slots__ = ('_model', 'forces', 'X', )
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, pos_attr_name='pos',) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
         Wrap the model(graph, ...) into f(X)
@@ -511,13 +511,17 @@ class _Model_Wrapper_pyg(_BaseWrapper):
 
         """
         super().__init__(model)
+        self.pos_attr_name = pos_attr_name
         #if check_module('torch_geometric') is None:
         #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
 
     def Energy(self, X, graph: Batch):
         self.X = X
-        graph.pos = self.X.reshape(-1,3).contiguous()
+        if hasattr(graph, 'pos'):
+            graph.pos = self.X.reshape(-1,3).contiguous()
+        if hasattr(graph, 'positions'):
+            graph.positions = self.X.reshape(-1,3).contiguous()
         y = self._model(graph)
         energy = y['energy']
         self.forces = y['forces']
@@ -529,7 +533,10 @@ class _Model_Wrapper_pyg(_BaseWrapper):
             self.forces = None
         if self.forces is None:
             self.X = X
-            graph.pos = self.X.reshape(-1,3)
+            if hasattr(graph, 'pos'):
+                graph.pos = self.X.reshape(-1, 3).contiguous()
+            if hasattr(graph, 'positions'):
+                graph.positions = self.X.reshape(-1, 3).contiguous()
             return - ((self._model(graph))['forces']).reshape(origin_shape)
         else:
             force = self.forces
@@ -785,9 +792,12 @@ class DumpStructures:
         # Postprocessing & save TODO: reformat it in future to apply to all functions.
         n_batch = len(batch_indices)
         batch_indices = np.array(batch_indices, dtype=np.int64)
-        if cells.shape != (n_batch, 3, 3):
-            raise ValueError(f'`cells` is expected to have 3 dimensions (n_batch, 3, 3), but got {cells.shape}.')
+        # try to automatically convert
         cells = cells.numpy(force=True).astype(np.float32) if isinstance(cells, th.Tensor) else np.asarray(cells, dtype=np.float32)
+        try:
+            cells = cells.reshape(n_batch, 3, 3)
+        except:
+            raise ValueError(f'`cells` is expected to have 3 dimensions (n_batch, 3, 3), but got {cells.shape}.')
         if len(idx) != n_batch:
             raise ValueError(f'The number of `idx` is expected to be batch size {n_batch}, but got {len(idx)}.')
         idx = np.array(idx, dtype='<U128')
