@@ -1,19 +1,15 @@
-"""
-Model wrappers for ab initio calculations.
-"""
-#  Copyright (c) 2026.4.23, BUCToolkit.
+#  Copyright (c) 2026.5.18, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 1.0b
-#  File: ab_initio_wrappers.py
+#  File: VASP_model_wrapper.py
 #  Environment: Python 3.12
 
-from .function_utils import _BaseWrapper, compare_tensors
-import BUCToolkit as bt
 import os
 import subprocess
 import shutil
-
 import torch as th
+
+from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
 
 
 class VASP_Model(_BaseWrapper):
@@ -132,5 +128,4 @@ class VASP_Model(_BaseWrapper):
             F_tensor = self.F_tensor
             self.F_tensor = None  # empty cache
             return - F_tensor.reshape(origin_shape).contiguous()
-
 
