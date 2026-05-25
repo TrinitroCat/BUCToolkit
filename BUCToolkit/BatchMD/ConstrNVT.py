@@ -47,6 +47,7 @@ class ConstrNVT(_BaseConstrMD):
                  constr_func: Callable[[th.Tensor], th.Tensor] = None,
                  constr_val: Callable[[th.Tensor], th.Tensor | Tuple[th.Tensor]] | th.Tensor = None,
                  constr_threshold: float = 1e-5,
+                 require_fixman: bool = False,
                  T_init: float = 298.15,
                  output_file: str | None = None,
                  output_structures_per_step: int = 1,
@@ -70,6 +71,7 @@ class ConstrNVT(_BaseConstrMD):
             constr_func,
             constr_val,
             constr_threshold,
+            require_fixman,
             output_file,
             output_structures_per_step,
             device,
@@ -165,6 +167,7 @@ class ConstrNVT(_BaseConstrMD):
     )-> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         # read thermostat configs
         X = X.detach()
+        X_init = X.clone()
         with th.no_grad():
             alpha = self.alpha
             # half-step
@@ -176,9 +179,12 @@ class ConstrNVT(_BaseConstrMD):
             # V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
             # the rest half-step
             X.add_(V, alpha=0.5 * self.time_step)
-            Fc = self._project2(X)
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
             if self.verbose > 0:
-                self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # update energy & forces
             Energy, Force = self._calc_EF(
                 X,
@@ -194,8 +200,7 @@ class ConstrNVT(_BaseConstrMD):
             Force.mul_(atom_masks)
             # last update
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            V.copy_(self._project1(V))
-
+            self._project1(V, X, out=V)
 
         return X, V, Energy, Force
 
@@ -218,14 +223,18 @@ class ConstrNVT(_BaseConstrMD):
         # NVE Step
         X = X.detach()
         with th.no_grad():
+            X_init = X.clone()
             # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
-            Fc = self._project2(X)
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
             if self.verbose > 0:
-                self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            # update energy & forces
+            # Update V
             Energy, Force = self._calc_EF(
                 X,
                 func,
@@ -238,10 +247,9 @@ class ConstrNVT(_BaseConstrMD):
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
-
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            V.copy_(self._project1(V))
+            self._project1(V, X, out=V)
             if batch_indices is not None:
                 # Rescaling factor
                 alpha = th.sqrt(self.EK_TARGET / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
@@ -289,14 +297,18 @@ class ConstrNVT(_BaseConstrMD):
         epsK = th.as_tensor(1e-12, device=self.device, dtype=V.dtype)
 
         with th.no_grad():
+            X_init = X.clone()
             # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
-            Fc = self._project2(X)
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
             if self.verbose > 0:
-                self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            # update energy & forces
+            # Update V
             Energy, Force = self._calc_EF(
                 X,
                 func,
@@ -309,10 +321,9 @@ class ConstrNVT(_BaseConstrMD):
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
-
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            V.copy_(self._project1(V))
+            self._project1(V, X, out=V)
 
             if batch_indices is not None:
                 # Nf per (irregular) configuration; keep your convention (3*N-3)
@@ -389,6 +400,7 @@ class ConstrNVT(_BaseConstrMD):
             smass = smass.unsqueeze(-1).expand(n_batch, 1)
         # Main update
         with th.no_grad():
+            X_init = X.clone()
             if batch_indices is not None:
                 _iota = self.p_iota[:, self.batch_scatter, :]
             else:
@@ -396,9 +408,12 @@ class ConstrNVT(_BaseConstrMD):
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             V.mul_(th.exp(- _iota * 0.5 * self.time_step))
             X.add_(V, alpha=self.time_step)
-            Fc = self._project2(X)
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
             if self.verbose > 0:
-                self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
 
             # update energy & forces
             Energy, Force = self._calc_EF(
@@ -445,7 +460,7 @@ class ConstrNVT(_BaseConstrMD):
                     th.sub(reduced_Ek, self.free_degree, alpha=self.T_init * 8.617333262145e-5),
                     smass, value=self.time_step * 0.5
                 )
-            V.copy_(self._project1(V))
+            self._project1(V, X, out=V)
 
         return X, V, Energy, Force
 

@@ -19,11 +19,14 @@ from torch import nn
 
 import numpy as np
 
-from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL
+from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL, DTYPE
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.Bases.BaseMotion import BaseMotion
+
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 
 class _BaseMD(BaseMotion):
@@ -75,7 +78,7 @@ class _BaseMD(BaseMotion):
         self.max_step = int(max_step)
         self.T_init = float(T_init)
         self.output_structures_per_step = int(output_structures_per_step)
-        self.device = device
+        self.device = device if isinstance(device, th.device) else th.device(device)
         self.verbose = int(verbose)
         self.is_compile = bool(is_compile)
         self.compile_kwargs = compile_kwargs if compile_kwargs is not None else dict()
@@ -343,7 +346,8 @@ class _BaseMD(BaseMotion):
 
         """
         try:
-            if th.device(self.device).type == "cuda":
+            X, Cell_vector, V_init = self.handle_dtype_device(FLOAT_TYPE, self.device, X, Cell_vector, V_init)
+            if self.device.type == "cuda":
                 self.__run_on_cuda(
                     func,
                     X,
@@ -361,7 +365,7 @@ class _BaseMD(BaseMotion):
                     fixed_atom_tensor,
                     move_to_center_freq
                 )
-            elif th.device(self.device).type == "cpu":
+            elif self.device.type == "cpu":
                 self.__run_on_cpu(
                     func,
                     X,
@@ -432,7 +436,7 @@ class _BaseMD(BaseMotion):
             if not isinstance(_Elem, list): raise TypeError(f'Expected `Element_list` of List[List[int|str]], but got List[{type(_Elem)}].')
             atomic_numbers.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else int(__elem) for __elem in _Elem])
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
-        masses_short = th.tensor(masses, dtype=th.float32, device=self.device)  # (n_batch, n_atom)
+        masses_short = th.tensor(masses, dtype=FLOAT_TYPE, device=self.device)  # (n_batch, n_atom)
         masses = masses_short.unsqueeze(-1).expand_as(X).contiguous()  # (n_batch, n_atom, n_dim)
         # grad_func
         grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(
@@ -509,9 +513,9 @@ class _BaseMD(BaseMotion):
         )
         # The initial iota for Nose-Hoover
         if batch_indices is not None:
-            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=FLOAT_TYPE)
         else:
-            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=FLOAT_TYPE)
         # whether grad needs autograd
         self.require_grad = require_grad
 
@@ -519,25 +523,25 @@ class _BaseMD(BaseMotion):
         #   _buf_* is the vars on GPU that apply copy.
         #   _print_* is the vars on CPU that async. do D2H for _buf_*.
         if batch_indices is not None:
-            _print_temperature = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ek = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ep = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-            _buf_Tp = th.empty(len(batch_indices), device=self.device, dtype=th.float32)
-            _buf_Ek = th.empty(len(batch_indices), device=self.device, dtype=th.float32)
-            _buf_Ep = th.empty(len(batch_indices), device=self.device, dtype=th.float32)
+            _print_temperature = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ek = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ep = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _buf_Tp = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ek = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ep = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
         else:
-            _print_temperature = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ek = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ep = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-            _buf_Tp = th.empty(n_batch, device=self.device, dtype=th.float32)
-            _buf_Ek = th.empty(n_batch, device=self.device, dtype=th.float32)
-            _buf_Ep = th.empty(n_batch, device=self.device, dtype=th.float32)
-        _print_X = th.empty_like(X, device='cpu', dtype=th.float32, pin_memory=True)
-        _print_V = th.empty_like(V, device='cpu', dtype=th.float32, pin_memory=True)
-        _print_F = th.empty_like(X, device='cpu', dtype=th.float32, pin_memory=True)
-        _buf_X = th.empty_like(X, device=self.device, dtype=th.float32)
-        _buf_V = th.empty_like(V, device=self.device, dtype=th.float32)
-        _buf_F = th.empty_like(X, device=self.device, dtype=th.float32)
+            _print_temperature = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ek = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ep = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _buf_Tp = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ek = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ep = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
+        _print_X = th.empty_like(X, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+        _print_V = th.empty_like(V, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+        _print_F = th.empty_like(X, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+        _buf_X = th.empty_like(X, device=self.device, dtype=FLOAT_TYPE)
+        _buf_V = th.empty_like(V, device=self.device, dtype=FLOAT_TYPE)
+        _buf_F = th.empty_like(X, device=self.device, dtype=FLOAT_TYPE)
         # initialize the dumper
         X_arr = X.numpy(force=True)
         _x_dtype = X_arr.dtype.str
@@ -858,7 +862,7 @@ class _BaseMD(BaseMotion):
             if not isinstance(_Elem, list): raise TypeError(f'Expected `Element_list` of List[List[int|str]], but got List[{type(_Elem)}].')
             atomic_numbers.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else ATOMIC_NUMBER[__elem] for __elem in _Elem])
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
-        masses_short = th.tensor(masses, dtype=th.float32, device=self.device)  # (n_batch, n_atom)
+        masses_short = th.tensor(masses, dtype=FLOAT_TYPE, device=self.device)  # (n_batch, n_atom)
         masses = masses_short.unsqueeze(-1).expand_as(X).contiguous()  # (n_batch, n_atom, n_dim)
         # grad_func
         grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(
@@ -938,9 +942,9 @@ class _BaseMD(BaseMotion):
         )
         # The initial iota for Nose-Hoover
         if batch_indices is not None:
-            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=FLOAT_TYPE)
         else:
-            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=FLOAT_TYPE)
         # whether grad needs autograd
         self.require_grad = require_grad
 

@@ -3,7 +3,7 @@
 #  Version: 1.0b
 #  File: BaseConstraints.py
 #  Environment: Python 3.12
-
+import os
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
 import torch as th
@@ -11,8 +11,12 @@ from torch import nn
 import numpy as np
 
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BUCToolkit.utils._Element_info import DTYPE
 from BUCToolkit.utils.grad_functions import bhvp
 from BUCToolkit.Bases.BaseMotion import BaseIO
+
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 
 class BaseConstr(BaseIO):
@@ -41,6 +45,7 @@ class BaseConstr(BaseIO):
             By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor,
             it can be set to the time-dependent constraints.
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
+        require_fixman: bool, whether to calculate fixman
         device: str|torch.device, device that program rum on.
         verbose: int, control the detailed degree of output information.
             0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
@@ -73,8 +78,9 @@ class BaseConstr(BaseIO):
             constr_func: Callable | None = None,
             constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
+            require_fixman: bool = False,
             device: str | th.device = 'cpu',
-            verbose: int = 0
+            verbose: int = 0,
     ):
         if constr_func is None:
             constr_func = lambda X: th.tensor(0.)
@@ -85,6 +91,7 @@ class BaseConstr(BaseIO):
         self.is_const_constr = False
         self.constr_val_func_raw = None
         self.time_step = 1.
+        self.require_fixman = require_fixman
 
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
@@ -104,15 +111,15 @@ class BaseConstr(BaseIO):
         if not isinstance(constr_func, Callable):
             raise TypeError(f"`constr_func` must consist of callable, but got {type(constr_func)}")
         self.constr_func = constr_func
-        self.Q = th.tensor([], device=self.device, dtype=th.float32)  # Q(n_batch, n_atoms * n_dim, n_constr)
+        self.Q = th.tensor([], device=self.device, dtype=FLOAT_TYPE)  # Q(n_batch, n_atoms * n_dim, n_constr)
         self.jac = None # Jacobian Matrix
-        self.R = th.tensor([], device=self.device, dtype=th.float32)  # R(n_batch, n_constr, n_constr)
-        self.q = th.tensor([], device=self.device, dtype=th.float32)  # (n_batch, n_constr, 1), solution of `R^T q = d/dt constr_val(t)`
+        self.R = th.tensor([], device=self.device, dtype=FLOAT_TYPE)  # R(n_batch, n_constr, n_constr)
+        self.q = th.tensor([], device=self.device, dtype=FLOAT_TYPE)  # (n_batch, n_constr, 1), solution of `R^T q = d/dt constr_val(t)`
         self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = None  # M^-1/2
         self.max_proj_iter = 10
         self.constr_thres = constr_threshold
-        self.lamb = None  # constr force, i.e., the mu of Lagrange multipler
+        self.X_cache = None  # constr force, i.e., the mu of Lagrange multipler
 
         self._X_qr_cache = None  # check the consistency of X in project1, ensuring it is the new tangent space projection
 
@@ -159,7 +166,7 @@ class BaseConstr(BaseIO):
         self._do_qr(jac)
         # calc. constr. intensity
         n_batch, n_constr, _ = self.R.shape
-        self.lamb = th.zeros((n_batch, n_constr), device=self.device)
+        self.X_cache = th.empty_like(X)
 
     def _constr_func_wrapped(self, X, constr_val_now):
         """
@@ -222,8 +229,7 @@ class BaseConstr(BaseIO):
 
         """
         self._update_constr()
-        with th.no_grad():
-            jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
+        jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
         self.jac = jac
         return jac, y
 
@@ -240,35 +246,38 @@ class BaseConstr(BaseIO):
         # (n_batch, n_constr, n_atoms, n_dim) * (n_batch, 1, n_atoms, n_dim) -flatten-> (n_batch, n_constr, n_atoms * n_dim)
         _jac = th.flatten(jac * self.negsqrtM.unsqueeze(1), -2, -1)
         _jacT = _jac.mT.contiguous()
-        th.linalg.qr(_jacT, out=(self.Q, self.R))  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
+        self.Q, self.R = th.linalg.qr(_jacT)  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
 
-    def _project1(self, X:th.Tensor) -> th.Tensor:
+    def _project1(self, V:th.Tensor, X:th.Tensor | None = None, out: th.Tensor | None = None) -> th.Tensor:
         """
         Project X into the manifold defined by all constrains by QR factorization.
         Usually used for update velocity V.
         for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
         define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
+
         Args:
-            X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+            V: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+            X: the point that calculate the projector. If None, stored Q R (maybe last step) will be used.
+            out: the output tensor. If None, return a new tensor.
 
         Returns: th.Tensor, the projected X.
 
         """
-        n_batch, n_atoms, n_dim = X.shape
+        n_batch, n_atoms, n_dim = V.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
         # check consistency
-        if (self._X_qr_cache is None) or (not th.allclose(X, self._X_qr_cache)):
+        if X is not None:
             jac, y = self._jacobian(X)
             self._do_qr(jac)
-            self._X_qr_cache = X.clone()
+        #self._X_qr_cache = X.clone()
 
         # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
         Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
-        Px = (sqrtM * X).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
+        Px = (sqrtM * V).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
         Px = (Q @ (Q.mT.contiguous() @ Px)).reshape(n_batch, n_atoms, n_dim)  # (n_batch, n_atoms, n_dim)
         Px.mul_(negsqrtM)
-        Px = X - Px
+        Px = th.sub(V, Px, out=out)
         # manifold veloc. correction
         if not self.is_const_constr:  # time-dependent constraints
             th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr.unsqueeze(-1), upper=False, out=self.q)
@@ -276,84 +285,250 @@ class BaseConstr(BaseIO):
 
         return Px
 
-    def _project_norm(self, X:th.Tensor) -> th.Tensor:
+    def _project1_for_compile(self, V:th.Tensor, X:th.Tensor | None = None, out: th.Tensor | None = None) -> th.Tensor:
         """
-        Project X to normal space.
+        Project X into the manifold defined by all constrains by QR factorization.
+        Usually used for update velocity V.
         for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
         define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
+
         Args:
-            X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+            V: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+            X: the point that calculate the projector. If None, stored Q R (maybe last step) will be used.
+            out: the output tensor. If None, return a new tensor.
 
         Returns: th.Tensor, the projected X.
 
         """
-        n_batch, n_atoms, n_dim = X.shape
+        n_batch, n_atoms, n_dim = V.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
         # check consistency
-        if (self._X_qr_cache is None) or (not th.allclose(X, self._X_qr_cache)):
+        if X is not None:
             jac, y = self._jacobian(X)
             self._do_qr(jac)
-            self._X_qr_cache = X
+        #self._X_qr_cache = X.clone()
 
         # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
         Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
-        Px = (sqrtM * X).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
+        Px = (sqrtM * V).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
+        Px = (Q @ (Q.mT.contiguous() @ Px)).reshape(n_batch, n_atoms, n_dim)  # (n_batch, n_atoms, n_dim)
+        Px.mul_(negsqrtM)
+        Px = V - Px
+        # manifold veloc. correction
+        if not self.is_const_constr:  # time-dependent constraints
+            th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr.unsqueeze(-1), upper=False, out=self.q)
+            Px = Px + self.negsqrtM * (self.Q @ self.q).reshape(n_batch, n_atoms, n_dim)
+
+        return Px
+
+    def _project_norm(self, V:th.Tensor, X:th.Tensor | None = None) -> th.Tensor:
+        """
+        Project V to normal space.
+        for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
+        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
+        Args:
+            V: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+
+        Returns: th.Tensor, the projected X.
+
+        """
+        n_batch, n_atoms, n_dim = V.shape
+        sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
+        negsqrtM = self.negsqrtM  # M^-1/2
+        # check consistency
+        if X is not None:
+            jac, y = self._jacobian(X)
+            self._do_qr(jac)
+
+        # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
+        Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
+        Px = (sqrtM * V).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
         Px = (Q @ (Q.mT.contiguous() @ Px)).reshape(n_batch, n_atoms, n_dim)  # (n_batch, n_atoms, n_dim)
         Px.mul_(negsqrtM)
 
         return Px
 
-    def _project2(self, X:th.Tensor) -> th.Tensor:
-        r"""
-        Continuously project the Jacobian of all constrains to the exact manifold (by Newton-like iteration).
-        Update X in-place.
+    def _project2(
+            self,
+            X: th.Tensor,
+            X_orig: th.Tensor | None = None,
+            V: th.Tensor | None = None
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """
+        Continuously project the Jacobian of all constrains to the exact manifold.
+        ** Update X and V (if given) in-place.
+        If V is provided, it is updated in-place with the constraint force contribution
+        to velocity, using the converged multiplier mu to avoid subtraction cancellation.
+
         Args:
-            X: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+            X: (n_batch, n_atom, n_dim) coordinates to be projected. Modified in-place.
+            X_orig: reference coordinates for fixed Jacobian basis. Defaults to X.
+            V: (n_batch, n_atom, n_dim) velocities. If given, updated in-place by
+               dv = M^{-1/2} Q mu / time_step, where mu is the converged multiplier.
 
-        Returns: th.Tensor, the constraint forces \lambda.
-
+        Returns:
+            Fc: constraint forces (eV/atom)
+            G, w: Fixman potential related terms (or None)
         """
         n_batch, n_atoms, n_dim = X.shape
-        _lamb = th.zeros(n_batch, self.R.shape[-1], 1, device=self.device)
+        n_constr = self.R.shape[-1]
+        aux_multipler = th.zeros(n_batch, n_constr, device=self.device, dtype=FLOAT_TYPE)
+        dX = th.zeros_like(X)
+        if X_orig is None: X_orig = X
+        time_step = self.time_step
+        constr_thres = self.constr_thres
 
-        # MAIN loop
-        for i in range(0, self.max_proj_iter):
-            # update Jacobian
-            jac, y = self._jacobian(X)
-            # print
-            constr_err = th.max(th.abs(y))
-            if self.verbose > 0:
-                self.logger.info(f'{i: < 3d} Constraint errors are now: {constr_err:.4e}')
-            # threshold
-            if th.all(constr_err < self.constr_thres):
-                # constr. forces lambda
-                Fc = th.linalg.solve_triangular(self.R, _lamb, upper=True)
-                Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
-                self._X_qr_cache = X.clone()
-                return Fc
-            # QR factor.
+        with th.set_grad_enabled(self.require_fixman):
+            X_orig.requires_grad_(self.require_fixman)
+            jac, y = self._jacobian(X_orig)
             self._do_qr(jac)
-            # P = M^1/2 @ (I - Q Q^T) @ M^-1/2
-            # Q(n_batch, n_atoms * n_dim, n_constr)
-            _lamb = th.linalg.solve_triangular(self.R.mT.contiguous(), y.unsqueeze(-1) , upper=False) # (n_batch, n_constr, 1)
-            # (n_batch, n_atoms, n_dim) * (n_batch, n_atoms * n_dim, n_constr) @ (n_batch, n_constr, 1)
-            corr = self.negsqrtM * (self.Q @ _lamb).reshape(n_batch, n_atoms, n_dim)
-            X.add_(corr, alpha=-1.)
+            Q, R = self.Q, self.R
+            sqrtM_Q = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (b, an, c)
+            if self.require_fixman:
+                sqrt_det_Z = th.prod(th.diagonal(R, dim1=-2, dim2=-1), dim=-1).abs()
+                half_logdetZ = th.log(sqrt_det_Z).sum()
+                half_dlnz_dx = th.autograd.grad(half_logdetZ, X_orig)[0].reshape(n_batch, -1)
+                RG = th.einsum('bnc, bn -> bc', sqrtM_Q, half_dlnz_dx)
+                G = th.linalg.solve_triangular(R, RG, upper=True)
+                w = sqrt_det_Z.reciprocal_()
+            else:
+                G = None
+                w = None
+        R.detach_()
+        sqrtM_Q.detach_()
 
-        # if not converged
+        # MAIN loop.
+        X_tmp = self.X_cache
+        X_tmp.copy_(X)
+        for i in range(self.max_proj_iter):
+            jac, y = self._jacobian(X_tmp)
+            constr_err = th.max(th.abs(y))
+            if self.verbose > 0: self.logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
+            if constr_err < constr_thres:
+                X.copy_(X_tmp)
+                # compute constraint forces
+                Fc = th.linalg.solve_triangular(R, aux_multipler, upper=True)
+                Fc *= 207.28617 / (time_step ** 2)  # convert to eV/atom
+                # Numerical safe velocity correction
+                if V is not None:
+                    # dv = M^{-1/2} Q mu / time_step
+                    V.add_(dX.div_(time_step))
+                return Fc, G, w
+
+            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
+            d_mu = th.linalg.solve(aux, -y)
+            aux_multipler.add_(d_mu)
+            dX = th.einsum(
+                'bnc, bc -> bn',
+                sqrtM_Q, aux_multipler
+            ).reshape(n_batch, n_atoms, n_dim)
+            th.add(
+                X,
+                dX,
+                out=X_tmp
+            )
+
+        # If not converged (warning and still update V if requested)
         self.logger.warning("Projection of X to the manifold is not converged.")
-        # constr. forces lambda
-        Fc = th.linalg.solve_triangular(self.R, _lamb, upper=True)
-        ######################
-        # FOR MD, the constraint force used for calculate the free energy gradient should be further processed by
-        #   Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
-        ######################
-        Fc *= 207.28617 / (self.time_step ** 2)  # convert g/mol Angstrom^2 fs^-2 to eV/Atom
-        self._X_qr_cache = X.clone()
+        X.copy_(X_tmp)
+        Fc = th.linalg.solve_triangular(R, aux_multipler, upper=True)
+        Fc *= 207.28617 / (time_step ** 2)
 
-        return Fc
+        # Numerical safe velocity correction
+        if V is not None:
+            # dv = M^{-1/2} Q mu / time_step
+            V.add_(dX.div_(time_step))
 
+        return Fc, G, w
+
+    def _project2_for_compile(
+            self,
+            X: th.Tensor,
+            X_orig: th.Tensor | None = None,
+            V: th.Tensor | None = None
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """
+        Continuously project the Jacobian of all constrains to the exact manifold.
+        ** PURE FUNCTIONAL STYLE FOR COMPILER FRIENDLY **
+        If V is provided, it is updated in-place with the constraint force contribution
+        to velocity, using the converged multiplier mu to avoid subtraction cancellation.
+
+        Args:
+            X: (n_batch, n_atom, n_dim) coordinates to be projected. Modified in-place.
+            X_orig: reference coordinates for fixed Jacobian basis. Defaults to X.
+            V: (n_batch, n_atom, n_dim) velocities. If given, updated in-place by
+               dv = M^{-1/2} Q mu / time_step, where mu is the converged multiplier.
+
+        Returns:
+            Fc: constraint forces (eV/atom)
+            G, w: Fixman potential related terms (or None)
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        n_constr = self.R.shape[-1]
+        aux_multipler = th.zeros(n_batch, n_constr, device=self.device, dtype=FLOAT_TYPE)
+        dX = th.zeros_like(X)
+        if X_orig is None: X_orig = X
+        time_step = self.time_step
+        constr_thres = self.constr_thres
+
+        with th.set_grad_enabled(self.require_fixman):
+            X_orig.requires_grad_(self.require_fixman)
+            jac, y = self._jacobian(X_orig)
+            self._do_qr(jac)
+            Q, R = self.Q, self.R
+            sqrtM_Q = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (b, an, c)
+            if self.require_fixman:
+                sqrt_det_Z = th.prod(th.diagonal(R, dim1=-2, dim2=-1), dim=-1).abs()
+                half_logdetZ = th.log(sqrt_det_Z).sum()
+                half_dlnz_dx = th.autograd.grad(half_logdetZ, X_orig)[0].reshape(n_batch, -1)
+                RG = th.einsum('bnc, bn -> bc', sqrtM_Q, half_dlnz_dx)
+                G = th.linalg.solve_triangular(R, RG, upper=True)
+                w = sqrt_det_Z.reciprocal_()
+            else:
+                G = None
+                w = None
+        R.detach_()
+        sqrtM_Q.detach_()
+
+        # MAIN loop.
+        X_tmp = X.clone()
+        for i in range(self.max_proj_iter):
+            jac, y = self._jacobian(X_tmp)
+            constr_err = th.max(th.abs(y))
+            if self.verbose > 0: self.logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
+            if constr_err < constr_thres:
+                X = X_tmp
+                # compute constraint forces
+                Fc = th.linalg.solve_triangular(R, aux_multipler, upper=True)
+                Fc *= 207.28617 / (time_step ** 2)  # convert to eV/atom
+                # Numerical safe velocity correction
+                if V is not None:
+                    # dv = M^{-1/2} Q mu / time_step
+                    V = V + dX.div_(time_step)
+                return X, V, Fc, G, w
+
+            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
+            d_mu = th.linalg.solve(aux, -y)
+            aux_multipler.add_(d_mu)
+            dX = th.einsum(
+                'bnc, bc -> bn',
+                sqrtM_Q, aux_multipler
+            ).reshape(n_batch, n_atoms, n_dim)
+            X_tmp = th.add(X, dX)
+
+        # If not converged (warning and still update V if requested)
+        self.logger.warning("Projection of X to the manifold is not converged.")
+        X = X_tmp
+        Fc = th.linalg.solve_triangular(R, aux_multipler, upper=True)
+        Fc *= 207.28617 / (time_step ** 2)
+
+        # Numerical safe velocity correction
+        if V is not None:
+            # dv = M^{-1/2} Q mu / time_step
+            V = V + dX.div_(time_step)
+
+        return X, V, Fc, G, w
 
     def _jacobian_derivative(self, X, v: th.Tensor) -> th.Tensor:
         """

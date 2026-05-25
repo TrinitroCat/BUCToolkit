@@ -702,7 +702,7 @@ def constr_func(X):
     ################
     # 固定所有键长的标准差为 `constr_val[7:8]` 的值
     R_ij = th.linalg.norm(X.unsqueeze(0) - X.unsqueeze(1), dim=-1)
-    R_std = th.std(R_ij, unbiased=True)
+    R_std = th.std(R_ij, unbiased=True).unsqueeze(0)
     y.append(R_std)
     
     ###############################

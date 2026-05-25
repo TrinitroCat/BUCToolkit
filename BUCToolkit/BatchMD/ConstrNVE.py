@@ -7,6 +7,7 @@
 #  Environment: Python 3.12
 
 
+import os
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
 import torch as th
@@ -15,6 +16,10 @@ import numpy as np
 
 from BUCToolkit.BatchMD._BaseConstrMD import _BaseConstrMD
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BUCToolkit.utils._Element_info import DTYPE
+
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 
 class ConstrNVE(_BaseConstrMD):
@@ -24,6 +29,10 @@ class ConstrNVE(_BaseConstrMD):
     Parameters:
         time_step: float, time per step (ps).
         max_step: int, maximum steps.
+        constr_func: Callable[[th.Tensor], th.Tensor] = None, the constraint function.
+        constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on the accumulate time.
+        constr_threshold: float = 1e-5, the constraint error tolerance.
+        require_fixman: bool = False, whether to calculate the Fixman term for constraint MD.
         T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: str|torch.device, device that program rum on.
@@ -41,6 +50,7 @@ class ConstrNVE(_BaseConstrMD):
             constr_func: Callable[[th.Tensor], th.Tensor] = None,
             constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None,
             constr_threshold: float = 1e-5,
+            require_fixman: bool = False,
             T_init: float = 298.15,
             output_file: str | None = None,
             output_structures_per_step: int = 1,
@@ -54,12 +64,12 @@ class ConstrNVE(_BaseConstrMD):
             constr_func,
             constr_val,
             constr_threshold,
+            require_fixman,
             output_file,
             output_structures_per_step,
             device,
             verbose
         )
-        self._X, self._V = None, None
 
     def initialize(
             self,
@@ -96,7 +106,8 @@ class ConstrNVE(_BaseConstrMD):
             fixed_atom_tensor,
             is_fix_mass_center
         )
-        self._X, self._V = X, V_init
+        #self._compiled_proj1 = th.compile(self._project1)
+        #self._compiled_proj2 = th.compile(self._project2)
 
     def _updateXV(
             self, X, V, Force,
@@ -108,12 +119,16 @@ class ConstrNVE(_BaseConstrMD):
         # V: th.Tensor = V.contiguous()
         # masses: th.Tensor = masses.contiguous()
         with th.no_grad():
+            X_init = X.clone()
             # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
-            Fc = self._project2(X)  # in-place update
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
             if self.verbose > 0:
-                self.logger.info(f'Constraint forces \\lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             # Update V
             Energy, Force = self._calc_EF(
@@ -127,9 +142,10 @@ class ConstrNVE(_BaseConstrMD):
                 self.require_grad,
                 is_grad_func_contain_y
             )
+            Force.mul_(atom_masks)
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            V.copy_(self._project1(V))
+            self._project1(V, X, out=V)
 
         return X, V, Energy, Force
 

@@ -17,6 +17,8 @@ Constants:
     TRANSITION_P_METALS: The set of transition metals & p-zone metals
 
     NOBLE_METALS: The set of noble metals
+
+    DTYPE: The dict of data type of tensor elements with string format keys
 """
 
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
@@ -24,6 +26,9 @@ Constants:
 #  Version: 0.9a
 #  File: _Element_info.py
 #  Environment: Python 3.12
+
+import torch as th
+
 
 MASS = {
     "X": 1., # A placeholder
@@ -524,4 +529,13 @@ NOBLE_METALS: "The set of noble metals" = {
     "Ir",
     "Pd",
     "Au"
+}
+
+DTYPE = {
+    'float16': th.float16,
+    'float32': th.float32,
+    'float64': th.float64,
+    'bfloat16': th.bfloat16,
+    'complex64': th.complex64,
+    'complex128': th.complex128,
 }
