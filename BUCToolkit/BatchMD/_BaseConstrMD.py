@@ -8,6 +8,7 @@
 
 # ruff: noqa: E701, E702, E703
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
+import os
 
 import torch as th
 from torch import nn
@@ -17,6 +18,10 @@ from ._BaseMD import _BaseMD
 from BUCToolkit.Bases.BaseConstraints import BaseConstr
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BUCToolkit.utils.grad_functions import bjvp, bhvp
+from BUCToolkit.utils._Element_info import DTYPE
+
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 
 class _BaseConstrMD(_BaseMD):
@@ -66,6 +71,7 @@ class _BaseConstrMD(_BaseMD):
             constr_func: Callable | None = None,
             constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
+            require_fixman: bool = False,
             output_file: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
@@ -75,6 +81,7 @@ class _BaseConstrMD(_BaseMD):
             constr_func,
             constr_val,
             constr_threshold,
+            require_fixman,
             device,
             verbose,
         )
@@ -87,7 +94,7 @@ class _BaseConstrMD(_BaseMD):
             output_structures_per_step,
             device,
             verbose,
-            is_compile=False,
+            is_compile=False,  # compiler does not support the proxy scheme `__getattr__`, so that must turn it off.
         )
 
     def __getattr__(self, name):
@@ -182,4 +189,4 @@ class _BaseConstrMD(_BaseMD):
             self.EK_TARGET = (self.free_degree / 2.) * 8.617333262145e-5 * self.T_init
         # calc. constr. intensity
         n_batch, n_constr, _ = self.R.shape
-        self._constr.lamb = th.zeros((n_batch, n_constr), device=self.device)
+        self._constr.X_cache = th.empty_like(X)

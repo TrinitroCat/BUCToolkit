@@ -160,6 +160,31 @@ class BaseMotion(BaseIO):
         return grad_func_, require_grad, is_grad_func_contain_y
 
     @staticmethod
+    def handle_dtype_device(dtype, device, *tensors: th.Tensor|Any):
+        """
+        Move all input tensors to the given dtype and device.
+
+        Args:
+            dtype: torch.dtype or None that means keep the input tensor dtypes
+            device: torch.device, str, or None that means no device changes
+            *tensors: input tensors
+
+        Returns:
+            Tuple[th.Tensor]: transformed tensors in the same order
+        """
+        if isinstance(device, str): device = th.device(device)
+        if (dtype is None) and (device is None):
+            return tensors
+        elif device is None:
+            # Keep original device
+            out_tensors = tuple(ten.to(dtype) if hasattr(ten, 'to') else ten for ten in tensors)
+        elif dtype is None:
+            out_tensors = tuple(ten.to(device) if hasattr(ten, 'to') else ten for ten in tensors )
+        else:
+            out_tensors = tuple(ten.to(device=device, dtype=dtype) if hasattr(ten, 'to') else ten for ten in tensors)
+        return out_tensors
+
+    @staticmethod
     def handle_batch_indices(
             batch_indices,
             n_batch,

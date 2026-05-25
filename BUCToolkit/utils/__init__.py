@@ -8,6 +8,7 @@ from .IrregularTensorReformat import IrregularTensorReformat
 from .AtomicNumber2Properties import atomic_numbers_to_masses, atomic_numbers_to_elements, elements_to_atomic_numbers
 from .check_structures import check_if_abnormal, check_if_converge, batched_check_files
 import BUCToolkit.utils.model_wrappers
+import BUCToolkit.utils.batch_updaters
 from .ElemListReduce import elem_list_reduce
 from ._CheckModules import check_module
 
@@ -21,4 +22,5 @@ __all__ = [
     'batched_check_files',
     'elem_list_reduce',
     'model_wrappers',
+    'batch_updaters'
 ]
