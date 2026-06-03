@@ -644,6 +644,7 @@ class _BaseMD(BaseMotion):
                 _e_tmp, _t_tmp = self._reduce_Ek_T(batch_indices, masses, V)
                 Ek.copy_(_e_tmp)
                 temperature.copy_(_t_tmp)
+            self.Ek_T_graph = Ek_T_graph
             # preload a graph of mass center
             if is_fix_mass_center:
                 mass_center_graph = th.cuda.CUDAGraph()
@@ -947,7 +948,7 @@ class _BaseMD(BaseMotion):
             self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=FLOAT_TYPE)
         # whether grad needs autograd
         self.require_grad = require_grad
-
+        self.Ek_T_graph = None
         # initialize the dumper
         X_arr = X.numpy(force=True)
         _x_dtype = X_arr.dtype.str

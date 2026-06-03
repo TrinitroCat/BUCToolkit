@@ -239,9 +239,9 @@ class FIRE(_BaseOpt):
             func: Any | nn.Module,
             X: th.Tensor,
             grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
+            func_args: Tuple = tuple(),
             func_kwargs: Dict | None = None,
-            grad_func_args: Sequence = tuple(),
+            grad_func_args: Tuple = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,
@@ -347,6 +347,7 @@ class ConstrFIRE(FIRE):
             constr_func,
             constr_val,
             constr_threshold,
+            False,
             device,
             verbose
         )
@@ -385,13 +386,14 @@ class ConstrFIRE(FIRE):
             X: th.Tensor,
             batch_scatter_indices: th.Tensor | None,
     ) -> th.Tensor:
+        X_init = X.clone()
         self.v_: th.Tensor
         self.v_.addcdiv_(g * self.t_, self.masses_, value=-9.64853329045427e-3)
         # trick: not really return the displacement, but return 0. as a placeholder
         # instead, update X in-place
         X.addcmul_(self.v_, self.t_)
-        self._project2(X)
-        self.v_.copy_(self._project1(self.v_))
+        self._project2(X, X_init, self._v)
+        self._project1(self.v_, X, out=self._v)
 
         return self._zero_placeholder
 
@@ -421,7 +423,7 @@ class ConstrFIRE(FIRE):
             require_grad,
             is_grad_func_contain_y,
         )
-        g.copy_(self._project1(g))
+        self._project1(g, X, out=g)
 
         return y, g
 
@@ -430,9 +432,9 @@ class ConstrFIRE(FIRE):
             func: Any | nn.Module,
             X: th.Tensor,
             grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
+            func_args: Tuple = tuple(),
             func_kwargs: Dict | None = None,
-            grad_func_args: Sequence = tuple(),
+            grad_func_args: Tuple = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,

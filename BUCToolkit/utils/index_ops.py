@@ -118,9 +118,9 @@ def indices_pairwise_dist(
         Qx: th.Tensor,            # [N]，continuous sample indices in the batch X, 0,0,...,1,1,...,B-1
         Qy: th.Tensor | None = None,
         thres: float | None = None,
-        metric: Literal['euclidean', 'dot', 'cosine']|Callable[[th.Tensor, th.Tensor, ...], th.Tensor] = "euclidean",  # 'euclidean' | 'dot' | 'cosine'
+        metric: Literal['euclidean', 'dot', 'cosine']|Callable[[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, ...], th.Tensor] = "euclidean",  # 'euclidean' | 'dot' | 'cosine'
         metric_kwargs: Dict|None = None,
-        relation: Literal['lt', 'gt'] = "gt",
+        relation: Literal['lt', 'gt'] = "lt",
         exclude_diag: bool = True,
         is_symmetric: bool = False,
         return_values: bool = True,
@@ -135,7 +135,7 @@ def indices_pairwise_dist(
         Qx: Tensor[int64], indices tensor of X.
         Qy: Tensor[int64], indices tensor of Y.
         thres: if not None, only distance greater/less (depends on `relation`) than `thres` will be output. Otherwise, all dist will be output.
-        metric: distance calculation method.
+        metric: distance calculation method. It receives metric(xr, yc, row_s, col_s, Qe_s, **metric_kwargs)
         metric_kwargs: the keyword arguments passed to `metric` if `metric` is Callable.
         relation: check `thres` greater (gt) or less (lt) than `thres`.
         exclude_diag: whether to exclude diagonals.
@@ -235,7 +235,7 @@ def indices_pairwise_dist(
     xr, yc = Xs[row_s], Ys[col_s]  # [E, M], x_row, y_column
 
     if isinstance(metric, Callable):
-        val = metric(xr, yc, **metric_kwargs)
+        val = metric(xr, yc, row_s, col_s, Qe_s, **metric_kwargs)
     elif metric == "euclidean":
         n2x = th.linalg.vecdot(Xs, Xs)
         n2y = th.linalg.vecdot(Ys, Ys)
