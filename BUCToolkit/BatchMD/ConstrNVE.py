@@ -106,8 +106,6 @@ class ConstrNVE(_BaseConstrMD):
             fixed_atom_tensor,
             is_fix_mass_center
         )
-        #self._compiled_proj1 = th.compile(self._project1)
-        #self._compiled_proj2 = th.compile(self._project2)
 
     def _updateXV(
             self, X, V, Force,

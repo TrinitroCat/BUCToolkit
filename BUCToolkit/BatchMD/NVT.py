@@ -54,7 +54,7 @@ class NVT(_BaseMD):
         """
         Parameters:
             time_step: float, time per step (ps).
-            max_step: maxmimum steps.
+            max_step: maximum steps.
             thermostat: str, the thermostat of NVT ensemble.
             thermostat_config: Dict|None, configs of thermostat. {'damping_coeff': float} for Langevin, {'time_const': float} for CSVR, {'virt_mass': float} for Nose-Hoover.
             T_init: initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
@@ -83,6 +83,7 @@ class NVT(_BaseMD):
         self.thermostat_config = thermostat_config
         self.update_scheme = None  # lazy loaded in self.initialize
         self.half_time_step_const = 0.5 * self.time_step * 9.64853329045427e-3
+        self.raw_half_time_step_const = 0.5 * self.time_step
 
     def __resolve_update_scheme(self, batch_indices):
         """
@@ -162,18 +163,25 @@ class NVT(_BaseMD):
             is_grad_func_contain_y,
             batch_indices
     )-> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """
+        BAOAB style Langevin thermostat.
+        References: J. Chem. Phys. 138, 174102 (2013)
+
+        """
         # read thermostat configs
         X = X.detach()
+        half_time_step_const = self.half_time_step_const
+        raw_half_time_step_const = self.raw_half_time_step_const
         with th.no_grad():
             alpha = self.alpha
             # half-step
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            X.add_(V, alpha = 0.5 * self.time_step)
+            V.addcdiv_(Force, masses, value=half_time_step_const)
+            X.add_(V, alpha = raw_half_time_step_const)
             # stochastic update velocity
             V.mul_(alpha)
             V.add_(th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V))
             #V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
-            X.add_(V, alpha = 0.5 * self.time_step)
+            X.add_(V, alpha = raw_half_time_step_const)
             # update energy & forces
             Energy, Force = self._calc_EF(
                 X,
@@ -188,8 +196,7 @@ class NVT(_BaseMD):
             )
             Force.mul_(atom_masks)
             # the rest half-step
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-
+            V.addcdiv_(Force, masses, value=half_time_step_const)
 
         return X, V, Energy, Force
 
@@ -261,14 +268,16 @@ class NVT(_BaseMD):
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """
         The Analytic solution of CSVR that uses Chi^2 distribution and exp.
-        Returns:
+
+        References: J. Chem. Phys. 126, 014101 (2007)
 
         """
-
+        half_time_step_const = self.half_time_step_const
+        time_step = self.time_step
         with th.no_grad():
             # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            X.add_(V, alpha=self.time_step)
+            V.addcdiv_(Force, masses, value=half_time_step_const)
+            X.add_(V, alpha=time_step)
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             # Update V
             Energy, Force = self._calc_EF(
@@ -285,7 +294,11 @@ class NVT(_BaseMD):
             Force.mul_(atom_masks)
 
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            V.addcdiv_(Force, masses, value=half_time_step_const)
+            if self.Ek_T_graph is not None:
+                self.Ek_T_graph.replay()
+            else:
+                self.Ek, _ = self._reduce_Ek_T(batch_indices, masses, V)
             Nf = self.free_degree  # shape (n_batch,)
             if batch_indices is not None:
                 K = th.clamp(self.Ek, min=self.epsK)  # shape (n_batch,)
@@ -350,7 +363,9 @@ class NVT(_BaseMD):
             is_grad_func_contain_y,
             batch_indices
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        n_batch, n_atom, n_dim = X.shape
+        half_time_step_const = self.half_time_step_const
+        raw_half_time_step_const = self.raw_half_time_step_const
+        time_step = self.time_step
         smass = self.smass
         # Main update
         with th.no_grad():
@@ -358,9 +373,9 @@ class NVT(_BaseMD):
                 _iota = self.p_iota[:, self.batch_scatter, :]
             else:
                 _iota = self.p_iota
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            V.mul_(th.exp(- _iota * 0.5 * self.time_step))
-            X.add_(V, alpha=self.time_step)
+            V.addcdiv_(Force, masses, value=half_time_step_const)
+            V.mul_(th.exp(- _iota * raw_half_time_step_const))
+            X.add_(V, alpha=time_step)
 
             Energy, Force = self._calc_EF(
                 X,
@@ -384,11 +399,11 @@ class NVT(_BaseMD):
                 # self.p_iota = p_iota + 0.5 * dt * (reducedEk - Nf * T)/smass
                 self.p_iota.addcdiv_(
                     th.sub(reduced_Ek, self.long_free_degree, alpha=self.T_init * 8.617333262145e-5),
-                    smass, value=self.time_step * 0.5
+                    smass, value=raw_half_time_step_const
                 )
                 _iota = self.p_iota[:, self.batch_scatter, :]  # (1, n_batch*n_atom, 1)
-                V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-                V.mul_(th.exp(- _iota * 0.5 * self.time_step))
+                V.addcdiv_(Force, masses, value=half_time_step_const)
+                V.mul_(th.exp(- _iota * raw_half_time_step_const))
                 reduced_Ek = th.sum(
                     index_reduce(masses * V ** 2 * 103.642696562621738, self.batch_scatter, 1, out_size=self.scatter_dim_out_size),
                     dim=-1,
@@ -397,26 +412,25 @@ class NVT(_BaseMD):
                 # self.p_iota = p_iota + 0.5 * dt * (reducedEk - Nf * T)/smass
                 self.p_iota.addcdiv_(
                     th.sub(reduced_Ek, self.long_free_degree, alpha=self.T_init * 8.617333262145e-5),
-                    smass, value=self.time_step * 0.5
+                    smass, value=raw_half_time_step_const
                 )
             else:
                 reduced_Ek = th.sum(masses * V ** 2 * 103.642696562621738, dim=(-2, -1), keepdim=True)
                 # self.p_iota = p_iota + 0.5 * dt * (reducedEk - Nf * T)/smass
                 self.p_iota.addcdiv_(
                     th.sub(reduced_Ek, self.long_free_degree, alpha=self.T_init * 8.617333262145e-5),
-                    smass, value=self.time_step * 0.5
+                    smass, value=raw_half_time_step_const
                 )
-                V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-                V.mul_(th.exp(- _iota * 0.5 * self.time_step))
+                V.addcdiv_(Force, masses, value=half_time_step_const)
+                V.mul_(th.exp(- _iota * raw_half_time_step_const))
                 reduced_Ek = th.sum(masses * V ** 2 * 103.642696562621738, dim=(-2, -1), keepdim=True)
                 # self.p_iota = p_iota + 0.5 * dt * (reducedEk - Nf * T)/smass
                 self.p_iota.addcdiv_(
                     th.sub(reduced_Ek, self.long_free_degree, alpha=self.T_init * 8.617333262145e-5),
-                    smass, value=self.time_step * 0.5
+                    smass, value=raw_half_time_step_const
                 )
 
         return X, V, Energy, Force
-
 
     def _updateXV(
             self,

@@ -14,6 +14,7 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARR
 from BUCToolkit.utils._Element_info import DTYPE
 from BUCToolkit.utils.grad_functions import bhvp
 from BUCToolkit.Bases.BaseMotion import BaseIO
+from torch._dynamo import export as dynamo_export
 
 FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
 FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
@@ -120,6 +121,7 @@ class BaseConstr(BaseIO):
         self.max_proj_iter = 10
         self.constr_thres = constr_threshold
         self.X_cache = None  # constr force, i.e., the mu of Lagrange multipler
+        self._compiled_jac = None  # pre-compiled Jacobian for replay
 
         self._X_qr_cache = None  # check the consistency of X in project1, ensuring it is the new tangent space projection
 
@@ -163,6 +165,7 @@ class BaseConstr(BaseIO):
         jac, y = self._jacobian(X)
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
+        self._build_compiled_jacobian(X)
         self._do_qr(jac)
         # calc. constr. intensity
         n_batch, n_constr, _ = self.R.shape
@@ -219,6 +222,41 @@ class BaseConstr(BaseIO):
         if not self.is_const_constr:
             self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now)  #  d s_k(r)/dt
 
+    def _build_compiled_jacobian(self, X_sample: th.Tensor):
+        """
+        Pre-compile the Jacobian computation by:
+            1) dynamo_export the constraint function to a static ATen graph (once)
+            2) wrap with vmap(jacrev(has_aux)) for batched Jacobian
+            3) torch.compile the result → replay for all subsequent steps
+
+        Falls back to eager mode if export/compile fails.
+        """
+        try:
+            with th.no_grad():
+                sample = X_sample[0:1].detach()  # single batch item
+                exported = dynamo_export(self.constr_func)(sample.squeeze(0))
+                traced_fn = exported.graph_module
+
+            def _wrapped(X_single, constr_val):
+                y = traced_fn(X_single) - constr_val
+                return y, y
+
+            jac_fn = th.func.vmap(
+                th.func.jacrev(_wrapped, argnums=0, has_aux=True),
+                in_dims=(0, None)
+            )
+            self._compiled_jac = th.compile(jac_fn, fullgraph=False, dynamic=True)
+
+            # Warmup to trigger actual compilation
+            _ = self._compiled_jac(X_sample, self.constr_val_now)
+
+            if self.verbose:
+                self.logger.info('Constraint Jacobian compiled successfully.')
+        except Exception as e:
+            if self.verbose:
+                self.logger.warning(f'Jacobian compilation failed ({type(e).__name__}): {e}. Falling back to eager.')
+            self._compiled_jac = None
+
     def _jacobian(self, X: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """
         Compute the Jacobian of all constrains.
@@ -229,7 +267,10 @@ class BaseConstr(BaseIO):
 
         """
         self._update_constr()
-        jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
+        if self._compiled_jac is not None:
+            jac, y = self._compiled_jac(X, self.constr_val_now)
+        else:
+            jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
         self.jac = jac
         return jac, y
 
@@ -320,7 +361,11 @@ class BaseConstr(BaseIO):
             th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr.unsqueeze(-1), upper=False, out=self.q)
             Px = Px + self.negsqrtM * (self.Q @ self.q).reshape(n_batch, n_atoms, n_dim)
 
-        return Px
+        if isinstance(out, th.Tensor):
+            out.copy_(Px)
+        else:
+            out = Px
+        return out
 
     def _project_norm(self, V:th.Tensor, X:th.Tensor | None = None) -> th.Tensor:
         """
@@ -447,7 +492,7 @@ class BaseConstr(BaseIO):
             X: th.Tensor,
             X_orig: th.Tensor | None = None,
             V: th.Tensor | None = None
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
         Continuously project the Jacobian of all constrains to the exact manifold.
         ** PURE FUNCTIONAL STYLE FOR COMPILER FRIENDLY **
@@ -498,15 +543,16 @@ class BaseConstr(BaseIO):
             constr_err = th.max(th.abs(y))
             if self.verbose > 0: self.logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
             if constr_err < constr_thres:
-                X = X_tmp
+                X.copy_(X_tmp)
                 # compute constraint forces
                 Fc = th.linalg.solve_triangular(R, aux_multipler, upper=True)
                 Fc *= 207.28617 / (time_step ** 2)  # convert to eV/atom
                 # Numerical safe velocity correction
                 if V is not None:
                     # dv = M^{-1/2} Q mu / time_step
-                    V = V + dX.div_(time_step)
-                return X, V, Fc, G, w
+                    V.add_(dX.div_(time_step))
+
+                return Fc, G, w
 
             aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
             d_mu = th.linalg.solve(aux, -y)
@@ -519,16 +565,16 @@ class BaseConstr(BaseIO):
 
         # If not converged (warning and still update V if requested)
         self.logger.warning("Projection of X to the manifold is not converged.")
-        X = X_tmp
+        X.copy_(X_tmp)
         Fc = th.linalg.solve_triangular(R, aux_multipler, upper=True)
         Fc *= 207.28617 / (time_step ** 2)
 
         # Numerical safe velocity correction
         if V is not None:
             # dv = M^{-1/2} Q mu / time_step
-            V = V + dX.div_(time_step)
+            V.add_(dX.div_(time_step))
 
-        return X, V, Fc, G, w
+        return Fc, G, w
 
     def _jacobian_derivative(self, X, v: th.Tensor) -> th.Tensor:
         """

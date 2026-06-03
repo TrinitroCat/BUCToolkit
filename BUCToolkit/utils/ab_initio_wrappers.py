@@ -24,7 +24,7 @@ class VASP_Model(_BaseWrapper):
     Args:
         input_path: The path to the standard input files for VASP static calculation.
             Including `INCAR` `POSCAR` `KPOINTS` `POTCAR`, etc.
-        submit_script: the file name of the slurm script to submit tasks. It must be at the `input_path`.
+        submit_script: List[str], the list of file name of the slurm script to submit tasks or commands to run VASP.
             subprocess will execute this script to submit tasks. A typical example includes `sbatch -w $submit_script`.
         is_reuse_WAVECAR: whether to reuse WAVECAR file from last step output as the initial guess. (use move instead of copy)
 
@@ -41,8 +41,8 @@ class VASP_Model(_BaseWrapper):
         elif not os.path.isfile(os.path.join(input_path, 'KPOINTS')):
             raise FileNotFoundError(f"KPOINTS file not found at {input_path}.")
 
-        if not os.path.isfile(os.path.join(input_path, submit_script)):
-            raise FileNotFoundError(f"submit_script file {submit_script} not found at {input_path}.")
+        #if not os.path.isfile(os.path.join(input_path, submit_script)):
+        #    raise FileNotFoundError(f"submit_script file {submit_script} not found at {input_path}.")
 
         self.submit_script = submit_script
         self.input_path = input_path
@@ -87,7 +87,7 @@ class VASP_Model(_BaseWrapper):
         #)
         # local test
         res = subprocess.run(
-            [f"{self.submit_script}"],
+            self.submit_script,
             capture_output=True,
             cwd=os.path.join(self.input_path, str(self.step)),
             text=True
