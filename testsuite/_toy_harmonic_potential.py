@@ -2,7 +2,7 @@ import torch as th
 import torch.nn as nn
 from typing import List, Union, Tuple
 import itertools
-from torch_geometric.data import Data, Batch
+from BUCToolkit.BatchStructures.batch import Data, Batch
 
 
 class HarmonicLatticePotential(nn.Module):

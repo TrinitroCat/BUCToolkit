@@ -9,6 +9,7 @@ import os
 import glob
 import math
 import sys
+sys.path.insert(0, os.path.dirname(__file__))
 
 import torch as th
 import numpy as np
@@ -21,6 +22,7 @@ from BUCToolkit.BatchMD import ConstrNVE, ConstrNVT
 from BUCToolkit.BatchOptim import QN, CG, FIRE, Frequency
 from BUCToolkit.BatchMC import MMC
 from BUCToolkit.utils.AtomicNumber2Properties import MASS
+
 from _toy_harmonic_potential import (HarmonicLatticePotential, SimpleSpringPotential, LennardJonesCluster, DoubleWellPotential,
                                                MullerBrownPotential, FreeParticles, build_cubic_lattice_batch, build_cubic_lattice_data)
 from BUCToolkit.api._io import PygBatchUpdater
