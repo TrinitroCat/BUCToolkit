@@ -589,91 +589,107 @@ class BaseConstr(BaseIO):
         vH: th.Tensor = bhvp(self._constr_func_for_hvp, (X,), (v,), False)  # (n_batch, n_constr, n_atom, n_dim)
         return vH.contiguous()
 
-    def christoffel_solver(self, X: th.Tensor, V:th.Tensor, max_iter=20, tol=1e-6, omega=0.7):
-        """
-        iteratively solve the Christoffel symbol term by implicit midpoint method.
-        function implicit_midpoint_step(r_n, v_n, h, tol=1e-8, max_iter=10)
-        """
-        raise NotImplementedError(f"Not implemented yet.")
-        n_batch, n_atom, n_dim = X.shape
-        V_old = V.clone()
-        V_new = V
-        X_old = X.clone()
-        X_new = X
-        X_new.add_(V_old, alpha=self.time_step)
+    def christoffel_solver(
+            self,
+            X: th.Tensor,
+            V: th.Tensor,
+            F_tan: th.Tensor | None = None,
+            max_iter: int = 20,
+            tol: float = 1e-6,
+            omega: float = 0.7
+    ):
+        r"""
+        Implicit midpoint integration of the constrained geodesic equation:
 
-        for _ in range(max_iter):
-            X_mid = (X_new + X_old)/2.  # r_{1/2} = (r_n + r_{n+1})/2
-            V_mid = (V_new + V_old)/2.  # v_{1/2} = (v_n + v_{n+1})/2
-            # calc. Christoffel. Christoffel symbol is `M^-1/2 Q R^-T J' v`
-            dJ = self._jacobian_derivative(X_mid, V_mid)  # the J', which J' = v^T H, shape: (n_batch, n_constr, n_atom, n_dim)
-            djr = th.einsum('ijkl, ikl -> ij', dJ, V_mid)  # the `J' v`, (n_batch, n_constr)
-            # The `R^-T J' v`, solving (n_batch, n_constr, n_constr) x = (n_batch, n_constr, 1) -> x(n_batch, n_constr, 1)
-            _RTjr = th.linalg.solve_triangular(self.R.mT.contiguous(), djr.unsqueeze(-1), upper=False)
-            # Christoffel symbol: (B, N, N) @ (B, N, K) @ (B, K, 1) -> (n_batch, n_free, 1) -> (n_batch, n_atom, n_dim)
-            Christoffel = self.negsqrtM * (self.Q @ _RTjr).reshape(n_batch, n_atom, n_dim)
-            # residuals
-            resi_x = X_new - th.add(X_old, V_mid, alpha=self.time_step)
-            resi_v = V_new - th.add(V_old, Christoffel, alpha=-self.time_step)
-            converge_mask_x = th.linalg.norm(resi_x, dim=(-2, -1)) < self.constr_thres
-            converge_mask_v = th.linalg.norm(resi_v, dim=(-2, -1)) < self.constr_thres
-            if th.all(converge_mask_x & converge_mask_v):
+            dV/dt = -Gamma(V, V) + M^{-1} F_tan
+
+        where Gamma = M^{-1/2} Q R^{-T} (V^T H) V  is the Christoffel symbol
+        capturing the curvature of the constraint manifold, and F_tan is the
+        tangent-space projection of the physical forces.
+
+        Uses the Woodbury identity to reduce the Newton-step matrix inverse
+        from O(N_free^3) to O(k^3), where k << N_free is the number of constraints.
+
+        Args:
+            X:     current positions  (n_batch, n_atom, n_dim)
+            V:     current velocities (n_batch, n_atom, n_dim)
+            F_tan: tangent-projected forces, or None for pure-geodesic flow
+            max_iter: maximum Newton iterations
+            tol:      convergence tolerance on the residual norm
+            omega:    SOR relaxation factor (< 1 damps, =1 pure Newton)
+
+        Returns:
+            X_new, V_new  – updated in-place.
+        """
+        n_batch, n_atom, n_dim = X.shape
+        n_free = n_atom * n_dim
+        dt = self.time_step
+
+        # Precompute Woodbury blocks (independent of X_new, V_new)
+        B = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (B, n_free, k)
+        B_T = B.mT.contiguous()                               # (B, k, n_free)
+        eye_k = th.eye(self.R.shape[-1], device=X.device, dtype=X.dtype).expand(n_batch, -1, -1)
+
+        V_old = V.clone()
+        X_old = X.clone()
+        # Initial guess: explicit Euler half-step
+        X_new = X.add(V_old, alpha=dt)
+        V_new = V.clone()
+        if F_tan is not None:
+            # Include force: V_new = V_old + dt * acc, acc = M^{-1} F_tan (F_tan is already force)
+            acc = F_tan * self.negsqrtM * self.negsqrtM  # M^{-1} = negsqrtM^2
+            V_new.add_(acc, alpha=dt)
+
+        for it in range(max_iter):
+            X_mid = (X_new + X_old) * 0.5
+            V_mid = (V_new + V_old) * 0.5
+
+            # Compute Christoffel symbol: Gamma = B @ R^{-T} @ (J' V_mid)
+            dJ = self._jacobian_derivative(X_mid, V_mid)       # (B, k, N, D)
+            dJ_flat = dJ.flatten(-2, -1)                        # (B, k, n_free)
+            Jp_V = th.einsum('bkn, bn -> bk', dJ_flat, V_mid.flatten(-2, -1))  # J'·V_mid  (B, k)
+            _sol = th.linalg.solve_triangular(
+                self.R.mT.contiguous(), Jp_V.unsqueeze(-1), upper=False
+            )                                                    # R^{-T} J'·V  (B, k, 1)
+            Gamma = (B @ _sol).reshape(n_batch, n_atom, n_dim)  # Christoffel (B, N, D)
+
+            # Residuals for the implicit midpoint system
+            # R_X = X_new - X_old - dt * V_mid
+            R_X = X_new - X_old - dt * V_mid
+            # R_V = V_new - V_old - dt * (acc - Gamma)
+            if F_tan is not None:
+                R_V = V_new - V_old - dt * (acc - Gamma)
+            else:
+                R_V = V_new - V_old + dt * Gamma
+
+            # Convergence check
+            norm_RX = th.linalg.norm(R_X.reshape(n_batch, -1), dim=-1)
+            norm_RV = th.linalg.norm(R_V.reshape(n_batch, -1), dim=-1)
+            if th.all((norm_RX < tol) & (norm_RV < tol)):
+                V.copy_(V_new)
+                X.copy_(X_new)
                 return X_new, V_new
 
-            # denote B = M^-1/2 Q R^-T, B(n_batch, n_free, n_constr), n_free = n_atom * n_dim.
-            # B H v = B j': (n_batch, n_constr, n_free) @ (n_batch, n_constr, n_free)
-            # Here Newton algo. is used to solve the implicit midpoint eq.:
-            #   X_new = X_old + dt * V_mid
-            #   V_new = V_old + dt * B V_mid^T H V_mid
-            # and corresp. residuals:
-            #   R_X = X_new - X_old - dt * V_mid
-            #   R_V = V_new - V_old - dt * B V_mid^T H V_mid
-            #
-            # The Newton iter. formulae:
-            #   [X_new, V_new]^T = [X_new, V_new]^T - J([R_X, R_V])^-1 [R_X, R_V]^T
-            # where J([R_X, R_V]) =
-            #   [[I,       -0.5 * dt * I],
-            #    [DH, I + dt * B H V_mid]]
-            # DH = \partial R_V / \partial X_new, that requires the complicated derivative of H. Here we ignore this term.
-            # Hence J([R_X, R_V]) =
-            #   [[I,      -0.5 * dt * I],
-            #    [O, I + dt * B H V_mid]]
-            # and J^-1 =
-            #   [[I, 0.5 * dt * P],
-            #    [O,            P]]
-            # where P is the inverse of `I + dt * B H V_mid`.
-            #
-            # Hence, the iteration formulae are:
-            #   * X_new = X_new - (R_X + 0.5 * dt * P @ R_V)
-            #   * V_new = V_new - P @ R_V
-            # For solving P, Woodbury identity: (I + U V^T)^-1 = I - U (I + V^T U)^-1 V^T can be applied:
-            #   denote `H V_mid` with dJ^T, (I + dt * B H V_mid)^-1 = (I + dt * B dJ^T)^-1
-            #   (I + dt * B dJ^T)^-1 = I - dt * B (I + dJ^T B*dt)^-1 dJ^T
-            # Hence P @ R_V can be calculated as :
-            # P @ R_V = RV - dt * B @ linalg.solve(I + dJ^T @ B*dt, dJ^T @ R_V)
-            #
-            # Fully expand:
-            #   * P @ R_V = RV - dt * M^-1/2 @ Q @ R^-T @ linalg.solve(I + dJ^T @ M^-1/2 @ Q @ R^-T * dt, dJ^T @ R_V)
+            # --- Newton update with Woodbury identity ---
+            # dJ_flat^T = dJ.mT, shape (B, n_free, k)
+            dJ_T = dJ_flat.mT.contiguous()                     # (B, n_free, k)
+            dJ_T_B = th.bmm(dJ_T, B)                           # (B, k, k)
+            M_wood = eye_k + dt * dJ_T_B                       # I + dt * dJ^T B
+            rv_flat = R_V.reshape(n_batch, -1, 1)               # (B, n_free, 1)
 
-            # #######################################################################3
-        #    J_mid, y = self._jacobian(r_mid)  # (n_constr, n_atom * n_dim)
-        #    self._do_qr(J_mid)  # (n_f, n_constr), (n_constr, n_constr)
-        #    J_dot_mid = self._jacobian_derivative(r_mid, v_mid).reshape(1, -1)  # (n_constr, n_atom * n_dim)
-        #    _v = v_mid.reshape(-1, 1)
-        #    _y = J_dot_mid @ _v  # (n_constr, n_f) @ (n_atom*n_dim, 1) = (n_constr, 1)
-        #    _y = np.linalg.solve(R_mid.T, _y)  # (n_constr, n_constr) @ (n_constr, 1) = (n_constr, 1)
-        #    # (n_f, n_f) @ (n_f, n_constr) @ (n_constr, 1) = (n_f, 1)
-        #    Gamma = M_sqrt_inv @ Q_mid @ _y
-#
-        #    v_candidate = v_old - dt * Gamma.reshape(n_atom, n_dim)
-        #    v_next = omega * v_candidate + (1 - omega) * v_new
-#
-        #    eps = np.linalg.norm(v_next - v_new)
-        #    print(f'{_ + 1} Residuals: {eps}')
-        #    if eps < tol:
-        #        return v_next
-#
-        #    v_new = v_next
-#
-        #print('Not Converged !')
-        #return v_new
+            dJ_T_rv = th.bmm(dJ_T, rv_flat)                    # dJ^T @ R_V  (B, k, 1)
+            sol_W = th.linalg.solve(M_wood, dJ_T_rv)           # (I + dt dJ^T B)^{-1} dJ^T R_V
+            P_RV = rv_flat - dt * th.bmm(B, sol_W)              # P @ R_V  (B, n_free, 1)
+
+            dV = P_RV.reshape(n_batch, n_atom, n_dim)
+            dX = (R_X + 0.5 * dt * dV)
+
+            # SOR relaxation
+            V_new = V_new - dV
+            V_new = omega * V_new + (1.0 - omega) * V
+            X_new = X_new - dX
+
+        # Did not converge – return best effort
+        V.copy_(V_new)
+        X.copy_(X_new)
+        return X_new, V_new
