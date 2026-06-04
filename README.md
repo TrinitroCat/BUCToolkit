@@ -1,5 +1,6 @@
 ![image](logo_cut.jpg)
 # BUCToolkit
+* [中文版](README-zh.md)
 
 ## Table of contents
 - [BUCToolkit](#BUCToolkit)
