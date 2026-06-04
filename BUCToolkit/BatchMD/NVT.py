@@ -126,7 +126,7 @@ class NVT(_BaseMD):
             self.one_sub_c = 1 - c
             # avoid divide-by-zero in K
             self.epsK = th.scalar_tensor(1e-12, device=self.device, dtype=th.float32)
-            return self.__CSVR
+            return self.__CSVR_cpu if self.device.type != 'cuda' else self.__CSVR_cuda
         else:
             raise NotImplementedError("Unknown Thermostat Type.")
 
@@ -164,7 +164,6 @@ class NVT(_BaseMD):
         self._buf_F = None
         self._graph_A = None
         self._graph_B = None
-        self._graphs_built = False
 
     def _build_csver_graphs(self, X, masses, V, atom_masks, batch_indices):
         """Build CUDAGraphs A and B for CSVR thermostat using real simulation tensors."""
@@ -304,94 +303,101 @@ class NVT(_BaseMD):
 
         return X, V, Energy, Force
 
-    def __CSVR(
+    def __CSVR_cpu(
             self,
-            X,
-            V,
-            Force,
-            func,
-            grad_func_,
-            func_args,
-            func_kwargs,
-            grad_func_args,
-            grad_func_kwargs,
-            masses,
-            atom_masks,
-            is_grad_func_contain_y,
-            batch_indices
+            X, V, Force,
+            func, grad_func_,
+            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+            masses, atom_masks, is_grad_func_contain_y, batch_indices
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """
-        The Analytic solution of CSVR that uses Chi^2 distribution and exp.
-
-        References: J. Chem. Phys. 126, 014101 (2007)
-
-        """
-        half_time_step_const = self.half_time_step_const
+        """ Eager CSVR update (CPU path). """
+        half_dt = self.half_time_step_const
         time_step = self.time_step
         with th.no_grad():
-            # One-time graph capture with real tensors (first step only)
-            if not self._graphs_built and self.device.type == 'cuda':
-                self._buf_F = th.empty_like(X)
-                self._build_csver_graphs(X, masses, V, atom_masks, batch_indices)
-                self._graphs_built = True
-
-            if self._graph_A is not None:
-                self._buf_F.copy_(Force)
-                self._graph_A.replay()
-                Energy, Force = self._calc_EF(
-                    X, func, func_args, func_kwargs,
-                    grad_func_, grad_func_args, grad_func_kwargs,
-                    self.require_grad, is_grad_func_contain_y
-                )
-                self._buf_F.copy_(Force)
-                Nf = self.free_degree
-                if batch_indices is not None:
-                    self._buf_R.copy_(th.randn_like(self._buf_R))
-                    _df = th.clamp(Nf - 1.0, min=1.0)
-                    self._buf_S.copy_(th.distributions.chi2.Chi2(df=_df).sample())
-                else:
-                    self._buf_R.copy_(th.randn_like(self._buf_R))
-                    _df = th.clamp(Nf - 1.0, min=1.0)
-                    self._buf_S.copy_(th.distributions.chi2.Chi2(df=_df).sample())
-                self._graph_B.replay()
+            V.addcdiv_(Force, masses, value=half_dt)
+            X.add_(V, alpha=time_step)
+            Energy, Force = self._calc_EF(
+                X, func, func_args, func_kwargs,
+                grad_func_, grad_func_args, grad_func_kwargs,
+                self.require_grad, is_grad_func_contain_y
+            )
+            Force.mul_(atom_masks)
+            V.addcdiv_(Force, masses, value=half_dt)
+            if self.Ek_T_graph is not None:
+                self.Ek_T_graph.replay()
             else:
-                V.addcdiv_(Force, masses, value=half_time_step_const)
-                X.add_(V, alpha=time_step)
-                Energy, Force = self._calc_EF(
-                    X, func, func_args, func_kwargs,
-                    grad_func_, grad_func_args, grad_func_kwargs,
-                    self.require_grad, is_grad_func_contain_y
-                )
-                Force.mul_(atom_masks)
-                V.addcdiv_(Force, masses, value=half_time_step_const)
-                if self.Ek_T_graph is not None:
-                    self.Ek_T_graph.replay()
-                else:
-                    self.Ek, _ = self._reduce_Ek_T(batch_indices, masses, V)
-                Nf = self.free_degree
-                if batch_indices is not None:
-                    K = th.clamp(self.Ek, min=self.epsK)
-                    f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                    sqrt_f = th.sqrt(th.clamp(f, min=0.0))
-                    R = th.randn_like(K)
-                    _df = th.clamp(Nf - 1.0, min=1.0)
-                    S = th.distributions.chi2.Chi2(df=_df).sample()
-                    alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
-                    alpha2.addcmul_(f, S).clamp_min_(self.epsK)
-                    alpha = th.sqrt(alpha2).reshape(1, -1, 1)
-                    V *= alpha.index_select(1, self.batch_scatter)
-                else:
-                    K = th.clamp(self.Ek, min=self.epsK)
-                    f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                    sqrt_f = th.sqrt(th.clamp(f, min=0.0))
-                    R = th.randn_like(K)
-                    _df = th.clamp(Nf - 1.0, min=1.0)
-                    S = th.distributions.chi2.Chi2(df=_df).sample()
-                    alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
-                    alpha2.addcmul_(f, S).clamp_min_(self.epsK)
-                    alpha = th.sqrt(alpha2).reshape(-1, 1, 1)
-                    V *= alpha
+                self.Ek, _ = self._reduce_Ek_T(batch_indices, masses, V)
+            Nf = self.free_degree
+            if batch_indices is not None:
+                K = th.clamp(self.Ek, min=self.epsK)
+                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                R = th.randn_like(K)
+                _df = th.clamp(Nf - 1.0, min=1.0)
+                S = th.distributions.chi2.Chi2(df=_df).sample()
+                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
+                alpha2.addcmul_(f, S).clamp_min_(self.epsK)
+                alpha = th.sqrt(alpha2).reshape(1, -1, 1)
+                V *= alpha.index_select(1, self.batch_scatter)
+            else:
+                K = th.clamp(self.Ek, min=self.epsK)
+                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                R = th.randn_like(K)
+                _df = th.clamp(Nf - 1.0, min=1.0)
+                S = th.distributions.chi2.Chi2(df=_df).sample()
+                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
+                alpha2.addcmul_(f, S).clamp_min_(self.epsK)
+                alpha = th.sqrt(alpha2).reshape(-1, 1, 1)
+                V *= alpha
+        return X, V, Energy, Force
 
+    def __CSVR_cuda(
+            self,
+            X, V, Force,
+            func, grad_func_,
+            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+            masses, atom_masks, is_grad_func_contain_y, batch_indices
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """ First CSVR call on CUDA: build CUDAGraphs, then delegate to graph version. """
+        self._buf_F = th.empty_like(X)
+        self._build_csver_graphs(X, masses, V, atom_masks, batch_indices)
+        self.update_scheme = self.__CSVR_cuda_replay  # self replacement, the rest steps use replay.
+        f = self.__CSVR_cuda_replay(
+            X, V, Force, func, grad_func_,
+            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+            masses, atom_masks, is_grad_func_contain_y, batch_indices
+        )
+        return f
+
+    def __CSVR_cuda_replay(
+            self,
+            X, V, Force,
+            func, grad_func_,
+            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+            masses, atom_masks, is_grad_func_contain_y, batch_indices
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """ CUDAGraph replay for CSVR. """
+        with th.no_grad():
+            self._buf_F.copy_(Force)
+            self._graph_A.replay()
+        Energy, Force = self._calc_EF(
+            X, func, func_args, func_kwargs,
+            grad_func_, grad_func_args, grad_func_kwargs,
+            self.require_grad, is_grad_func_contain_y
+        )
+        Nf = self.free_degree
+        if batch_indices is not None:
+            self._buf_R.copy_(th.randn_like(self._buf_R))
+            _df = th.clamp(Nf - 1.0, min=1.0)
+            self._buf_S.copy_(th.distributions.chi2.Chi2(df=_df).sample())
+        else:
+            self._buf_R.copy_(th.randn_like(self._buf_R))
+            _df = th.clamp(Nf - 1.0, min=1.0)
+            self._buf_S.copy_(th.distributions.chi2.Chi2(df=_df).sample())
+        with th.no_grad():
+            self._buf_F.copy_(Force)
+            self._graph_B.replay()
         return X, V, Energy, Force
 
     def __NoseHoover(
