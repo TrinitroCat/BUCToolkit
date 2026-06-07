@@ -427,7 +427,7 @@ class _BaseMD(BaseMotion):
         n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
             batch_indices, n_batch, device=self.device
         )
-        self.scatter_dim_out_size = self.batch_scatter.max().item() + 1
+        self.scatter_dim_out_size = self.batch_scatter.max().item() + 1 if self.batch_scatter is not None else None
 
         # Manage Atomic Type & Masses
         masses = list()
@@ -854,7 +854,7 @@ class _BaseMD(BaseMotion):
         n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
             batch_indices, n_batch, device=self.device
         )
-        self.scatter_dim_out_size = self.batch_scatter.max().item() + 1
+        self.scatter_dim_out_size = self.batch_scatter.max().item() + 1 if self.batch_scatter is not None else None
 
         # Manage Atomic Type & Masses
         masses = list()

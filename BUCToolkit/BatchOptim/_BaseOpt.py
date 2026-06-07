@@ -239,6 +239,8 @@ class _BaseOpt(BaseMotion, ABC):
             )  # (n_batch, sumN, 1), initial step length
             batch_tensor_indx_cache = None
             batch_slice_indx = None
+            self.batch_tensor = None
+            self.batch_scatter = None
 
         # initialize vars
         self.n_true_batch = n_true_batch

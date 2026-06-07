@@ -1,6 +1,6 @@
 #  Copyright (c) 2024-2026.3.27, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0
 #  File: __init__.py
 #  Environment: Python 3.12
 

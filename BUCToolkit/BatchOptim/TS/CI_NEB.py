@@ -82,7 +82,15 @@ class CI_NEB:
         pass
 
     class __NebWrapper:
-        """ function wrapper for NEB, Adding the elastic potential """
+        """ function wrapper for NEB, Adding the elastic potential.
+
+        NOTE: This wrapper relies on a strict calling-order contract:
+        `energy()` must be called before `grad()`, because `energy()` caches
+        the raw forces (self.F_ori) as a side effect.  The optimizer's main
+        loop in _BaseOpt.run() already enforces this order (func, then
+        grad_func), but any refactoring that swaps or decouples the two calls
+        will need to restructure this class to avoid stale-force bugs.
+        """
         def __init__(self, f: Callable, gf: Callable, k: float, require_grad: bool, is_grad_contain_y: bool):
             self.ener = None
             self.F_ori = None
@@ -238,6 +246,8 @@ class CI_NEB:
         X_init = X_init.to(self.device)
         X_fin = X_fin.to(self.device)
         # Selective dynamics for interpolation
+        if len(fixed_atom_tensor.shape) != 2:
+            fixed_atom_tensor.squeeze_(0)
         if fixed_atom_tensor is None:
             atom_masks = th.ones_like(X_init, device=self.device)
         elif fixed_atom_tensor.shape == X_init.shape:
@@ -272,7 +282,7 @@ class CI_NEB:
             else:
                 _energy, _X = oup
         # final print
-        if self.verbose:
+        if self.verbose > 0:
             max_ener, max_indx = th.max(_energy, dim=0)
             self.logger.info(
                 f'-----------------------------------------------------\n'

@@ -356,7 +356,7 @@ class BatchData(StandardInput):
             raise TypeError(f'Batch must be of type {th.Tensor}, not {type(value)}.')
         elif value.dim() != 1:
             raise ValueError(f'Batch must be a 1-D Tensor, but got {value.dim()}-D.')
-        elif th.sum(value) != self.pos.shape[0]:
+        elif value.shape[0] != self.pos.shape[0]:
             raise ValueError(f'Atoms number given by `value` and `self.pos` do not match.')
 
         self._batch = value.to(th.int64)
