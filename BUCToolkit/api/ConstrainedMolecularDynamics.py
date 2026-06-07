@@ -85,12 +85,12 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         if self.CMD_MODE == 'BLUE_MOON':
             # interp images read & check
             self.NIMAGE = self.MD['NIMAGE']
-            if self.NIMAGE <= 0:
-                raise RuntimeError(f'Images of configurations must be greater than 0, but got {self.NIMAGE}.')
         elif self.CMD_MODE == 'SLOW_GROWTH':
-            pass
+            self.NIMAGE = self.MD.get('NIMAGE', 1)
         else:
             raise NotImplementedError(f'Unknown Constrained MD Scheme {self.CMD_MODE}.')
+        if self.NIMAGE <= 0:
+            raise RuntimeError(f'Images of configurations must be greater than 0, but got {self.NIMAGE}.')
 
         self.MD_config = {'time_step': self.MD.get('TIME_STEP', 1),
                           'max_step': self.MD.get('MAX_STEP'),
@@ -98,8 +98,8 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                           'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
                           'device': self.DEVICE,
                           'verbose': self.VERBOSE}
-        if self.REDIRECT:
-            self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+        #if self.REDIRECT:
+        #    self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
         if self.MD['ENSEMBLE'] == 'NVT':
             self.MD_config['thermostat'] = self.MD.get('THERMOSTAT', 'CSVR')
             self.MD_config['thermostat_config'] = self.MD.get('THERMOSTAT_CONFIG', dict())
@@ -121,8 +121,8 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
-        if self.START == 'resume' or self.START == 1:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH)
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
+            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
                 _model.load_state_dict(chk_data['model_state_dict'], strict=False)
             else:
@@ -149,8 +149,9 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         self.MD_config['constr_val'] = self.constr_val
 
         # initialize
-        self.n_samp = len(self.TRAIN_DATA['dataIS'])  # sample number
+        self.n_samp = len(self.TRAIN_DATA.get('dataIS', self.TRAIN_DATA.get('data', [])))  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
+        mole_dynam = None
 
         try:
             # PRINT TASK INFO
@@ -208,7 +209,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     """ expand batches """
                     X_in = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
                     batch_size = X.size(0)
-                    graph = self.pygBatch.from_data_list([single_graph] * batch_size)
+                    graph = self.pygBatch.from_data_list([single_graph] * batch_size, exclude_keys=['ptr', 'batch'])
                     graph.pos = X_in
                     return graph
 
@@ -244,97 +245,19 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     return data.nodes['atom'].data['Z'].unsqueeze(0).tolist()
 
             mole_dynam = self.MDType(**self.MD_config)
-            val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, **self._data_loader_configs)
-            if getattr(val_set, '_LOADER_TYPE', None) != 'ISFS':
-                __err_msg = f'Data loader of ConstrainedMolecularDynamics requires ISFS, but got {getattr(val_set, '_LOADER_TYPE', None)}'
-                if self.VERBOSE: self.logger.error(__err_msg)
-                raise ValueError(__err_msg)
-            n_c = 1  # running batch now
-            n_s = 0
-            for dataIS, dataFS in val_set:
-                try:
-                    # Check Batch
-                    if get_batch_size(dataIS) != get_batch_size(dataFS):
-                        __err_msg = f'The batch size of {dataIS} and {dataFS} do not match: {get_batch_size(dataIS)} != {get_batch_size(dataFS)}'
-                        if self.VERBOSE: self.logger.error(__err_msg)
-                        raise RuntimeError(__err_msg)
-                    if get_batch_size(dataIS) <= 0:
-                        if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
-                        continue
-                    elif get_batch_size(dataIS) > 1:
-                        if self.VERBOSE: self.logger.error(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
-                        raise RuntimeError(f'Constrained MD do not support batched calculation yet. You should set BATCH_SIZE to 1.')
-                    # MD
-                    # cells & fixations
-                    _cell = get_cell_vec(dataIS)
-                    fixed_mask = get_fixed_mask(dataIS)
-                    # get batch
-                    batch_indx = get_batch_indx(dataIS)
-                    # get id
-                    idx = get_indx(dataIS)
-                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
-                    n_s += len(batch_indx)
-                    if self.VERBOSE > 0:
-                        self.logger.info('*' * 89)
-                        self.logger.info(f'Running Batch {n_c}.')
-                        self.logger.info('*' * 89)
-                        cell_str = np.array2string(
-                            get_cell_vec(dataIS), **FLOAT_ARRAY_FORMAT
-                        ).replace("[", " ").replace("]", " ")  # TODO, Now it supports pygData and DGLGraph.
-                        self.logger.info(f'Structure names: {idx}\n')
-                        self.logger.info(f'Cell Vectors:\n{cell_str}')
+            if self.SAVE_PREDICTIONS:
+                mole_dynam._HOLD_DUMPER = True
+                # change dumping mode to 'a' to contiguously dumper within the whole for-loop
+                mole_dynam.dumper.reset_args(self.PREDICTIONS_SAVE_FILE, mode='a', cache_size=4096, )
 
-                    if self.data_type == 'pyg':
-                        batch_indx = [len(dat.pos) for dat in dataIS.to_data_list()]
-                        _check_batch_indx = [len(dat.pos) for dat in dataFS.to_data_list()]
-                    elif self.data_type == 'dgl':
-                        batch_indx = dataIS.batch_num_nodes('atom')
-                        _check_batch_indx = dataFS.batch_num_nodes('atom')
-                    else:
-                        raise RuntimeError(f'Data type {self.data_type} is not supported.')
-                    # check atom numbers
-                    for _, __ in enumerate(batch_indx):
-                        if __ != _check_batch_indx[_]:
-                            __err_msg = f'The atom numbers of {_}-th sample do not match: {__} != {_check_batch_indx[_]}'
-                            if self.VERBOSE > 0: self.logger.error(__err_msg)
-                            raise RuntimeError(__err_msg)
-
-                    # initial atom coordinates
-                    if self.data_type == 'pyg':
-                        X_is = dataIS.pos
-                        X_fs = dataFS.pos
-                    else:
-                        X_is = dataIS.nodes['atom'].data['pos']
-                        X_fs = dataFS.nodes['atom'].data['pos']
-                    X_init_ = linear_interpolation_tens(X_is, X_fs, self.NIMAGE)
-                    # rebatch data
-                    origin_elem_list = get_atomic_number(dataIS)
-                    dataIS = rebatched_graph(dataIS, X_init_)
-
-                    # run
-                    mole_dynam.run(
-                        model_wrap.Energy,
-                        X_init_,
-                        [origin_elem_list]*self.NIMAGE,
-                        V_init=get_init_veloc(dataIS),
-                        grad_func=model_wrap.Grad,
-                        func_args=(dataIS,), grad_func_args=(dataIS,),
-                        is_grad_func_contain_y=False,
-                        require_grad=self.require_grad,
-                        fixed_atom_tensor=fixed_mask,
-                    )
-
-                    # Print info
-                    if self.VERBOSE > 0:
-                        self.logger.info(f'Batch {n_c} done.')
-                    n_c += 1
-
-                except Exception as e:
-                    self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
-                    if self.VERBOSE > 0:
-                        excp = traceback.format_exc()
-                        self.logger.warning(f"Traceback:\n{excp}")
-                    n_c += 1
+            if self.CMD_MODE == 'BLUE_MOON':
+                self._run_cmd_blue_moon(mole_dynam, model_wrap,
+                    get_batch_size, get_cell_vec, get_atomic_number, get_indx,
+                    get_fixed_mask, get_batch_indx, get_init_veloc, rebatched_graph)
+            elif self.CMD_MODE == 'SLOW_GROWTH':
+                self._run_cmd_slow_growth(mole_dynam, model_wrap,
+                    get_batch_size, get_cell_vec, get_atomic_number, get_indx,
+                    get_fixed_mask, get_batch_indx, get_init_veloc, rebatched_graph)
 
             if self.VERBOSE:
                 self.logger.info(
@@ -348,7 +271,172 @@ class ConstrainedMolecularDynamics(_CONFIGS):
 
         finally:
             th.cuda.synchronize()
+            if mole_dynam is not None:
+                mole_dynam.dumper.close()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
-            pass
+
+    def _run_cmd_blue_moon(self, mole_dynam, model_wrap,
+                           get_batch_size, get_cell_vec, get_atomic_number,
+                           get_indx, get_fixed_mask, get_batch_indx,
+                           get_init_veloc, rebatched_graph):
+        """BLUE_MOON scheme: ISFS loader, IS/FS pairs, linear interpolation."""
+        val_set: Any = self._data_loader(
+            self.TRAIN_DATA, self.BATCH_SIZE,
+            self.DEVICE, **self._data_loader_configs
+        )
+        if getattr(val_set, '_LOADER_TYPE', None) != 'ISFS':
+            __err_msg = (f'Data loader of BLUE_MOON requires ISFS, '
+                         f'but got {getattr(val_set, "_LOADER_TYPE", None)}')
+            if self.VERBOSE: self.logger.error(__err_msg)
+            raise ValueError(__err_msg)
+        n_c = 1
+        n_s = 0
+        for dataIS, dataFS in val_set:
+            try:
+                if get_batch_size(dataIS) != get_batch_size(dataFS):
+                    __err_msg = (f'Batch size mismatch: '
+                                 f'{get_batch_size(dataIS)} != {get_batch_size(dataFS)}')
+                    if self.VERBOSE: self.logger.error(__err_msg)
+                    raise RuntimeError(__err_msg)
+                n_images = get_batch_size(dataIS)
+                if n_images <= 0:
+                    if self.VERBOSE: self.logger.info('Empty batch. Skipped.')
+                    continue
+                elif n_images > 1:
+                    __err_msg = ('BLUE_MOON does not support batched calculation yet. '
+                                 'Set BATCH_SIZE to 1.')
+                    if self.VERBOSE: self.logger.error(__err_msg)
+                    raise RuntimeError(__err_msg)
+
+                _cell = get_cell_vec(dataIS)
+                fixed_mask = get_fixed_mask(dataIS)
+                batch_indx = get_batch_indx(dataIS)
+                idx = get_indx(dataIS)
+                idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
+                n_s += len(batch_indx)
+
+                if self.VERBOSE > 0:
+                    self.logger.info('*' * 89)
+                    self.logger.info(f'Running Batch {n_c} (BLUE_MOON).')
+                    self.logger.info('*' * 89)
+                    cell_str = np.array2string(_cell, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    self.logger.info(f'Structure names: {idx}\n')
+                    self.logger.info(f'Cell Vectors:\n{cell_str}')
+
+                if self.data_type == 'pyg':
+                    batch_indx = [len(dat.pos) for dat in dataIS.to_data_list()]
+                    _check = [len(dat.pos) for dat in dataFS.to_data_list()]
+                elif self.data_type == 'dgl':
+                    batch_indx = dataIS.batch_num_nodes('atom')
+                    _check = dataFS.batch_num_nodes('atom')
+                else:
+                    raise RuntimeError(f'Unknown data type: {self.data_type}')
+                for i, (a, b) in enumerate(zip(batch_indx, _check)):
+                    if a != b:
+                        __err_msg = f'Atom numbers mismatch at sample {i}: {a} != {b}'
+                        if self.VERBOSE > 0: self.logger.error(__err_msg)
+                        raise RuntimeError(__err_msg)
+
+                if self.data_type == 'pyg':
+                    X_is = dataIS.pos
+                    X_fs = dataFS.pos
+                else:
+                    X_is = dataIS.nodes['atom'].data['pos']
+                    X_fs = dataFS.nodes['atom'].data['pos']
+                X_init_ = linear_interpolation_tens(X_is, X_fs, self.NIMAGE)
+                origin_elem_list = get_atomic_number(dataIS)
+                dataIS = rebatched_graph(dataIS, X_init_)
+
+                mole_dynam.run(
+                    model_wrap.Energy, X_init_,
+                    [origin_elem_list] * self.NIMAGE,
+                    V_init=get_init_veloc(dataIS),
+                    grad_func=model_wrap.Grad,
+                    func_args=(dataIS,), grad_func_args=(dataIS,),
+                    is_grad_func_contain_y=False,
+                    require_grad=self.require_grad,
+                    fixed_atom_tensor=fixed_mask,
+                )
+
+                if self.VERBOSE > 0:
+                    self.logger.info(f'Batch {n_c} done.')
+                n_c += 1
+
+            except Exception as e:
+                self.logger.warning(f'WARNING: Error in batch {n_c}: {e}.')
+                if self.VERBOSE > 0:
+                    self.logger.warning(f"Traceback:\n{traceback.format_exc()}")
+                n_c += 1
+
+    def _run_cmd_slow_growth(self, mole_dynam, model_wrap,
+                              get_batch_size, get_cell_vec, get_atomic_number,
+                              get_indx, get_fixed_mask, get_batch_indx,
+                              get_init_veloc, rebatched_graph):
+        """SLOW_GROWTH scheme: standard PyGDataLoader, IS only, replicates N_Images times."""
+        data_only = {
+            'data': self.TRAIN_DATA['data'],
+        }
+        val_set: Any = self._data_loader(
+            data_only, self.BATCH_SIZE,
+            self.DEVICE, is_train=False, **self._data_loader_configs
+        )
+        n_c = 1
+        n_s = 0
+        for dataIS, _ in val_set:
+            try:
+                n_images = get_batch_size(dataIS)
+                if n_images <= 0:
+                    if self.VERBOSE: self.logger.info('Empty batch. Skipped.')
+                    continue
+                elif n_images > 1:
+                    __err_msg = ('BLUE_MOON does not support batched calculation yet. '
+                                 'Set BATCH_SIZE to 1.')
+                    if self.VERBOSE: self.logger.error(__err_msg)
+                    raise RuntimeError(__err_msg)
+
+                _cell = get_cell_vec(dataIS)
+                fixed_mask = get_fixed_mask(dataIS)
+                batch_indx = get_batch_indx(dataIS)
+                idx = get_indx(dataIS)
+                idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
+                n_s += len(batch_indx)
+
+                if self.VERBOSE > 0:
+                    self.logger.info('*' * 89)
+                    self.logger.info(f'Running Batch {n_c} (SLOW_GROWTH).')
+                    self.logger.info('*' * 89)
+                    cell_str = np.array2string(_cell, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
+                    self.logger.info(f'Structure names: {idx}\n')
+                    self.logger.info(f'Cell Vectors:\n{cell_str}')
+
+                if self.data_type == 'pyg':
+                    X_is = dataIS.pos
+                else:
+                    X_is = dataIS.nodes['atom'].data['pos']
+                # For SLOW_GROWTH: copy the same structure N_Images times
+                X_init_ = X_is.unsqueeze(0).expand(self.NIMAGE, *X_is.shape)
+                origin_elem_list = get_atomic_number(dataIS)
+                dataIS = rebatched_graph(dataIS, X_init_)
+
+                mole_dynam.run(  #  Model not support the regular batch, although our code do.
+                    model_wrap.Energy, X_init_,
+                    [origin_elem_list] * self.NIMAGE,
+                    V_init=get_init_veloc(dataIS),
+                    grad_func=model_wrap.Grad,
+                    func_args=(dataIS,), grad_func_args=(dataIS,),
+                    is_grad_func_contain_y=False,
+                    require_grad=self.require_grad,
+                    fixed_atom_tensor=fixed_mask,
+                )
+
+                if self.VERBOSE > 0:
+                    self.logger.info(f'Batch {n_c} done.')
+                n_c += 1
+
+            except Exception as e:
+                self.logger.warning(f'WARNING: Error in batch {n_c}: {e}.')
+                if self.VERBOSE > 0:
+                    self.logger.warning(f"Traceback:\n{traceback.format_exc()}")
+                n_c += 1

@@ -1,0 +1,16 @@
+[run]
+# source
+source = BUCToolkit
+branch = True
+omit = */tests/*, */migrations/*
+
+[report]
+# show uncovered lines
+show_missing = True
+# coverage minimum line
+#fail_under = 90
+omit = */tests/*
+
+[html]
+# output to html format
+directory = coverage_html_report

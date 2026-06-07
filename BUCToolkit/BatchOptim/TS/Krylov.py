@@ -950,7 +950,7 @@ class KrylovNewton(BaseMotion):
                         batch_tensor_ - MORSE_INDEX - extra_krylov_dim
                 ) / batch_tensor_
                 spectra_cut_off.unsqueeze_(-1)
-                print(f"neg_cut_val: {spectra_cut_off}")
+                #print(f"neg_cut_val: {spectra_cut_off}")
                 T = th.zeros_like(sub_eigval_[:, :MORSE_INDEX + extra_krylov_dim])
                 T[:, :MORSE_INDEX] = sub_eigval_[:, :MORSE_INDEX].clamp(-spectra_cut_off, EIG_THRES_NEG)
                 T[:, MORSE_INDEX:] = sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim].clamp(EIG_THRES_POS, spectra_cut_off)
@@ -976,11 +976,11 @@ class KrylovNewton(BaseMotion):
                     DELTA2_ = DELTA2[select_mask_short, ...]  # (b, 1)
                     steplength_ = _stp_cache
                     mu = self._diag_trust_region(Vg, T, dX_comp_square_[0], DELTA2_, )*0.1
-                    print(f"{i}: mu = {mu}")
+                    #print(f"{i}: mu = {mu}")
                     #(D + mu D ^ -1)
                     T_inv = (T + mu * T.reciprocal()).reciprocal_()
                     complement_steplength = (mu + 1.).reciprocal_().index_select(0, batch_scatter_).unsqueeze(0)
-                    print(f"{i}: T_inv = {T_inv}")
+                    #print(f"{i}: T_inv = {T_inv}")
 
                 else:
                     T_inv = T.reciprocal()
@@ -1046,7 +1046,7 @@ class KrylovNewton(BaseMotion):
                         dim=-1, keepdim=True
                     ).sqrt_()  # (1, B, 1)
                     # (b, 1)/((b, k)**2 + (b, 1))
-                    g_Gg_norm_ = (th.einsum('bk,bk,bk->b', mu / (T ** 2 + mu), Vg.T, Vg.T)
+                    g_Gg_norm_ = (th.einsum('bk,bk,bk->b', mu / (T ** 2 + mu), Vg.T, Vg.T).unsqueeze(-1)
                                   + (mu / (1. + mu)) ** 2 * dX_comp_square_[0]).sqrt_().reshape(1, -1, 1)
 
                     predicted_grad_desc_ = g_norm_ - g_Gg_norm_
@@ -1062,7 +1062,7 @@ class KrylovNewton(BaseMotion):
 
                 X_.addcmul_(steplength_ * dX_, atom_masks_)
                 # reinsurance
-                print(f"{i}: displacement length = {dX_norm_}")
+                #print(f"{i}: displacement length = {dX_norm_}")
                 _small_dX_ = (dX_norm_ < 1.e-6)  # (1, B0, 1)
                 if th.any(_small_dX_):
                     _too_small_step_indx = th.where(select_mask_short)[0][th.where(_small_dX_)[0]]
@@ -1098,7 +1098,7 @@ class KrylovNewton(BaseMotion):
                     batch_indices=batch_tensor_,
                     eigen_order=MORSE_INDEX + extra_krylov_dim
                 )
-                print(f"{i}: Gradient norm = {th.linalg.norm(g_)}")
+                #print(f"{i}: Gradient norm = {th.linalg.norm(g_)}")
 
                 # update origin variables
                 select_indices = th.where(select_mask)[0]
@@ -1134,7 +1134,7 @@ class KrylovNewton(BaseMotion):
                     )
                     DELTA2_ = _DELTA.square_().reshape(-1, 1)
                     DELTA2.index_copy_(0, select_indices_short, DELTA2_)
-                    print(f"Delta2 now: {DELTA2_}")
+                    #print(f"Delta2 now: {DELTA2_}")
 
                 # Section DEBUG
                 #var_dict = {}
@@ -1609,7 +1609,7 @@ class KrylovDynamics(BaseMotion):
                     batch_indices=batch_tensor_,
                     eigen_order=MORSE_INDEX + extra_krylov_dim
                 )
-                print(f"{i}: Gradient norm = {th.linalg.norm(g_)}")
+                #print(f"{i}: Gradient norm = {th.linalg.norm(g_)}")
 
                 # update origin variables
                 select_indices = th.where(select_mask)[0]

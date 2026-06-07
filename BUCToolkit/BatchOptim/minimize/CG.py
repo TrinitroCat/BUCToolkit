@@ -15,7 +15,8 @@ import torch as th
 from BUCToolkit.BatchOptim._BaseOpt import _BaseOpt
 from BUCToolkit.utils.index_ops import index_inner_product
 
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 
 class CG(_BaseOpt):

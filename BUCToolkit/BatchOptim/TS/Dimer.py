@@ -227,65 +227,50 @@ class FindMinEigen(BaseMotion):
             vHv: the curvature at X given by finite difference.
         """
         t_main = time.perf_counter()
-        if func_kwargs is None:
-            func_kwargs = dict()
-        if grad_func_kwargs is None:
-            grad_func_kwargs = dict()
-        # Check batch indices; irregular batch
-        if isinstance(X, th.Tensor):
-            n_batch, n_atom, n_dim = X.shape
-        else:
+        # Sanitize kwargs
+        func_kwargs = func_kwargs or dict()
+        grad_func_kwargs = grad_func_kwargs or dict()
+        func_args = tuple(func_args)
+        grad_func_args = tuple(grad_func_args)
+
+        # X shape
+        if not isinstance(X, th.Tensor):
             raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
-        if batch_indices is not None:
-            if n_batch != 1:
-                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
-            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
-                batch_indices = batch_indices.tolist()
-            elif not isinstance(batch_indices, (Tuple, List)):
-                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
-                                f'It must be Sequence[int] | th.Tensor | np.ndarray | None')
-            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
-            n_inner_batch = len(batch_indices)
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)
-            self.batch_scatter = th.repeat_interleave(
-                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
-                self.batch_tensor,
-                dim=0
-            )
-        else:
-            raise NotImplementedError
-            n_inner_batch = 1
-            batch_indx_dict = dict()
-            batch_tensor = None
-        # initialize vars
         n_batch, n_atom, n_dim = X.shape
-        self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
+
+        # Grad func
         grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(grad_func, is_grad_func_contain_y, require_grad)
 
+        # Batch indices (irregular batch)
+        if batch_indices is None:
+            raise NotImplementedError(
+                f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
+                f'It is fully compatible with regular batches, but merely a little performance loss.'
+            )
+        n_inner_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+            batch_indices, n_batch, device=self.device
+        )
+
+        self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
+
+        # Batch updater init
         if hasattr(self._update_batch, 'initialize'):
             self._update_batch.initialize()
         elif hasattr(self._update_batch, '__init__'):
             self._update_batch.__init__()
+
         # Selective dynamics
-        if fixed_atom_tensor is None:
-            atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
-        # atom_masks = atom_masks.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
-        # other check
-        if (not isinstance(self.maxiter_rot, int)) or (self.maxiter_rot <= 0):
+        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
+
+        # Maxiter check
+        if not isinstance(self.maxiter_rot, int) or self.maxiter_rot <= 0:
             raise ValueError(f'Invalid value of maxiter_rot: {self.maxiter_rot}. It would be an integer greater than 0.')
 
-        # set variables device
+        # Device placement
         func = preload_func(func, self.device)
-
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
-        X = X.detach()
-        X = X.to(self.device)
+        X = X.detach().to(self.device)
         # normalize v
         v.mul_(atom_masks)
         v_norm = th.sqrt(th.sum(index_ops.index_inner_product(v, v, 1, self.batch_scatter), dim=-1, keepdim=True))
@@ -340,7 +325,7 @@ class FindMinEigen(BaseMotion):
             converge_mask_curve = (vHv < self.Curve_thres)
             converge_mask_torque = (gT_norm < self.Torque_thres)
             #   reinsurance: When w and v are very collinear, stop meaningless update
-            abort_mask = index_ops.index_inner_product(v, w, 1, self.batch_scatter) < 1.e-7
+            abort_mask = th.sum(index_ops.index_inner_product(v, w, 1, self.batch_scatter), dim=-1, keepdim=True) < 1.e-7
             converge_mask = (converge_mask_curve | converge_mask_torque)  # (1, B, 1)
             # print
             if self.verbose > 0:
@@ -657,46 +642,32 @@ class Dimer(BaseMotion):
             func_kwargs = dict()
         func_args = tuple(func_args)
         grad_func_args = tuple(grad_func_args)
-        # Check batch indices; irregular batch
-        if isinstance(X, th.Tensor):
-            if len(X.shape) == 2:
-                X = X.unsqueeze(0)
-            elif len(X.shape) != 3:
-                raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
-            n_batch, n_atom, n_dim = X.shape
-        else:
+
+        # X shape
+        if not isinstance(X, th.Tensor):
             raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
+        if len(X.shape) == 2:
+            X = X.unsqueeze(0)
+        elif len(X.shape) != 3:
+            raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
+        n_batch, n_atom, n_dim = X.shape
+
+        # X_diff default
         if X_diff is None:
             X_diff = th.randn_like(X)
 
+        # Grad func
         grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(grad_func, is_grad_func_contain_y, require_grad)
-        if isinstance(X, th.Tensor):
-            n_batch, n_atom, n_dim = X.shape
-        else:
-            raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
-        # batch_check
-        if batch_indices is not None:
-            if n_batch != 1:
-                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
-            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
-                batch_indices = batch_indices.tolist()
-            elif not isinstance(batch_indices, (Tuple, List)):
-                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
-                                f'It must be Sequence[int] | th.Tensor | np.ndarray | None')
-            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
-            n_inner_batch = len(batch_indices)
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)
-            self.batch_scatter = th.repeat_interleave(
-                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
-                self.batch_tensor,
-                dim=0
+
+        # Batch indices (irregular batch)
+        if batch_indices is None:
+            raise NotImplementedError(
+                f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
+                f'It is fully compatible with regular batches, but merely a little performance loss.'
             )
-        else:  # temporarily not implemented
-            raise NotImplementedError(f'Regular batch algo. is not implemented yet. You may specify a uniform `batch_indices` instead.')
-            n_inner_batch = 1
-            batch_indx_dict = dict()
-            batch_tensor = None
+        n_inner_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+            batch_indices, n_batch, device=self.device
+        )
 
         # Selective dynamics
         atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)

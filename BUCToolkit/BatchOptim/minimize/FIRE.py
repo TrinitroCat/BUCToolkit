@@ -19,7 +19,8 @@ from .._BaseOpt import _BaseOpt
 from BUCToolkit.Bases.BaseConstraints import BaseConstr
 from BUCToolkit.utils.index_ops import index_inner_product
 
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 
 class FIRE(_BaseOpt):
@@ -124,11 +125,18 @@ class FIRE(_BaseOpt):
     ):
         F = - X_grad_
         if self.is_concat_X:
-            self.masses_ = self.masses[:, select_mask, :]
-            self.t_: th.Tensor = self.t[:, select_mask, :]  # (1, sumN, 1)
-            a_ = self.a[:, select_mask, :]  # (1, sumN, 1)
-            n_count_ = self.n_count[:, select_mask, :]
-            self.v_ = self.v[:, select_mask, :]
+            if not self._hold_samples:
+                self.masses_ = self.masses[:, select_mask, :]
+                self.t_: th.Tensor = self.t[:, select_mask, :]  # (1, sumN, 1)
+                a_ = self.a[:, select_mask, :]  # (1, sumN, 1)
+                n_count_ = self.n_count[:, select_mask, :]
+                self.v_ = self.v[:, select_mask, :]
+            else:
+                self.masses_ = self.masses
+                self.t_: th.Tensor = self.t
+                a_ = self.a
+                n_count_ = self.n_count
+                self.v_ = self.v
             # (1, sumN, n_dim)
             F_hat = F / th.sum(index_inner_product(
                 F,
@@ -170,18 +178,30 @@ class FIRE(_BaseOpt):
             )
             a_.masked_fill_(is_p_lt_0, self.alpha)
             # re-write
-            select_indices = th.where(select_mask)[0]
-            self.t.index_copy_(1, select_indices, self.t_)
-            self.a.index_copy_(1, select_indices, a_)
-            self.n_count.index_copy_(1, select_indices, n_count_)
+            if self._hold_samples:
+                select_indices = th.where(select_mask)[0]
+                self.t.index_copy_(1, select_indices, self.t_)
+                self.a.index_copy_(1, select_indices, a_)
+                self.n_count.index_copy_(1, select_indices, n_count_)
+            else:
+                self.t = self.t_
+                self.a = a_
+                self.n_count = n_count_
 
         else:
-            self.v_ = self.v[select_mask, ...]
-            self.masses_ = self.masses[select_mask, ...]
-            self.t_ = self.t[select_mask, ...]
-            a_ = self.a[select_mask, ...]
-            n_count_ = self.n_count[select_mask, ...]
-
+            if not self._hold_samples:
+                self.v_ = self.v[select_mask, ...]
+                self.masses_ = self.masses[select_mask, ...]
+                self.t_ = self.t[select_mask, ...]
+                a_ = self.a[select_mask, ...]
+                n_count_ = self.n_count[select_mask, ...]
+            else:
+                self.masses_ = self.masses
+                self.t_: th.Tensor = self.t
+                a_ = self.a
+                n_count_ = self.n_count
+                self.v_ = self.v
+            # (B, 1, 1)
             F_hat = F / (th.linalg.norm(F, dim=(-2, -1), keepdim=True) + 1e-20)
             # (n_batch, n_dim, n_atom) @ (n_batch, n_atom, n_dim) -> (n_batch, 1, 1)
             momenta = th.sum(F * self.v_, dim=(-1, -2), keepdim=True)
@@ -205,10 +225,15 @@ class FIRE(_BaseOpt):
             )
             a_.masked_fill_(is_p_lt_0, self.alpha)
             # re-write
-            select_indices = th.where(select_mask)[0]
-            self.t.index_copy_(0, select_indices, self.t_)
-            self.a.index_copy_(0, select_indices, a_)
-            self.n_count.index_copy_(0, select_indices, n_count_)
+            if not self._hold_samples:
+                select_indices = th.where(select_mask)[0]
+                self.t.index_copy_(0, select_indices, self.t_)
+                self.a.index_copy_(0, select_indices, a_)
+                self.n_count.index_copy_(0, select_indices, n_count_)
+            else:
+                self.t = self.t_
+                self.a = a_
+                self.n_count = n_count_
         pass
 
     def _update_direction(
@@ -229,10 +254,14 @@ class FIRE(_BaseOpt):
             select_indices: th.Tensor,
             select_indices_short: th.Tensor | None,
     ):
-        if self.is_concat_X:
-            self.v.index_copy_(1, select_indices, self.v_)
+        if self._hold_samples:
+            self.v = self.v_
         else:
-            self.v.index_copy_(0, select_indices, self.v_)
+            if self.is_concat_X:
+                self.v.index_copy_(1, select_indices, self.v_)
+            else:
+                self.v.index_copy_(0, select_indices, self.v_)
+
 
     def run(
             self,

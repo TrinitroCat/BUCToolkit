@@ -29,11 +29,9 @@ def main_convert(inp: str, ipath: str, out: str, opath: str):
     inp = inp.lower()
     out = out.lower()
     if inp not in INP_DICT:
-        print(f'ERROR: The input format {inp} is not supported.')
-        return
+        raise ValueError(f'The input format {inp} is not supported.')
     if out not in OUT_DICT:
-        print(f'ERROR: The output format {out} is not supported.')
-        return
+        raise ValueError(f'The output format {out} is not supported.')
 
     converter = INP_DICT[inp]
     if converter is None:

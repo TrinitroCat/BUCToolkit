@@ -9,6 +9,7 @@ import os
 import glob
 import math
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # add BUCToolkit root to path
 sys.path.insert(0, os.path.dirname(__file__))
 
 import torch as th
@@ -78,7 +79,8 @@ class MainTest(unittest.TestCase):
             print("WARNING: Detected Windows os. BUCToolkit has not fully test on Windows yet, be careful!")
             self.out_pt = './'
         elif sys.platform.startswith("linux"):
-            self.out_pt = '/dev/shm/'
+            self.out_pt = '/dev/shm/BUCToolkit/'
+            os.makedirs(self.out_pt, exist_ok=True)
         else:
             print(f"WARNING: Detected OS of {sys.platform}. BUCToolkit has not been tested on this platform. Please be careful!")
             self.out_pt = './'
@@ -94,9 +96,15 @@ class MainTest(unittest.TestCase):
         print(f"NOTE: Some test logs and chk file will be saved to path '{self.out_pt}logs' and '{self.out_pt}results'")
 
     def test_Train(self):
+        """
+        Test training loop: loss should decrease over optimization steps.
+        """
         pass
 
     def test_Pred(self):
+        """
+        Test model prediction: verify output shapes and values.
+        """
         pass
 
     def test_MD(self):
@@ -104,8 +112,8 @@ class MainTest(unittest.TestCase):
         Test Molecular Dynamics.
         """
         # purge remaining testfiles
-        logfiles = glob.glob(os.path.join('/dev/shm', 'logs/MD*.log'))
-        resultfiles = glob.glob(os.path.join('/dev/shm', 'results/MD*'))
+        logfiles = glob.glob(os.path.join(self.out_pt, 'logs/MD*.log'))
+        resultfiles = glob.glob(os.path.join(self.out_pt, 'results/MD*'))
         for logfile in logfiles:
             os.remove(logfile)
         for resultfile in resultfiles:
@@ -362,10 +370,301 @@ class MainTest(unittest.TestCase):
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
         pass
 
-    def test_MC(self):
+    def test_CMD(self):
+        """
+        Test Constrained Molecular Dynamics with regular batches (B, N, 3).
+        All batches have equal size — uniform batch input.
+        Covers NVE, CSVR, Langevin, Nose-Hoover integrators with a multi-type
+        constraint function (distances, angles, soft coord, R_std).
+        Verifies:
+          - NVE: energy conservation
+          - NVT: thermostat equipartition statistics (Ep/Ek mean/var, velocity stats)
+          - All: per-constraint maximum violation vs. tolerance
+        """
+        os.makedirs(f'{self.out_pt}logs', exist_ok=True)
+        os.makedirs(f'{self.out_pt}results', exist_ok=True)
+
         # purge remaining testfiles
-        logfiles = glob.glob(os.path.join('/dev/shm', 'logs/MC*.log'))
-        resultfiles = glob.glob(os.path.join('/dev/shm', 'results/MC*'))
+        logfiles = glob.glob(os.path.join(self.out_pt, 'logs/CMD*.log'))
+        resultfiles = glob.glob(os.path.join(self.out_pt, 'results/CMD*'))
+        for logfile in logfiles:
+            os.remove(logfile)
+        for resultfile in resultfiles:
+            os.remove(resultfile)
+
+        kB = 8.617333262145e-5  # eV/K
+        TEMPERATURE = 500.
+        TIME_STEP = 0.5
+        MAX_STEP = 10000
+        CONSTR_THRESHOLD = 1e-5
+        N_CONSTR = 8  # 3 dist + 2 angle + 2 coord + 1 R_std
+        N_BATCH = 3  # 3 batches, all same size → regular batch (B, N, 3)
+        N_ATOM = 5**3  # 125 Al atoms per batch → uniform
+        ELEM = 'Al'
+        MASS_val = MASS[ELEM]
+        MASSES_3 = [MASS_val] * N_BATCH
+
+        # ============================================================
+        from BUCToolkit.BatchStructures.batch import Batch
+        data_list = [build_cubic_lattice_data(5, 1.3, 0.05) for _ in range(N_BATCH)]
+        # Batch for model (graph with pos0, batch vector)
+        graph = Batch.from_data_list(data_list)
+        # Regular input X: (B, N, 3)
+        pos = th.stack([d.pos for d in data_list])
+        pos0 = th.stack([d.pos0 for d in data_list])
+        elem_list = [[ELEM] * N_ATOM] * N_BATCH
+        masses_list = [[MASS_val] * N_ATOM] * N_BATCH
+
+        # Model
+        raw_model = SimpleSpringPotential(graph.pos0, 10.)
+        model_base = _Model_Wrapper_pyg(raw_model)
+
+        # ============================================================
+        # Multi-type constraint function (8 constraints)
+        # ============================================================
+        def constr_func(X):
+            # X: (n_atom, n_dim) → returns (N_CONSTR,)
+            y = list()
+            # CONSTRAINT 1: fixed distances d(2,4), d(3,7), d(5,8)
+            y.append(th.linalg.norm(X[[2, 3, 5]] - X[[4, 7, 8]], dim=-1))
+            # CONSTRAINT 2: fixed angles cos(7-5-8), cos(11-9-12)
+            x1 = X[[5, 9]]; x2 = X[[7, 11]]; x3 = X[[8, 12]]
+            y.append(th.sum((x2 - x1) * (x3 - x1), dim=-1)
+                     / (th.linalg.norm(x2 - x1, dim=-1) * th.linalg.norm(x3 - x1, dim=-1)))
+            # CONSTRAINT 3: soft coordination numbers for atoms 14, 18
+            r0 = 1.5; sigma = 1.
+            r_ij = th.linalg.norm(X[[14, 18]].unsqueeze(1) - X.unsqueeze(0), dim=-1)
+            s_i = th.sum(0.5 * (1.0 + th.erf((r_ij - r0) / sigma)), dim=-1)
+            y.append(s_i)
+            # CONSTRAINT 4: R_std
+            R_ij = th.linalg.norm(X.unsqueeze(0) - X.unsqueeze(1), dim=-1)
+            R_std = th.std(R_ij, unbiased=True).unsqueeze(0)
+            y.append(R_std)
+            return th.cat(y)
+
+        CONSTR_LABELS = [
+            'd(2,4)', 'd(3,7)', 'd(5,8)',
+            'cos(7-5-8)', 'cos(11-9-12)',
+            'CN(14)', 'CN(18)', 'R_std',
+        ]
+
+        # constr_val: None → auto-computed from initial X via vmap
+        # Also keep per-batch list for post-hoc violation check
+        constr_val_per_batch = [constr_func(d.pos) for d in data_list]
+
+        # ============================================================
+        # Build runners: 4 integrators × (CPU + GPU) = 8 runners
+        # ============================================================
+        runner_cpu_nve = ConstrNVE(
+            TIME_STEP, MAX_STEP,
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_NVE_CPU', 10,
+            device='cpu', verbose=1
+        )
+        runner_gpu_nve = ConstrNVE(
+            TIME_STEP, MAX_STEP,
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_NVE_GPU', 10,
+            device='cuda:0', verbose=1
+        )
+        runner_cpu_csvr = ConstrNVT(
+            TIME_STEP, MAX_STEP, 'CSVR', {'time_const': 100},
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_CSVR_CPU', 10,
+            device='cpu', verbose=1
+        )
+        runner_gpu_csvr = ConstrNVT(
+            TIME_STEP, MAX_STEP, 'CSVR', {'time_const': 100},
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_CSVR_GPU', 10,
+            device='cuda:0', verbose=1
+        )
+        runner_cpu_lang = ConstrNVT(
+            TIME_STEP, MAX_STEP, 'Langevin', {'damping_coeff': 0.01},
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_LANG_CPU', 10,
+            device='cpu', verbose=1
+        )
+        runner_gpu_lang = ConstrNVT(
+            TIME_STEP, MAX_STEP, 'Langevin', {'damping_coeff': 0.01},
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_LANG_GPU', 10,
+            device='cuda:0', verbose=1
+        )
+        runner_cpu_nose = ConstrNVT(
+            TIME_STEP, MAX_STEP, 'Nose-Hoover', {},
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_NOSE_CPU', 10,
+            device='cpu', verbose=1
+        )
+        runner_gpu_nose = ConstrNVT(
+            TIME_STEP, MAX_STEP, 'Nose-Hoover', {},
+            constr_func, None, CONSTR_THRESHOLD,
+            False, TEMPERATURE,
+            f'{self.out_pt}results/CMD_NOSE_GPU', 10,
+            device='cuda:0', verbose=1
+        )
+
+        # DOF after constraint reduction
+        DOF_cmd = 3 * N_ATOM - N_CONSTR
+        DOF_cmd_list = [DOF_cmd] * N_BATCH
+
+        # Equipartition standard values (for NVT tests) — all batches identical
+        STANDARD_VALUES = [
+            [0.5 * DOF_cmd * kB * TEMPERATURE] * N_BATCH,
+            [0.5 * DOF_cmd * (kB * TEMPERATURE) ** 2] * N_BATCH,
+            [0.5 * DOF_cmd * kB * TEMPERATURE] * N_BATCH,
+            [0.5 * DOF_cmd * (kB * TEMPERATURE) ** 2] * N_BATCH,
+            [0.] * N_BATCH,
+            [kB * TEMPERATURE / MASS_val] * N_BATCH,
+        ]
+        TEST_TERM_NAME = [
+            'Ep mean', 'Ep var', 'Ek mean', 'Ek var',
+            'single veloc. mean', 'single veloc. var',
+        ]
+
+        RUNNER_NAME = [
+            'CMD_NVE_CPU', 'CMD_NVE_GPU',
+            'CMD_CSVR_CPU', 'CMD_CSVR_GPU',
+            'CMD_LANG_CPU', 'CMD_LANG_GPU',
+            'CMD_NOSE_CPU', 'CMD_NOSE_GPU',
+        ]
+        for i, runner in enumerate([
+            runner_cpu_nve, runner_gpu_nve,
+            runner_cpu_csvr, runner_gpu_csvr,
+            runner_cpu_lang, runner_gpu_lang,
+            runner_cpu_nose, runner_gpu_nose,
+        ]):
+            _pos = pos.to(runner.device)
+            _graph = graph.to(runner.device)
+            model_test = model_base.to(runner.device)
+
+            print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
+            runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
+            t_st = time.perf_counter()
+            runner.run(
+                model_test.Energy,
+                _pos,           # X: (B, N, 3) — regular batch
+                elem_list,
+                None, None,
+                model_test.Grad,
+                (_graph,),      # graph with pos0, batch
+                None,
+                (_graph,), None,
+                False, False,   # is_grad_contain_y, require_grad
+                None,           # batch_indices=None → regular batch
+                move_to_center_freq=-1
+            )
+            if runner.device.type == 'cuda':
+                th.cuda.synchronize()
+            print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
+
+            # --- Read trajectory ---
+            fbs = read_md_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
+            ene = [[], [], []]
+            ek = [[], [], []]
+            etol = [[], [], []]
+            vel = [[], [], []]
+            mass_arr = np.asarray(masses_list[0])
+            max_coords = [0., 0., 0.]
+            max_viol_per_constr = [0.0] * N_CONSTR
+
+            prebalance = int(len(fbs) * 0.4)
+            while prebalance % 3 != 0:
+                prebalance += 1
+
+            for ibs in range(prebalance, len(fbs), 3):
+                for ib in range(N_BATCH):
+                    idx = ibs + ib
+                    ene[ib].append(fbs.Energies[idx])
+                    vn = fbs.Labels[idx]
+                    vel[ib].append(vn)
+                    ek_val = np.sum(0.5 * mass_arr[:, None] * vn * vn * 103.642696562621738)
+                    ek[ib].append(ek_val)
+                    etol[ib].append(ene[ib][-1] + ek[ib][-1])
+                    max_coords[ib] = max(np.abs(fbs.Coords[idx]).max(), max_coords[ib])
+                    X_i = th.as_tensor(fbs.Coords[idx], dtype=th.float32)
+                    viol_vec = th.abs(constr_func(X_i) - constr_val_per_batch[ib])
+                    for k in range(N_CONSTR):
+                        max_viol_per_constr[k] = max(max_viol_per_constr[k], viol_vec[k].item())
+
+            print(f"Max Coordinates Range: {max_coords}")
+
+            # --- Per-constraint violation report ---
+            print("Per-constraint max violations:")
+            all_viol_ok = True
+            for k in range(N_CONSTR):
+                ok = max_viol_per_constr[k] <= CONSTR_THRESHOLD * 50
+                flag = "OK" if ok else "FAIL"
+                if not ok:
+                    all_viol_ok = False
+                print(f"  [{flag}] {CONSTR_LABELS[k]:20s}: {max_viol_per_constr[k]:.4e}")
+            try:
+                self.assertTrue(all_viol_ok, msg='One or more constraint violations exceed tolerance.')
+                print('"Constraint Violation" Test passed. <<<<<')
+            except AssertionError:
+                print('"Constraint Violation" Test Failed.')
+
+            # --- DOF check ---
+            self.assertListEqual(DOF_cmd_list, runner.free_degree.tolist())
+
+            TEST_VALUES = [
+                [np.mean(np.asarray(_ep)) for _ep in ene],
+                [np.var(np.asarray(_ep)) for _ep in ene],
+                [np.mean(np.asarray(_ek)) for _ek in ek],
+                [np.var(np.asarray(_ek)) for _ek in ek],
+                [np.mean(np.stack(_v, axis=0)) for _v in vel],
+                [(np.var(np.stack(_v, axis=0)) * 103.642696562621738) for _v in vel],
+            ]
+
+            # --- NVE: energy conservation test ---
+            if 'NVE' in RUNNER_NAME[i]:
+                for _i, _etol in enumerate(etol):
+                    _etol_var = len(_etol) * (max(_etol) - min(_etol)) / sum(_etol)
+                    try:
+                        self.assertStatisticalEqual(
+                            _etol_var, 0., atol=1e-2,
+                            msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
+                                f'test value: {_etol_var}\nstandard value: 0.'
+                        )
+                        print(f'\n"NVE Energy" Test {_i + 1} passed. <<<<<')
+                    except AssertionError:
+                        print(f'\n"NVE Energy" Test {_i + 1} Failed:\n'
+                              f'test value: {_etol_var}\nstandard value: 0.')
+                os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
+                continue
+
+            # --- NVT: thermostat equipartition tests ---
+            for _i, tv in enumerate(TEST_VALUES):
+                for __i, _tv in enumerate(tv):
+                    try:
+                        self.assertStatisticalEqual(
+                            _tv, STANDARD_VALUES[_i][__i], rtol=0.1,
+                            msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
+                                f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
+                        )
+                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} passed. <<<<<')
+                    except AssertionError:
+                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
+                              f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
+
+            os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
+        pass
+
+    def test_MC(self):
+        """
+        Test the Monte Carlo algorithms.
+        """
+        # purge remaining testfiles
+        logfiles = glob.glob(os.path.join(self.out_pt, 'logs/MC*.log'))
+        resultfiles = glob.glob(os.path.join(self.out_pt, 'results/MC*'))
         for logfile in logfiles:
             os.remove(logfile)
         for resultfile in resultfiles:
@@ -497,9 +796,12 @@ class MainTest(unittest.TestCase):
 
 
     def test_OPT(self):
+        """
+        Test the structure optimizations by various algorithms.
+        """
         # purge remaining testfiles
-        logfiles = glob.glob(os.path.join('/dev/shm', 'logs/OPT*.log'))
-        resultfiles = glob.glob(os.path.join('/dev/shm', 'results/OPT*'))
+        logfiles = glob.glob(os.path.join(self.out_pt, 'logs/OPT*.log'))
+        resultfiles = glob.glob(os.path.join(self.out_pt, 'results/OPT*'))
         for logfile in logfiles:
             os.remove(logfile)
         for resultfile in resultfiles:
@@ -716,13 +1018,103 @@ class MainTest(unittest.TestCase):
                           f'position displacement max error: {th.max(th.abs(_data.pos - data.pos0)).item()}')
 
     def test_TS(self):
-        pass
+        """
+        TS search on 3D Cerjan-Miller potential with irregular batch.
+        Saddle at origin, E=0. Tol: |E|<5e-2, |X|_oo<0.01.
+        """
+        from BUCToolkit.BatchOptim.TS.Dimer import Dimer
+        from BUCToolkit.BatchOptim.TS.Krylov import KrylovNewton, KrylovDynamics
+        from BUCToolkit.BatchStructures.batch import Data, Batch
+        import torch as th
 
-    def test_NEB(self):
-        pass
+        # Build irregular 3D batch: 2 structures with 27 + 8 atoms,
+        # initialized randomly near the saddle at origin
+        th.manual_seed(42)
+        d1 = Data(pos=th.randn(27, 3) * 0.07)
+        d2 = Data(pos=th.randn(8, 3) * 0.07)
+        data = Batch.from_data_list([d1, d2])
+        X0 = data.pos.unsqueeze(0)          # (1, 35, 3)
+        bi = [27, 8]
 
-    def test_CMD(self):
-        pass
+        # Energy: flatten each structure to (N_atoms*3,) vector,
+        # one saddle per structure, deterministic coefficients.
+        # E(x) = sum_i c2[i]*x_i^2 + x_i^4,  with c2[0]=-1, c2[i>0]=1.
+        def Energy(X, data):
+            X_ = X.squeeze(0)
+            out = th.zeros(data.num_graphs, device=X.device, dtype=X.dtype)
+            for s in range(data.num_graphs):
+                x_s = X_[data.batch == s].reshape(1, -1)
+                n = x_s.shape[-1]
+                c2 = th.ones(n, device=x_s.device, dtype=x_s.dtype)
+                c2[:1] = -1.0
+                x2 = x_s ** 2
+                out[s] = (c2 * x2 + x2 ** 2).sum()
+            return out
+
+        def Grad(X, data):
+            from torch.func import grad
+            return grad(lambda x: Energy(x, data).sum())(X)
+
+        # Batch updater: filter data when structures converge
+        class BatchUpdater:
+            def initialize(self): pass
+            def __call__(self, mask, f_args, f_kw, g_args, g_kw):
+                # mask: (n_struct,) bool, True=keep(unconverged)
+                d = f_args[0]
+                if mask.all():
+                    return f_args, f_kw, g_args, g_kw
+                kept = [d for d, m in zip(d.to_data_list(), mask) if m]
+                new_d = type(d).from_data_list(kept)
+                return (new_d,), f_kw, (new_d,), g_kw
+
+        updater = BatchUpdater()
+        updater.initialize()
+
+        for dtp in ('cpu', 'cuda:0'):
+            X0 = X0.to(dtp)
+            data = data.to(dtp)
+            # Dimer
+            dimer = Dimer(
+                5e-5, 0.01, -0.1, 0.05,
+                500, 10, 0.5, 0.02,
+                device=dtp, verbose=0
+            )
+            updater.initialize(); dimer.set_batch_updater(updater)
+            y_d, X_d = dimer.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                               grad_func_args=(data,), batch_indices=bi,
+                               is_grad_func_contain_y=False, require_grad=False)
+            print(f'  [{dtp}] Dimer:          E={float(y_d.abs().max()):.6e}, |X|={float(X_d.abs().max()):.6e}')
+            self.assertLess(float(y_d.abs().max()), 5e-2)
+            self.assertLess(float(X_d.abs().max()), 0.05)
+
+            # KrylovNewton
+            kn = KrylovNewton(
+                5e-5, 0.01, 0.01, 0.05,
+                500, 10, 0.05,
+                device=dtp, verbose=0
+            )
+            updater.initialize(); kn.set_batch_updater(updater)
+            y_kn, X_kn, _ = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                                grad_func_args=(data,), batch_indices=bi,
+                                is_grad_func_contain_y=False, require_grad=False)
+            print(f'  [{dtp}] KrylovNewton:   E={float(y_kn.abs().max()):.6e}, |X|={float(X_kn.abs().max()):.6e}')
+            self.assertLess(float(y_kn.abs().max()), 5e-2)
+            self.assertLess(float(X_kn.abs().max()), 0.05)
+
+            # KrylovDynamics
+            kd = KrylovDynamics(
+                5e-5, 0.01, 0.01, 0.05,
+                200, 10, 0.1,
+                device=dtp, verbose=0
+            )
+            updater.initialize(); kd.set_batch_updater(updater)
+            y_kd, X_kd, _ = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                                grad_func_args=(data,), batch_indices=bi,
+                                is_grad_func_contain_y=False, require_grad=False)
+            print(f'  [{dtp}] KrylovDynamics: E={float(y_kd.abs().max()):.6e}, |X|={float(X_kd.abs().max()):.6e}')
+            self.assertLess(float(y_kd.abs().max()), 5e-2)
+            self.assertLess(float(X_kd.abs().max()), 0.05)
+            th.cuda.synchronize()
 
     def test_parallel(self):
         """
@@ -979,15 +1371,38 @@ class MainTest(unittest.TestCase):
 
             print(f"TASK: {name} TEST DONE.\n" + "*"*89)
 
+    def test_IO(self):
+        """Test I/O: OUTCAR → POSCAR/cif → binary round-trip."""
+        tmp = self.out_pt
+        try:
+            from io_test import run_io_tests
+            errors = run_io_tests(tmp)
+            if errors:
+                self.fail('\n'.join(errors))
+        finally:
+            #shutil.rmtree(tmp, ignore_errors=True)
+            pass
 
 
-
+    def test_APIS(self):
+        """Test Trainer + Predictor APIs with GNN-LJ-EAM model."""
+        tmp = self.out_pt
+        try:
+            from test_apis import run_api_tests
+            errors = run_api_tests(tmp)
+            if errors:
+                self.fail('\n'.join(errors))
+        finally:
+            #shutil.rmtree(tmp, ignore_errors=True)
+            pass
 
 
 if __name__ == '__main__':
     import sys
+    import datetime
     try:
-        with open('/tmp/paratest.log', 'w') as f:
+        with open(f'./testsuite.log', 'w') as f:
+            f.write(f'START TIME: {datetime.datetime.now()}\n\n')
             sys.stdout = f
             unittest.main()
             #test.test_parallel()

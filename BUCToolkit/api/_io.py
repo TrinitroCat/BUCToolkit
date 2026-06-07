@@ -431,13 +431,16 @@ class _CONFIGS(object):
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
         self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
-        while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
-            warnings.warn(
-                f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
-                f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
-                RuntimeWarning
-            )
-            self._PREDICTIONS_SAVE_FILE += '_1'
+        if self.SAVE_PREDICTIONS:
+            while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
+                warnings.warn(
+                    f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
+                    f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
+                    RuntimeWarning
+                )
+                self._PREDICTIONS_SAVE_FILE += '_1'
+        else:
+            self._PREDICTIONS_SAVE_FILE = None
         if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
@@ -668,7 +671,7 @@ class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
         self.X = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
         batch_size = X.size(0)
         if graph.batch_size == 1:
-            graph = self.pygBatch.from_data_list([graph] * batch_size)
+            graph = self.pygBatch.from_data_list([graph] * batch_size, exclude_keys=['batch', 'ptr'])
         graph.pos = self.X
         y = self._model(graph)  # (n_batch, )
         energy = y['energy']

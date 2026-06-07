@@ -124,7 +124,7 @@ class Frequency:
         diff_pos, diff_neg, origin = self._create_finite_diff_tensor(coords, fixed_atom_tensor)
 
         pp = diff_pos.unsqueeze(1) + diff_pos.unsqueeze(0) - origin  # (3N, 3N, N, 3)
-        np = diff_neg.unsqueeze(1) + diff_pos.unsqueeze(0) - origin
+        np_ = diff_neg.unsqueeze(1) + diff_pos.unsqueeze(0) - origin
         pn = diff_pos.unsqueeze(1) + diff_neg.unsqueeze(0) - origin
         nn = diff_neg.unsqueeze(1) + diff_neg.unsqueeze(0) - origin
 
@@ -138,7 +138,7 @@ class Frequency:
         real_block_size = [block_size] * n_int_block
         if n_rest > 0: real_block_size = real_block_size + [n_rest]  # manage the problem that all_batch could not be divided by given block_size.
         pp = th.split(pp.flatten(0, 1), real_block_size)  # (9N**2, N ,3)
-        np = th.split(np.flatten(0, 1), real_block_size)
+        np_ = th.split(np_.flatten(0, 1), real_block_size)
         pn = th.split(pn.flatten(0, 1), real_block_size)
         nn = th.split(nn.flatten(0, 1), real_block_size)
         num_block = len(pp)
@@ -149,7 +149,7 @@ class Frequency:
         for _indx in range(num_block):
             end = start + block_size
             hessian[start:end] = (
-                                         func_(pp[_indx]) - func_(np[_indx]) - func_(pn[_indx]) + func_(nn[_indx])
+                                         func_(pp[_indx]) - func_(np_[_indx]) - func_(pn[_indx]) + func_(nn[_indx])
                                  ) / (4 * self.delta ** 2)  # (3N * 3N)
             start = end
         hessian = hessian.reshape(n_free, n_free)

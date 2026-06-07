@@ -367,3 +367,56 @@ if __name__ == "__main__":
     out_batch = model(batch_data)
     print("Batch energies:", out_batch['energy'])
     print("Batch forces shape:", out_batch['forces'].shape)
+
+# ================================================================
+#  TS search / saddle-point benchmark potentials
+# ================================================================
+
+import torch as th
+
+def cerjan_miller(x: th.Tensor, k=1, a=1.0, b=1.0, c=0.0):
+    """Cerjan-Miller saddle potential. Saddle at origin, Morse index = k."""
+    x = x.reshape(-1, x.shape[-1])  # (n_atoms*n_batch, dim)
+    n = x.shape[-1]
+    x2 = x ** 2
+    th.manual_seed(114514)
+    c2 = th.empty(n, device=x.device, dtype=x.dtype)
+    c2[:k] = -a - th.randn(k, device=x.device, dtype=x.dtype).abs() * 5.
+    th.manual_seed(114514)
+    c2[k:] = a + th.randn(n - k, device=x.device, dtype=x.dtype).abs() * 5.
+    single = (c2 * x2 + b * x2 ** 2).sum(dim=-1)
+    if c != 0.0:
+        sum_x2 = x2.sum(dim=-1)
+        sum_x4 = (x2 ** 2).sum(dim=-1)
+        coupling = 0.5 * c * (sum_x2 ** 2 - sum_x4)
+    else:
+        coupling = 0.0
+    return single + coupling
+
+
+def saddle_quadratic(x, k=1, alpha=1.0, beta=0.1):
+    """High-dim saddle: origin is Morse-index-k saddle."""
+    x = x.reshape(-1, x.shape[-1])
+    n = x.shape[-1]
+    quad = th.zeros_like(x[..., 0])
+    if k > 0:
+        quad -= 0.5 * alpha * (x[..., :k] ** 2).sum(dim=-1)
+    if n - k > 0:
+        quad += 0.5 * alpha * (x[..., k:] ** 2).sum(dim=-1)
+    r2 = (x ** 2).sum(dim=-1)
+    return quad + 0.25 * beta * r2 ** 2
+
+
+def leps_2d(x, a=0.05, b=0.80, c=0.05, dAB=2.0, dBC=1.0, dAC=3.0):
+    """2-D LEPS potential. Approx saddle at rAB~1.0, rBC~1.0."""
+    rAB = x[..., 0]
+    rBC = x[..., 1]
+    rAC = dAC - rAB - rBC
+    QAB = th.exp(-a * (rAB - dAB))
+    QBC = th.exp(-b * (rBC - dBC))
+    QAC = th.exp(-c * (rAC - dAC))
+    JAB = 0.5 * (QAB**2 - 2*QAB)
+    JBC = 0.5 * (QBC**2 - 2*QBC)
+    JAC = 0.5 * (QAC**2 - 2*QAC)
+    diff = (JAB - JBC)**2 + (JBC - JAC)**2 + (JAC - JAB)**2
+    return JAB + JBC + JAC - th.sqrt(diff)
