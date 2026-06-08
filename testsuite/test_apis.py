@@ -19,6 +19,8 @@ from BUCToolkit.io import OUTCAR2Feat
 from BUCToolkit.Preprocessing.preprocessing import CreatePygData
 from BUCToolkit.api.DataLoaders import PyGDataLoader, ISFSPyGDataLoader
 from BUCToolkit.api.Trainer import Trainer
+from BUCToolkit.api.Losses import Energy_Force_Loss, Energy_Loss
+from BUCToolkit.api.ModelOptims import FIRELikeOptimizer, LangevinOptimizer
 from BUCToolkit.api.Predictor import Predictor
 from BUCToolkit.api.StructureOptimization import StructureOptimization
 from BUCToolkit.api.MolecularDynamics import MolecularDynamics
@@ -45,7 +47,7 @@ VERBOSE: !!int 1
 DEVICE: !!str '{device}'
 BATCH_SIZE: !!int {batch_size}
 OUTPUT_PATH: !!str {output_dir}
-OUTPUT_POSTFIX: !!str api_test
+OUTPUT_POSTFIX: !!str api_test_XXX
 REDIRECT: !!bool true
 
 TRAIN:
@@ -53,13 +55,15 @@ TRAIN:
   SAVE_CHK: !!bool true
   CHK_SAVE_PATH: !!str {output_dir}
   CHK_SAVE_POSTFIX: !!str test_model_chk
+  VAL_PER_STEP: !!int 10
+  ACCUMULATE_STEP: 2
   OPTIM: !!str AdamW
   OPTIM_CONFIG:
     lr: 1.e-3
   LOSS: Energy_Force_Loss
   LOSS_CONFIG:
     coeff_F: 1.0
-  METRICS: ['E_MAE', 'F_MAE']
+  METRICS: ['E_MAE', 'F_MAE', 'E_R2', 'F_MaxE']
   DATA_LOADER_KWARGS:
     shuffle: True
 
@@ -411,19 +415,41 @@ def run_api_tests(tmp_base: str = '/dev/shm') -> List[str]:
         }
 
         # ----------------------------------------------------------------
-        # Step 2: Trainer test
+        # Step 2: Trainer test — loop over loss types and optimizers
         # ----------------------------------------------------------------
+        import torch.optim as optim
         device = 'cuda:0' if th.cuda.is_available() else 'cpu'
-        _write_train_inp(train_inp, batch_size=4, device=device, epochs=20,
-                         output_dir=log_dir, data_path='')
-        trainer = Trainer(train_inp)
-        trainer.set_dataset(train_data, valid_data)
-        trainer.set_dataloader(PyGDataLoader, {'shuffle': True})
-
         from _toy_models import GNNLJDirectionalEAM
-        trainer.train(GNNLJDirectionalEAM)
 
-        print(f'  Trainer: 2 epoch on {n_use} structures OK')
+        for loss_name, loss_cls, opt_list in [
+            ('Energy_Loss', Energy_Loss, [
+                ('Adam',        optim.Adam,          {'lr': 1e-3}),
+            ]),
+            ('Energy_Force_Loss', Energy_Force_Loss, [
+                ('Adam',        optim.Adam,          {'lr': 1e-3}),
+                ('FIRELike',    FIRELikeOptimizer,   {'lr': 1e-3}),
+                ('Langevin',    LangevinOptimizer,   {'lr': 1e-3}),
+            ]),
+        ]:
+            for opt_name, opt_cls, opt_cfg in opt_list:
+                _write_train_inp(train_inp, batch_size=4, device=device, epochs=3,
+                                 output_dir=log_dir, data_path='')
+                with open(train_inp, 'r+') as f:
+                    inpdata = f.read()
+                    inpdata = inpdata.replace('api_test_XXX', f"api_trainer_{opt_name}")
+                    f.write(inpdata)
+
+                trainer = Trainer(train_inp)
+                trainer.set_dataset(train_data, valid_data)
+                trainer.set_dataloader(PyGDataLoader, {'shuffle': True})
+                trainer.set_loss_fn(loss_cls, {})
+                trainer.set_optimizer(opt_cls, opt_cfg)
+                trainer.OUTPUT_POSTFIX = trainer.OUTPUT_POSTFIX + '_' + opt_name
+                trainer.train(GNNLJDirectionalEAM)
+
+                print(f'    {loss_name} + {opt_name} OK')
+
+        print(f'  Trainer: loss × optimizer loop + 4 Metrics OK on {n_use} structures')
 
         # ----------------------------------------------------------------
         # Step 3: Predictor test

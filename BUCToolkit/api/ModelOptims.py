@@ -281,7 +281,7 @@ class LangevinOptimizer(Optimizer):
     def state_dict(self):
         state = super().state_dict()
         state.update({
-            'virials': self.virials, 'Virial_now': self.Virial_now,
+            'virials': list(self.virials), 'Virial_now': self.Virial_now,
             'heating_step_now': self.heating_step_now,
             'heating_max_steps': self.heating_max_steps,
         })
