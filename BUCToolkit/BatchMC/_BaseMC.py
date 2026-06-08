@@ -21,13 +21,14 @@ from torch import nn
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils._Element_info import ATOMIC_SYMBOL
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseIO
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers
+from BUCToolkit.Bases.BaseMotion import BaseMotion
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 
 
-class _BaseMC(BaseIO):
+class _BaseMC(BaseMotion):
     def __init__(
             self,
             iter_scheme: str,
@@ -283,12 +284,7 @@ class _BaseMC(BaseIO):
         is_fix_mass_center = (move_to_center_freq > 0)
 
         # Selective dyamics
-        if fixed_atom_tensor is None:
-            self.atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            self.atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
+        self.atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
         # other check
         if (not isinstance(maxiter, int)) or (maxiter <= 0):
             raise ValueError(f'Invalid value of maxiter: {maxiter}. It would be an integer greater than 0.')
@@ -617,12 +613,7 @@ class _BaseMC(BaseIO):
         is_fix_mass_center = (move_to_center_freq > 0)
 
         # Selective dynamics
-        if fixed_atom_tensor is None:
-            self.atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            self.atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
+        self.atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
         self.fixed_indices = th.where(th.any(self.atom_masks, dim=-1))[1]  # COO sumN or n_atom dim
         # other check
         if (not isinstance(maxiter, int)) or (maxiter <= 0):

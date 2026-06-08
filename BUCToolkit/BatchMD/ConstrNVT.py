@@ -1,40 +1,44 @@
 """ Canonical ensemble (NVT) Molecular Dynamics via Verlet algo. """
 
-#  Copyright (c) 2024-2025.7.4, BUCToolkit.
+#  Copyright (c) 2024-2026.4.25, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
-#  File: NVT.py
+#  Version: 1.0b
+#  File: ConstrNVT.py
 #  Environment: Python 3.12
 
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 import warnings
 import math
 
-import numpy as np
 import torch as th
 from torch import nn
+import numpy as np
 
 from BUCToolkit.utils.index_ops import index_reduce
-from ._BaseMD import _BaseMD
+from ._BaseConstrMD import _BaseConstrMD
+from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 
 
-class NVT(_BaseMD):
+class ConstrNVT(_BaseConstrMD):
     """
-    Canonical ensemble (NVT) molecular dynamics.
+    Constrained canonical ensemble (NVT) molecular dynamics implemented via velocity Verlet algo.
 
     Parameters:
         time_step: float, time per step (ps).
-        max_step: maxmimum steps.
+        max_step: int, maximum steps.
+        constr_func: Callable[[th.Tensor], th.Tensor] = None, the constraint function.
+        constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on the accumulate time.
+        constr_threshold: float = 1e-5, the constraint error tolerance.
+        require_fixman: bool = False, whether to calculate the Fixman term for constraint MD.
         thermostat: str, the thermostat of NVT ensemble.
         thermostat_config: Dict|None, configs of thermostat. {'damping_coeff': float} for Langevin, {'time_const': float} for CSVR, {'virt_mass': float} for Nose-Hoover.
-        T_init: initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
+        T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         output_structures_per_step: int, output structures per output_structures_per_step steps.
-        device: device that the program rum on.
-        verbose: control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
-        is_compile: whether to use jit to compile integrator or not.
-        compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
+        device: str|torch.device, device that program rum on.
+        verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+
     Methods:
-        run: run the NVT ensemble BatchMD.
+        run: run BatchMD.
     """
 
     def __init__(
@@ -42,51 +46,60 @@ class NVT(_BaseMD):
             time_step: float,
             max_step: int,
             thermostat: Literal['Langevin', 'VR', 'Nose-Hoover', 'CSVR'],
-            thermostat_config: Dict[Literal['damping_coeff', 'time_const', 'virt_mass'], float] | None = None,
+            thermostat_config: Dict | None = None,
+            constr_func: Callable[[th.Tensor], th.Tensor] = None,
+            constr_val: Callable[[th.Tensor], th.Tensor | Tuple[th.Tensor]] | th.Tensor = None,
+            constr_threshold: float = 1e-5,
+            require_fixman: bool = False,
             T_init: float = 298.15,
             output_file: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
-            verbose: int = 2,
-            is_compile: bool = False,
-            compile_kwargs: dict | None = None,
+            verbose: int = 2
     ) -> None:
         """
+        Constrained canonical ensemble (NVT) molecular dynamics implemented via velocity Verlet algo.
+
         Parameters:
             time_step: float, time per step (ps).
-            max_step: maximum steps.
+            max_step: int, maximum steps.
+            constr_func: Callable[[th.Tensor], th.Tensor] = None, the constraint function.
+            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on the accumulate time.
+            constr_threshold: float = 1e-5, the constraint error tolerance.
+            require_fixman: bool = False, whether to calculate the Fixman term for constraint MD.
             thermostat: str, the thermostat of NVT ensemble.
             thermostat_config: Dict|None, configs of thermostat. {'damping_coeff': float} for Langevin, {'time_const': float} for CSVR, {'virt_mass': float} for Nose-Hoover.
-            T_init: initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
-            output_file: the path to the binary file that stores trajectories. If None, tractories will not output.
+            T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
             output_structures_per_step: int, output structures per output_structures_per_step steps.
-            device: device that program run on.
-            verbose: control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+            device: str|torch.device, device that program rum on.
+            verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+
+        Methods:
+            run: run BatchMD.
+
         """
         super().__init__(
             time_step,
             max_step,
             T_init,
+            constr_func,
+            constr_val,
+            constr_threshold,
+            require_fixman,
             output_file,
             output_structures_per_step,
             device,
-            verbose,
-            is_compile,
-            compile_kwargs
+            verbose
         )
         __ENSEMBLES_DICT = {'Langevin': None, 'VR': None, 'Nose-Hoover': None, 'CSVR': None}
-        if thermostat not in {'Langevin', 'Langevin_old', 'test', 'VR', 'CSVR', 'Nose-Hoover'}:
-            raise ValueError(f'Unknown Thermostat {thermostat}')
+        if thermostat not in {'Langevin', 'Langevin_old', 'test', 'VR', 'CSVR', 'Nose-Hoover'}: raise ValueError(f'Unknown Thermostat {thermostat}')
         self.thermostat = thermostat
         if thermostat_config is None:
             thermostat_config = dict()
         self.thermostat_config = thermostat_config
-        self.update_scheme = None  # lazy loaded in self.initialize
+        self.update_scheme = None
         self.half_time_step_const = 0.5 * self.time_step * 9.64853329045427e-3
         self.raw_half_time_step_const = 0.5 * self.time_step
-        # CUDAGraph handles for full-loop capture (lazy-init on first step)
-        self._graph_A = None
-        self._graph_B = None
 
     def __resolve_update_scheme(self, batch_indices):
         """
@@ -126,7 +139,7 @@ class NVT(_BaseMD):
             self.one_sub_c = 1 - c
             # avoid divide-by-zero in K
             self.epsK = th.scalar_tensor(1e-12, device=self.device, dtype=th.float32)
-            return self.__CSVR_cpu if self.device.type != 'cuda' else self.__CSVR_cuda
+            return self.__CSVR
         else:
             raise NotImplementedError("Unknown Thermostat Type.")
 
@@ -147,58 +160,26 @@ class NVT(_BaseMD):
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
-    ) -> None:
-        if masses is None:
-            masses = th.ones_like(X)
+    ):
+        super().initialize(
+            func,
+            X,
+            Element_list,
+            masses,
+            V_init,
+            grad_func,
+            func_args,
+            func_kwargs,
+            grad_func_args,
+            grad_func_kwargs,
+            is_grad_func_contain_y=is_grad_func_contain_y,
+            require_grad=require_grad,
+            batch_indices=batch_indices,
+            fixed_atom_tensor=fixed_atom_tensor,
+            is_fix_mass_center=is_fix_mass_center
+        )
+        # recalculate E_vir
         self.update_scheme = self.__resolve_update_scheme(batch_indices)
-        # Pre-allocate random buffers for CSVR thermostat
-        if self.thermostat == 'CSVR':
-            _sample = X[0:1]
-            _K_shape = (len(batch_indices),) if batch_indices is not None else (1,)
-            self._buf_R = th.empty(_K_shape, device=self.device, dtype=th.float32)
-            self._buf_S = th.empty(_K_shape, device=self.device, dtype=th.float32)
-        else:
-            self._buf_R = None
-            self._buf_S = None
-        # Graph/buffer will be built on first __CSVR call with real tensors
-        self._buf_F = None
-        self._graph_A = None
-        self._graph_B = None
-
-    def _build_csver_graphs(self, X, masses, V, atom_masks, batch_indices):
-        """Build CUDAGraphs A and B for CSVR thermostat using real simulation tensors."""
-        if self.device.type != 'cuda':
-            return
-        self._buf_F = th.empty_like(X)
-        half_dt = 0.5 * self.time_step * 9.64853329045427e-3
-        # --- Graph A: V += 0.5*dt*F/m, X += dt*V ---
-        self._graph_A = th.cuda.CUDAGraph()
-        with th.cuda.graph(self._graph_A):
-            V.addcdiv_(self._buf_F, masses, value=half_dt)
-            X.add_(V, alpha=self.time_step)
-        # --- Graph B: F*mask, V += 0.5*dt*F/m, Ek_T, CSVR thermostat ---
-        Nf = self.free_degree
-        self._graph_B = th.cuda.CUDAGraph()
-        with th.cuda.graph(self._graph_B):
-            self._buf_F.mul_(atom_masks)
-            V.addcdiv_(self._buf_F, masses, value=half_dt)
-            self.Ek, _ = self._reduce_Ek_T(batch_indices, masses, V)
-            if batch_indices is not None:
-                K = th.clamp(self.Ek, min=self.epsK)
-                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
-                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, self._buf_R) ** 2
-                alpha2.addcmul_(f, self._buf_S).clamp_min_(self.epsK)
-                alpha = th.sqrt(alpha2).reshape(1, -1, 1)
-                V *= alpha.index_select(1, self.batch_scatter)
-            else:
-                K = th.clamp(self.Ek, min=self.epsK)
-                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
-                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, self._buf_R) ** 2
-                alpha2.addcmul_(f, self._buf_S).clamp_min_(self.epsK)
-                alpha = th.sqrt(alpha2).reshape(-1, 1, 1)
-                V *= alpha
 
     def __Langevin(
             self,
@@ -214,15 +195,11 @@ class NVT(_BaseMD):
             masses,
             atom_masks,
             is_grad_func_contain_y,
-            batch_indices
+            batch_indices,
     )-> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """
-        BAOAB style Langevin thermostat.
-        References: J. Chem. Phys. 138, 174102 (2013)
-
-        """
         # read thermostat configs
         X = X.detach()
+        X_init = X.clone()
         half_time_step_const = self.half_time_step_const
         raw_half_time_step_const = self.raw_half_time_step_const
         with th.no_grad():
@@ -233,8 +210,15 @@ class NVT(_BaseMD):
             # stochastic update velocity
             V.mul_(alpha)
             V.add_(th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V))
-            #V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
-            X.add_(V, alpha = raw_half_time_step_const)
+            # V = alpha * V + th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(V)
+            # the rest half-step
+            X.add_(V, alpha=raw_half_time_step_const)
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
+            if self.verbose > 0:
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # update energy & forces
             Energy, Force = self._calc_EF(
                 X,
@@ -248,8 +232,9 @@ class NVT(_BaseMD):
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
-            # the rest half-step
-            V.addcdiv_(Force, masses, value=half_time_step_const)
+            # last update
+            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            self._project1(V, X, out=V)
 
         return X, V, Energy, Force
 
@@ -267,14 +252,21 @@ class NVT(_BaseMD):
             masses,
             atom_masks,
             is_grad_func_contain_y,
-            batch_indices
+            batch_indices,
     )-> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         # NVE Step
         X = X.detach()
         with th.no_grad():
+            X_init = X.clone()
             # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             X.add_(V, alpha=self.time_step)
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
+            if self.verbose > 0:
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
             # Update V
             Energy, Force = self._calc_EF(
@@ -289,9 +281,9 @@ class NVT(_BaseMD):
                 is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
-
             # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
             V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            self._project1(V, X, out=V)
             if batch_indices is not None:
                 # Rescaling factor
                 alpha = th.sqrt(self.EK_TARGET / self.Ek).unsqueeze(-1).unsqueeze(-1)  # (n_batch, 1, 1) | (irregular n_batch, 1, 1)
@@ -303,101 +295,109 @@ class NVT(_BaseMD):
 
         return X, V, Energy, Force
 
-    def __CSVR_cpu(
+    def __CSVR(
             self,
-            X, V, Force,
-            func, grad_func_,
-            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y, batch_indices
+            X: th.Tensor,
+            V: th.Tensor,
+            Force,
+            func,
+            grad_func_,
+            func_args,
+            func_kwargs,
+            grad_func_args,
+            grad_func_kwargs,
+            masses,
+            atom_masks,
+            is_grad_func_contain_y,
+            batch_indices
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """ Eager CSVR update (CPU path). """
-        half_dt = self.half_time_step_const
+        """
+        The Analytic solution of CSVR that uses Chi^2 distribution and exp.
+        Returns:
+
+        """
+        half_time_step_const = self.half_time_step_const
         time_step = self.time_step
+        X_init = X.clone()
         with th.no_grad():
-            V.addcdiv_(Force, masses, value=half_dt)
+            # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
+            V.addcdiv_(Force, masses, value=half_time_step_const)
             X.add_(V, alpha=time_step)
+            # apply constraints
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
+            if self.verbose > 0:
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
+            # Update V
             Energy, Force = self._calc_EF(
-                X, func, func_args, func_kwargs,
-                grad_func_, grad_func_args, grad_func_kwargs,
-                self.require_grad, is_grad_func_contain_y
+                X,
+                func,
+                func_args,
+                func_kwargs,
+                grad_func_,
+                grad_func_args,
+                grad_func_kwargs,
+                self.require_grad,
+                is_grad_func_contain_y
             )
             Force.mul_(atom_masks)
-            V.addcdiv_(Force, masses, value=half_dt)
+            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
+            V.addcdiv_(Force, masses, value=half_time_step_const)
+            self._project1(V, X, out=V)
             if self.Ek_T_graph is not None:
                 self.Ek_T_graph.replay()
             else:
                 self.Ek, _ = self._reduce_Ek_T(batch_indices, masses, V)
-            Nf = self.free_degree
+
+            Nf = self.free_degree  # shape (n_batch,)
             if batch_indices is not None:
-                K = th.clamp(self.Ek, min=self.epsK)
-                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                K = th.clamp(self.Ek, min=self.epsK)  # shape (n_batch,)
+                K0 = self.EK_TARGET  # (n_batch, )
+
+                # f = (1-c) * K0 / (Nf*K)
+                f = self.one_sub_c * K0 / (Nf * K)
+
+                # R ~ N(0,1)
                 R = th.randn_like(K)
-                _df = th.clamp(Nf - 1.0, min=1.0)
-                S = th.distributions.chi2.Chi2(df=_df).sample()
-                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
+
+                # S ~ Chi2(df=Nf-1)
+                df = th.clamp(Nf - 1.0, min=1.0)
+                S = th.distributions.chi2.Chi2(df=df).sample()  # shape (n_batch,)
+
+                # alpha^2 = (sqrt(c)+sqrt(f)R)^2 + f S
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                alpha2: th.Tensor = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
                 alpha2.addcmul_(f, S).clamp_min_(self.epsK)
-                alpha = th.sqrt(alpha2).reshape(1, -1, 1)
+
+                # (optional bookkeeping: post-thermostat kinetic energy)
+                # self.Ekt_vir = alpha2 * K
+
+                alpha = th.sqrt(alpha2).reshape(1, -1, 1)  # (n_batch, 1, 1)
                 V *= alpha.index_select(1, self.batch_scatter)
+
             else:
-                K = th.clamp(self.Ek, min=self.epsK)
-                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                K = th.clamp(self.Ek, min=self.epsK)  # (n_batch,)
+                K0 = self.EK_TARGET  # scalar or (n_batch,)
+
+                f = self.one_sub_c * K0 / (Nf * K)
+
                 R = th.randn_like(K)
-                _df = th.clamp(Nf - 1.0, min=1.0)
-                S = th.distributions.chi2.Chi2(df=_df).sample()
-                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
+                df = th.clamp(Nf - 1.0, min=1.0)
+                # sample per-batch
+                S = th.distributions.chi2.Chi2(df=df).sample()
+
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                alpha2: th.Tensor = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
                 alpha2.addcmul_(f, S).clamp_min_(self.epsK)
-                alpha = th.sqrt(alpha2).reshape(-1, 1, 1)
+
+                # self.Ekt_vir = alpha2 * K
+
+                alpha = th.sqrt(alpha2).reshape(-1, 1, 1)  # (n_batch, 1, 1)
                 V *= alpha
-        return X, V, Energy, Force
 
-    def __CSVR_cuda(
-            self,
-            X, V, Force,
-            func, grad_func_,
-            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y, batch_indices
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """ First CSVR call on CUDA: build CUDAGraphs, then delegate to graph version. """
-        self._buf_F = th.empty_like(X)
-        self._build_csver_graphs(X, masses, V, atom_masks, batch_indices)
-        self.update_scheme = self.__CSVR_cuda_replay  # self replacement, the rest steps use replay.
-        f = self.__CSVR_cuda_replay(
-            X, V, Force, func, grad_func_,
-            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y, batch_indices
-        )
-        return f
-
-    def __CSVR_cuda_replay(
-            self,
-            X, V, Force,
-            func, grad_func_,
-            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y, batch_indices
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """ CUDAGraph replay for CSVR. """
-        with th.no_grad():
-            self._buf_F.copy_(Force)
-            self._graph_A.replay()
-        Energy, Force = self._calc_EF(
-            X, func, func_args, func_kwargs,
-            grad_func_, grad_func_args, grad_func_kwargs,
-            self.require_grad, is_grad_func_contain_y
-        )
-        Nf = self.free_degree
-        if batch_indices is not None:
-            self._buf_R.copy_(th.randn_like(self._buf_R))
-            _df = th.clamp(Nf - 1.0, min=1.0)
-            self._buf_S.copy_(th.distributions.chi2.Chi2(df=_df).sample())
-        else:
-            self._buf_R.copy_(th.randn_like(self._buf_R))
-            _df = th.clamp(Nf - 1.0, min=1.0)
-            self._buf_S.copy_(th.distributions.chi2.Chi2(df=_df).sample())
-        with th.no_grad():
-            self._buf_F.copy_(Force)
-            self._graph_B.replay()
         return X, V, Energy, Force
 
     def __NoseHoover(
@@ -420,6 +420,7 @@ class NVT(_BaseMD):
         raw_half_time_step_const = self.raw_half_time_step_const
         time_step = self.time_step
         smass = self.smass
+        X_init = X.clone()
         # Main update
         with th.no_grad():
             if batch_indices is not None:
@@ -429,6 +430,13 @@ class NVT(_BaseMD):
             V.addcdiv_(Force, masses, value=half_time_step_const)
             V.mul_(th.exp(- _iota * raw_half_time_step_const))
             X.add_(V, alpha=time_step)
+            # apply constraints
+            Fc, G, w = self._project2(X, X_init, V)  # in-place update
+            if self.verbose > 0:
+                self.logger.info(f'Constraint forces lambda: {np.array2string(Fc.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                if self.require_fixman:
+                    self.logger.info(f'1/2 dln|Z|/dX: {np.array2string(G.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    self.logger.info(f'|Z|^(-1/2): {np.array2string(w.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}')
 
             Energy, Force = self._calc_EF(
                 X,
@@ -482,24 +490,25 @@ class NVT(_BaseMD):
                     th.sub(reduced_Ek, self.long_free_degree, alpha=self.T_init * 8.617333262145e-5),
                     smass, value=raw_half_time_step_const
                 )
+            self._project1(V, X, out=V)
 
         return X, V, Energy, Force
 
     def _updateXV(
             self,
-            X,
-            V,
-            Force,
-            func,
-            grad_func_,
-            func_args,
-            func_kwargs,
-            grad_func_args,
-            grad_func_kwargs,
-            masses,
-            atom_masks,
-            is_grad_func_contain_y,
-            batch_indices
+            X: th.Tensor,
+            V: th.Tensor,
+            Force: th.Tensor,
+            func: Callable,
+            grad_func_: Callable,
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            masses: th.Tensor,
+            atom_masks: th.Tensor,
+            is_grad_func_contain_y: bool,
+            batch_indices: th.Tensor|None,
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
 
         x, v, energy, forces = self.update_scheme(

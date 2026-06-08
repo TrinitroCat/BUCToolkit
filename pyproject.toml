@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "BUCToolkit"
-version = "1.0b2"
+version = "1.0b4"
 description = """
 BUCToolkit is a PyTorch-based high-performance AI4Science software package of computational chemistry,
 which can perform structural optimizations (both minimization and transition state search),

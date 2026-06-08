@@ -19,15 +19,17 @@ from torch import nn
 
 import numpy as np
 
-from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL
+from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL, DTYPE
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
-from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseIO
+from BUCToolkit.Bases.BaseMotion import BaseMotion
+
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 
-class _BaseMD(BaseIO):
+class _BaseMD(BaseMotion):
     """ Base BatchMD """
 
     __slots__ = [
@@ -61,7 +63,7 @@ class _BaseMD(BaseIO):
             max_step: maximum steps.
             T_init: initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution.
                 If V_init is given, T_init will be ignored.
-            output_file: the path to the binary file that stores trajectories.
+            output_file: the path to the binary file that stores trajectories. If None, tractories will not output.
             output_structures_per_step: int, output structures per output_structures_per_step steps.
             device: device that program run on.
             verbose: control the detailed degree of output text information.
@@ -76,7 +78,7 @@ class _BaseMD(BaseIO):
         self.max_step = int(max_step)
         self.T_init = float(T_init)
         self.output_structures_per_step = int(output_structures_per_step)
-        self.device = device
+        self.device = device if isinstance(device, th.device) else th.device(device)
         self.verbose = int(verbose)
         self.is_compile = bool(is_compile)
         self.compile_kwargs = compile_kwargs if compile_kwargs is not None else dict()
@@ -277,27 +279,6 @@ class _BaseMD(BaseIO):
         for i, ee in enumerate(elem_list):
             self.logger.info(f'Structure {i:>5d}: {ee}')
 
-    @th.compiler.disable
-    def _calc_EF(
-            self,
-            X,
-            func,
-            func_args,
-            func_kwargs,
-            grad_func_,
-            grad_func_args,
-            grad_func_kwargs,
-            is_grad_func_contain_y,
-    ) -> Tuple[th.Tensor, th.Tensor]:
-        with th.set_grad_enabled(self.require_grad):
-            X.requires_grad_(self.require_grad)
-            Energy = func(X, *func_args, **func_kwargs)
-            if is_grad_func_contain_y:
-                Force = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs)
-            else:
-                Force = - grad_func_(X, *grad_func_args, **grad_func_kwargs)
-        return Energy, Force
-
     def initialize(
             self,
             func: Any | nn.Module,
@@ -365,7 +346,8 @@ class _BaseMD(BaseIO):
 
         """
         try:
-            if th.device(self.device).type == "cuda":
+            X, Cell_vector, V_init = self.handle_dtype_device(FLOAT_TYPE, self.device, X, Cell_vector, V_init)
+            if self.device.type == "cuda":
                 self.__run_on_cuda(
                     func,
                     X,
@@ -383,7 +365,7 @@ class _BaseMD(BaseIO):
                     fixed_atom_tensor,
                     move_to_center_freq
                 )
-            elif th.device(self.device).type == "cpu":
+            elif self.device.type == "cpu":
                 self.__run_on_cpu(
                     func,
                     X,
@@ -441,27 +423,11 @@ class _BaseMD(BaseIO):
         n_batch, n_atom, n_dim = X.shape
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
-        # Check batch indices
-        if batch_indices is not None:
-            if n_batch != 1:
-                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
-            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
-                self.batch_tensor = batch_indices
-                batch_indices = batch_indices.tolist()
-            elif not isinstance(batch_indices, (List, Tuple)):
-                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
-                                f'It must be List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None')
-            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)  # the tensor version of batch_indices which is a List.
-            self.batch_scatter = th.repeat_interleave(
-                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
-                self.batch_tensor,
-                dim=0
-            )  # scatter mask of the int tensor with the same shape as X.shape[1], which the data in one batch have one index.
-            self.scatter_dim_out_size = self.batch_scatter.max().item() + 1
-            n_true_batch = len(batch_indices)
-        else:
-            n_true_batch = n_batch
+
+        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+            batch_indices, n_batch, device=self.device
+        )
+        self.scatter_dim_out_size = self.batch_scatter.max().item() + 1 if self.batch_scatter is not None else None
 
         # Manage Atomic Type & Masses
         masses = list()
@@ -470,25 +436,18 @@ class _BaseMD(BaseIO):
             if not isinstance(_Elem, list): raise TypeError(f'Expected `Element_list` of List[List[int|str]], but got List[{type(_Elem)}].')
             atomic_numbers.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else int(__elem) for __elem in _Elem])
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
-        masses_short = th.tensor(masses, dtype=th.float32, device=self.device)  # (n_batch, n_atom)
+        masses_short = th.tensor(masses, dtype=FLOAT_TYPE, device=self.device)  # (n_batch, n_atom)
         masses = masses_short.unsqueeze(-1).expand_as(X).contiguous()  # (n_batch, n_atom, n_dim)
         # grad_func
-        if grad_func is None:
-            is_grad_func_contain_y = True
-            def grad_func_(x, y, grad_shape=None):
-                if grad_shape is None:
-                    grad_shape = th.ones_like(y)
-                g = th.autograd.grad(y, x, grad_shape)
-                return g[0]
-        else:
-            grad_func_ = grad_func
+        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(
+            grad_func,
+            is_grad_func_contain_y,
+            require_grad,
+        )
+
         # Selective dynamics
-        if fixed_atom_tensor is None:
-            atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
+        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
+
         # other check
         if (not isinstance(self.max_step, int)) or (self.max_step <= 0):
             raise ValueError(f'Invalid value of maxiter: {self.max_step}. It would be an integer greater than 0.')
@@ -554,9 +513,9 @@ class _BaseMD(BaseIO):
         )
         # The initial iota for Nose-Hoover
         if batch_indices is not None:
-            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=FLOAT_TYPE)
         else:
-            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=FLOAT_TYPE)
         # whether grad needs autograd
         self.require_grad = require_grad
 
@@ -564,25 +523,25 @@ class _BaseMD(BaseIO):
         #   _buf_* is the vars on GPU that apply copy.
         #   _print_* is the vars on CPU that async. do D2H for _buf_*.
         if batch_indices is not None:
-            _print_temperature = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ek = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ep = th.empty(len(batch_indices), device='cpu', dtype=th.float32, pin_memory=True)
-            _buf_Tp = th.empty(len(batch_indices), device=self.device, dtype=th.float32)
-            _buf_Ek = th.empty(len(batch_indices), device=self.device, dtype=th.float32)
-            _buf_Ep = th.empty(len(batch_indices), device=self.device, dtype=th.float32)
+            _print_temperature = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ek = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ep = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _buf_Tp = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ek = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ep = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
         else:
-            _print_temperature = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ek = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-            _print_Ep = th.empty(n_batch, device='cpu', dtype=th.float32, pin_memory=True)
-            _buf_Tp = th.empty(n_batch, device=self.device, dtype=th.float32)
-            _buf_Ek = th.empty(n_batch, device=self.device, dtype=th.float32)
-            _buf_Ep = th.empty(n_batch, device=self.device, dtype=th.float32)
-        _print_X = th.empty_like(X, device='cpu', dtype=th.float32, pin_memory=True)
-        _print_V = th.empty_like(V, device='cpu', dtype=th.float32, pin_memory=True)
-        _print_F = th.empty_like(X, device='cpu', dtype=th.float32, pin_memory=True)
-        _buf_X = th.empty_like(X, device=self.device, dtype=th.float32)
-        _buf_V = th.empty_like(V, device=self.device, dtype=th.float32)
-        _buf_F = th.empty_like(X, device=self.device, dtype=th.float32)
+            _print_temperature = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ek = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _print_Ep = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+            _buf_Tp = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ek = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
+            _buf_Ep = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
+        _print_X = th.empty_like(X, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+        _print_V = th.empty_like(V, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+        _print_F = th.empty_like(X, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
+        _buf_X = th.empty_like(X, device=self.device, dtype=FLOAT_TYPE)
+        _buf_V = th.empty_like(V, device=self.device, dtype=FLOAT_TYPE)
+        _buf_F = th.empty_like(X, device=self.device, dtype=FLOAT_TYPE)
         # initialize the dumper
         X_arr = X.numpy(force=True)
         _x_dtype = X_arr.dtype.str
@@ -685,6 +644,7 @@ class _BaseMD(BaseIO):
                 _e_tmp, _t_tmp = self._reduce_Ek_T(batch_indices, masses, V)
                 Ek.copy_(_e_tmp)
                 temperature.copy_(_t_tmp)
+            self.Ek_T_graph = Ek_T_graph
             # preload a graph of mass center
             if is_fix_mass_center:
                 mass_center_graph = th.cuda.CUDAGraph()
@@ -719,7 +679,10 @@ class _BaseMD(BaseIO):
                 dump_thread.start()
                 logout_thread.start()
                 #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-                fl = th.compile(self._main_for_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
+                if self.is_compile:
+                    fl = th.compile(self._main_for_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
+                else:
+                    fl = self._main_for_loop_cuda
                 fl(
                     Ek_T_graph,
                     Ek,
@@ -809,7 +772,10 @@ class _BaseMD(BaseIO):
             if i % self.output_structures_per_step == 0:
                 _do_print = True
                 compute_event.wait(th.cuda.default_stream(self.device))
-                # D2D, fast copy purely on GPU
+                # D2D, fast copy purely on GPU.
+                #   Because I cannot determine whether input X would be updated in various functions,
+                #   these vars cannot be ensured as read-only. Hence, double buffer scheme is not used.
+                #   instead, use D2D then D2H to async. dump.
                 _buf_Tp.copy_(temperature.squeeze().contiguous())
                 _buf_Ek.copy_(Ek.squeeze().contiguous())
                 _buf_Ep.copy_(Energy.squeeze().contiguous())
@@ -885,26 +851,10 @@ class _BaseMD(BaseIO):
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
         # Check batch indices
-        if batch_indices is not None:
-            if n_batch != 1:
-                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
-            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
-                self.batch_tensor = batch_indices
-                batch_indices = batch_indices.tolist()
-            elif not isinstance(batch_indices, (List, Tuple)):
-                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
-                                f'It must be List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None')
-            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)  # the tensor version of batch_indices which is a List.
-            self.batch_scatter = th.repeat_interleave(
-                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
-                self.batch_tensor,
-                dim=0
-            )  # scatter mask of the int tensor with the same shape as X.shape[1], which the data in one batch have one index.
-            self.scatter_dim_out_size = self.batch_scatter.max().item() + 1
-            n_true_batch = len(batch_indices)
-        else:
-            n_true_batch = n_batch
+        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+            batch_indices, n_batch, device=self.device
+        )
+        self.scatter_dim_out_size = self.batch_scatter.max().item() + 1 if self.batch_scatter is not None else None
 
         # Manage Atomic Type & Masses
         masses = list()
@@ -913,25 +863,17 @@ class _BaseMD(BaseIO):
             if not isinstance(_Elem, list): raise TypeError(f'Expected `Element_list` of List[List[int|str]], but got List[{type(_Elem)}].')
             atomic_numbers.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else ATOMIC_NUMBER[__elem] for __elem in _Elem])
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
-        masses_short = th.tensor(masses, dtype=th.float32, device=self.device)  # (n_batch, n_atom)
+        masses_short = th.tensor(masses, dtype=FLOAT_TYPE, device=self.device)  # (n_batch, n_atom)
         masses = masses_short.unsqueeze(-1).expand_as(X).contiguous()  # (n_batch, n_atom, n_dim)
         # grad_func
-        if grad_func is None:
-            is_grad_func_contain_y = True
-            def grad_func_(x, y, grad_shape=None):
-                if grad_shape is None:
-                    grad_shape = th.ones_like(y)
-                g = th.autograd.grad(y, x, grad_shape)
-                return g[0]
-        else:
-            grad_func_ = grad_func
+        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(
+            grad_func,
+            is_grad_func_contain_y,
+            require_grad,
+        )
+
         # Selective dynamics
-        if fixed_atom_tensor is None:
-            atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
+        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
         # other check
         if (not isinstance(self.max_step, int)) or (self.max_step <= 0):
             raise ValueError(f'Invalid value of maxiter: {self.max_step}. It would be an integer greater than 0.')
@@ -1001,12 +943,12 @@ class _BaseMD(BaseIO):
         )
         # The initial iota for Nose-Hoover
         if batch_indices is not None:
-            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(1, len(batch_indices), 1, device=self.device, dtype=FLOAT_TYPE)
         else:
-            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=th.float32)
+            self.p_iota = th.zeros(n_batch, 1, 1, device=self.device, dtype=FLOAT_TYPE)
         # whether grad needs autograd
         self.require_grad = require_grad
-
+        self.Ek_T_graph = None
         # initialize the dumper
         X_arr = X.numpy(force=True)
         _x_dtype = X_arr.dtype.str
@@ -1105,7 +1047,10 @@ class _BaseMD(BaseIO):
                 Forces = Forces.contiguous()
 
             #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-            fl = th.compile(self._main_for_loop_cpu, **self.compile_kwargs, disable=(not self.is_compile))
+            if self.is_compile:
+                fl = th.compile(self._main_for_loop_cpu, **self.compile_kwargs, disable=(not self.is_compile))
+            else:
+                fl = self._main_for_loop_cpu
             fl(
                 Energy,
                 X,

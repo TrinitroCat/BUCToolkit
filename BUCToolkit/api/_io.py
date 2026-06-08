@@ -24,7 +24,7 @@ from BUCToolkit.utils._CheckModules import check_module
 from BUCToolkit.cli.print_logo import generate_display_art
 from BUCToolkit.utils.setup_loggers import has_any_handler
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
-from BUCToolkit.utils.function_utils import _BaseWrapper
+from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 from BUCToolkit.BatchStructures import Batch
 
@@ -431,13 +431,16 @@ class _CONFIGS(object):
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
         self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
-        while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
-            warnings.warn(
-                f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
-                f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
-                RuntimeWarning
-            )
-            self._PREDICTIONS_SAVE_FILE += '_1'
+        if self.SAVE_PREDICTIONS:
+            while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
+                warnings.warn(
+                    f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
+                    f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
+                    RuntimeWarning
+                )
+                self._PREDICTIONS_SAVE_FILE += '_1'
+        else:
+            self._PREDICTIONS_SAVE_FILE = None
         if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
@@ -492,29 +495,12 @@ class _CONFIGS(object):
         self._PREDICTIONS_SAVE_FILE = value
         self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
 
-def compare_tensors(X1: th.Tensor, X2: th.Tensor):
-    """Compare two tensors. Return True if they are the same, False otherwise."""
-    char1 = (X1.untyped_storage().data_ptr(),
-             X1.storage_offset(),
-             tuple(X1.shape),
-             tuple(X1.stride()),
-             X1.device,
-             X1.dtype)
-    char2 = (X2.untyped_storage().data_ptr(),
-             X2.storage_offset(),
-             tuple(X2.shape),
-             tuple(X2.stride()),
-             X2.device,
-             X2.dtype)
-
-    return char1 == char2
-
 
 class _Model_Wrapper_pyg(_BaseWrapper):
 
     __slots__ = ('_model', 'forces', 'X', )
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, pos_attr_name='pos',) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
         Wrap the model(graph, ...) into f(X)
@@ -528,13 +514,17 @@ class _Model_Wrapper_pyg(_BaseWrapper):
 
         """
         super().__init__(model)
+        self.pos_attr_name = pos_attr_name
         #if check_module('torch_geometric') is None:
         #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
         pass
 
     def Energy(self, X, graph: Batch):
         self.X = X
-        graph.pos = self.X.reshape(-1,3).contiguous()
+        if hasattr(graph, 'pos'):
+            graph.pos = self.X.reshape(-1,3).contiguous()
+        if hasattr(graph, 'positions'):
+            graph.positions = self.X.reshape(-1,3).contiguous()
         y = self._model(graph)
         energy = y['energy']
         self.forces = y['forces']
@@ -546,7 +536,10 @@ class _Model_Wrapper_pyg(_BaseWrapper):
             self.forces = None
         if self.forces is None:
             self.X = X
-            graph.pos = self.X.reshape(-1,3)
+            if hasattr(graph, 'pos'):
+                graph.pos = self.X.reshape(-1, 3).contiguous()
+            if hasattr(graph, 'positions'):
+                graph.positions = self.X.reshape(-1, 3).contiguous()
             return - ((self._model(graph))['forces']).reshape(origin_shape)
         else:
             force = self.forces
@@ -678,7 +671,7 @@ class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
         self.X = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
         batch_size = X.size(0)
         if graph.batch_size == 1:
-            graph = self.pygBatch.from_data_list([graph] * batch_size)
+            graph = self.pygBatch.from_data_list([graph] * batch_size, exclude_keys=['batch', 'ptr'])
         graph.pos = self.X
         y = self._model(graph)  # (n_batch, )
         energy = y['energy']
@@ -802,9 +795,12 @@ class DumpStructures:
         # Postprocessing & save TODO: reformat it in future to apply to all functions.
         n_batch = len(batch_indices)
         batch_indices = np.array(batch_indices, dtype=np.int64)
-        if cells.shape != (n_batch, 3, 3):
-            raise ValueError(f'`cells` is expected to have 3 dimensions (n_batch, 3, 3), but got {cells.shape}.')
+        # try to automatically convert
         cells = cells.numpy(force=True).astype(np.float32) if isinstance(cells, th.Tensor) else np.asarray(cells, dtype=np.float32)
+        try:
+            cells = cells.reshape(n_batch, 3, 3)
+        except:
+            raise ValueError(f'`cells` is expected to have 3 dimensions (n_batch, 3, 3), but got {cells.shape}.')
         if len(idx) != n_batch:
             raise ValueError(f'The number of `idx` is expected to be batch size {n_batch}, but got {len(idx)}.')
         idx = np.array(idx, dtype='<U128')

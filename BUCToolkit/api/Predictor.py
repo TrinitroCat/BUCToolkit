@@ -111,13 +111,13 @@ class Predictor(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         dumper = structures_io_dumper(
-            path=self.PREDICTIONS_SAVE_FILE,
+            path=self.PREDICTIONS_SAVE_FILE if self.SAVE_PREDICTIONS else None,
             mode='x',
         )
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1 or self.START == 2:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH)
+            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
                 _model.load_state_dict(chk_data['model_state_dict'])
             else:

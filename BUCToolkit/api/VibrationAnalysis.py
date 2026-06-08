@@ -74,7 +74,7 @@ class VibrationAnalysis(_CONFIGS):
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
-        if self.START == 'resume' or self.START == 1:
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
                 _model.load_state_dict(chk_data['model_state_dict'], strict=False)

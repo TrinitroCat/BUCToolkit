@@ -6,7 +6,7 @@
 from .minimize.CG import CG
 from .minimize.QN import QN
 from .minimize.FIRE import FIRE
-from .TS.Dimer import Dimer
+from .TS import Dimer, KrylovNewton
 from .frequency import Frequency, vibrational_thermo, extract_freq
 from BUCToolkit.BatchGenerate.coords_interp import linear_interpolation
 
@@ -15,6 +15,7 @@ __all__ = [
     'QN',
     'FIRE',
     'Dimer',
+    'KrylovNewton',
     'Frequency',
     'vibrational_thermo',
     'linear_interpolation'

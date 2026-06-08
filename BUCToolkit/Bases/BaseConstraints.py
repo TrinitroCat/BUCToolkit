@@ -1,0 +1,578 @@
+#  Copyright (c) 2026.4.24, BUCToolkit.
+#  Authors: Pu Pengxin, Song Xin
+#  Version: 1.0b
+#  File: BaseConstraints.py
+#  Environment: Python 3.12
+import os
+from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
+
+import torch as th
+from torch import nn
+import numpy as np
+
+from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
+from BUCToolkit.utils._Element_info import DTYPE
+from BUCToolkit.utils.grad_functions import bhvp
+from BUCToolkit.Bases.BaseMotion import BaseIO
+from torch._dynamo import export as dynamo_export
+
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
+
+
+class BaseConstr(BaseIO):
+    """
+    Base Constraints used for constraints MD or optimizations.
+    It can be combined into any normal gradient-based algorithms by applying `project1` to gradient or any other tangent space vectors,
+     and `project2` as a retraction mapping to coordinates or any other vectors on the manifold.
+
+     I strongly suggest that using combination with proxy instead of inheritance when it is applied in other class.
+     e.g., define following method in the class with aligning `self._constr = BaseConstr(...)` in the self.__init__ method.
+     ```python
+        def __getattr__(self, name):
+            if '_constr' in self.__dict__:
+                constr = self._constr
+                if hasattr(constr, name):
+                    return getattr(constr, name)
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    ```
+
+    Args:
+        constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k.
+            It takes one or more arguments, one of which must be a Tensor, and returns one Tensor with shape (k, ).
+            `None` for constant function that always return [0., ]. It should support auto-gradient ops. see example below.
+        constr_val: Callable[th.Tensor[1], th.Tensor] | th.Tensor, the constraint value of `constr_func`,
+            i.e., constraints are `constr_func(X) = constr_val`.
+            By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor,
+            it can be set to the time-dependent constraints.
+        constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
+        require_fixman: bool, whether to calculate fixman
+        device: str|torch.device, device that program rum on.
+        verbose: int, control the detailed degree of output information.
+            0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+
+    Examples for constrains:
+        def constr_func(X):
+            y = list()
+            # X: shape(N, D), Note the batch dimension would NOT be considered in constraints calculation of X.
+            # fix the distance between atoms (2, 4), (3, 7), (5, 8) into corresponding `constr_val[:3]`
+            y.append(th.linalg.norm(X[[2, 3, 5]] - X[[4, 7, 8]], dim=-1))
+
+            # fix the angle of atom7-atom5-atom8 and atom11-atom9-atom12 into corresponding `constr_val[3:6]`
+            x1 = X[[5, 9]]
+            x2 = X[[7, 11]]
+            x3 = X[[8, 12]]
+            y.append(
+                (
+                    th.sum((x2 - x1) * (x3 - x1))
+                ) / (th.linalg.norm(x2 - x1) * th.linalg.norm(x3 - x1))
+            )
+            z = th.cat(y)
+            return z
+
+    Methods:
+        run: run BatchMD.
+
+    """
+    def __init__(
+            self,
+            constr_func: Callable | None = None,
+            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
+            constr_threshold: float = 1e-5,
+            require_fixman: bool = False,
+            device: str | th.device = 'cpu',
+            verbose: int = 0,
+    ):
+        if constr_func is None:
+            constr_func = lambda X: th.tensor(0.)
+        self._lazy_calc_constr_val = False  # use the value of constr_func(X_init) to determine constr_val (and fixed).
+        self.device = th.device(device)
+
+        self.time_now = th.scalar_tensor(0., device=device)
+        self.is_const_constr = False
+        self.constr_val_func_raw = None
+        self.time_step = 1.
+        self.require_fixman = require_fixman
+
+        if isinstance(constr_val, th.Tensor):
+            self.is_const_constr = True
+            self.constr_val_func_raw = None
+            self.constr_val_now = constr_val.to(self.device)
+        elif callable(constr_val):
+            self.is_const_constr = False
+            self.constr_val_func_raw = constr_val
+            self.constr_val_now = constr_val(self.time_now)
+        elif constr_val is None:
+            self.is_const_constr = True
+            self.constr_val_func_raw = None
+            self._lazy_calc_constr_val = True
+        else:
+            raise TypeError(f'Expected `constr_val` is Callable or torch.Tensor, but got {type(constr_val)}')
+
+        if not isinstance(constr_func, Callable):
+            raise TypeError(f"`constr_func` must consist of callable, but got {type(constr_func)}")
+        self.constr_func = constr_func
+        self.Q = th.tensor([], device=self.device, dtype=FLOAT_TYPE)  # Q(n_batch, n_atoms * n_dim, n_constr)
+        self.jac = None # Jacobian Matrix
+        self.R = th.tensor([], device=self.device, dtype=FLOAT_TYPE)  # R(n_batch, n_constr, n_constr)
+        self.q = th.tensor([], device=self.device, dtype=FLOAT_TYPE)  # (n_batch, n_constr, 1), solution of `R^T q = d/dt constr_val(t)`
+        self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
+        self.negsqrtM = None  # M^-1/2
+        self.max_proj_iter = 10
+        self.constr_thres = constr_threshold
+        self.X_cache = None  # constr force, i.e., the mu of Lagrange multipler
+        self._compiled_jac = None  # pre-compiled Jacobian for replay
+
+        self._X_qr_cache = None  # check the consistency of X in project1, ensuring it is the new tangent space projection
+
+        super().__init__()
+        self.init_logger('Main.Constraints')
+        self.verbose = int(verbose)
+
+    def initialize(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            Element_list: List[List[str]] | List[List[int]] | None,
+            masses: th.Tensor | None,
+            V_init: th.Tensor | None = None,
+            grad_func: Any | nn.Module = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            grad_func_args: Sequence = tuple(),
+            grad_func_kwargs: Dict | None = None,
+            is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
+            batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
+            fixed_atom_tensor: Optional[th.Tensor] = None,
+            is_fix_mass_center: bool = False
+    ):
+        if masses is None: masses = th.ones_like(X)
+        self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
+        self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
+        _y_check = th.vmap(self.constr_func)(X)
+        if self._lazy_calc_constr_val:
+            self.constr_val_now = _y_check
+        if self.verbose:
+            self.logger.info(
+                f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
+            )
+        # check constr_val shape
+        if _y_check.shape != self.constr_val_now.shape:
+            raise RuntimeError(
+                f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
+            )
+        jac, y = self._jacobian(X)
+        if y.ndim != 2:
+            raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
+        self._build_compiled_jacobian(X)
+        self._do_qr(jac)
+        # calc. constr. intensity
+        n_batch, n_constr, _ = self.R.shape
+        self.X_cache = th.empty_like(X)
+
+    def _constr_func_wrapped(self, X, constr_val_now):
+        """
+        Manage the constraint functions.
+        Converting constraint functions into s_k(X) = constr_func(X) - constr_val, thereby constraints are s_k(X) = 0.
+        Returns:
+
+        """
+        y = self.constr_func(X) - constr_val_now  # (n_batch, n_constr, )
+        y = th.atleast_1d(y)
+        return y, y  # repeat the output to use `has_aux` in th.func.jacrev to return the function values
+
+    def _constr_func_for_hvp(self, X):
+        """
+        Manage the constraint functions used for HVP.
+        Converting constraint functions into s_k(X) = constr_func(X) - constr_val, thereby constraints are s_k(X) = 0.
+        Returns:
+
+        """
+        y = self.constr_func(X) - self.constr_val_now  # (n_batch, n_constr, )
+        y = th.atleast_1d(y)
+        return y
+
+    def _constr_val_wrapped(self, t):
+        """
+        Manage the time-dependent constraint values.
+        Args:
+            t:
+
+        Returns:
+
+        """
+        if self.is_const_constr:
+            return None
+        else:
+            y = self.constr_val_func_raw(t)
+            if isinstance(y, (Tuple, List)):
+                y = th.vstack(y).mT
+            else:
+                y = y.reshape(-1, 1)
+
+            return y, y
+
+    def _update_constr(self):
+        """
+        Update constraint function value.
+        Returns:
+
+        """
+        if not self.is_const_constr:
+            self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now)  #  d s_k(r)/dt
+
+    def _build_compiled_jacobian(self, X_sample: th.Tensor):
+        """
+        Pre-compile the Jacobian computation by:
+            1) dynamo_export the constraint function to a static ATen graph (once)
+            2) wrap with vmap(jacrev(has_aux)) for batched Jacobian
+            3) torch.compile the result → replay for all subsequent steps
+
+        Falls back to eager mode if export/compile fails.
+        """
+        try:
+            with th.no_grad():
+                sample = X_sample[0:1].detach()  # single batch item
+                exported = dynamo_export(self.constr_func)(sample.squeeze(0))
+                traced_fn = exported.graph_module
+
+            def _wrapped(X_single, constr_val):
+                y = traced_fn(X_single) - constr_val
+                return y, y
+
+            jac_fn = th.func.vmap(
+                th.func.jacrev(_wrapped, argnums=0, has_aux=True),
+                in_dims=(0, None)
+            )
+            self._compiled_jac = th.compile(jac_fn, fullgraph=False, dynamic=True)
+
+            # Warmup to trigger actual compilation
+            _ = self._compiled_jac(X_sample, self.constr_val_now)
+
+            if self.verbose:
+                self.logger.info('Constraint Jacobian compiled successfully.')
+        except Exception as e:
+            if self.verbose:
+                self.logger.warning(f'Jacobian compilation failed ({type(e).__name__}): {e}. Falling back to eager.')
+            self._compiled_jac = None
+
+    def _jacobian(self, X: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+        """
+        Compute the Jacobian of all constrains.
+        Args:
+            X:
+
+        Returns: Jacobian (n_batch, n_constr, n_atoms, n_dim), and the constraint values.
+
+        """
+        self._update_constr()
+        if self._compiled_jac is not None:
+            jac, y = self._compiled_jac(X, self.constr_val_now)
+        else:
+            jac, y = th.vmap(th.func.jacrev(self._constr_func_wrapped, has_aux=True))(X, self.constr_val_now)
+        self.jac = jac
+        return jac, y
+
+    def _do_qr(self, jac: th.Tensor):
+        """
+        Do QR factorization and save/update self.Q.
+        Args:
+            jac: Jacobian matrix of s_k at X.
+
+        Returns: None
+
+        """
+        # weighted jac: J_w = J @ M^-1/2,
+        # (n_batch, n_constr, n_atoms, n_dim) * (n_batch, 1, n_atoms, n_dim) -flatten-> (n_batch, n_constr, n_atoms * n_dim)
+        _jac = th.flatten(jac * self.negsqrtM.unsqueeze(1), -2, -1)
+        _jacT = _jac.mT.contiguous()
+        self.Q, self.R = th.linalg.qr(_jacT)  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
+
+    def _project1(self, V:th.Tensor, X:th.Tensor | None = None, out: th.Tensor | None = None) -> th.Tensor:
+        """
+        Project X into the manifold defined by all constrains by QR factorization.
+        Usually used for update velocity V.
+        for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
+        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
+
+        Args:
+            V: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+            X: the point that calculate the projector. If None, stored Q R (maybe last step) will be used.
+            out: the output tensor. If None, return a new tensor.
+
+        Returns: th.Tensor, the projected X.
+
+        """
+        n_batch, n_atoms, n_dim = V.shape
+        sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
+        negsqrtM = self.negsqrtM  # M^-1/2
+        # check consistency
+        if X is not None:
+            jac, y = self._jacobian(X)
+            self._do_qr(jac)
+        #self._X_qr_cache = X.clone()
+
+        # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
+        Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
+        Px = (sqrtM * V).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
+        Px = (Q @ (Q.mT.contiguous() @ Px)).reshape(n_batch, n_atoms, n_dim)  # (n_batch, n_atoms, n_dim)
+        Px.mul_(negsqrtM)
+        Px = th.sub(V, Px, out=out)
+        # manifold veloc. correction
+        if not self.is_const_constr:  # time-dependent constraints
+            th.linalg.solve_triangular(self.R.mT.contiguous(), self.d_constr.unsqueeze(-1), upper=False, out=self.q)
+            Px.add_(self.negsqrtM * (self.Q @ self.q).reshape(n_batch, n_atoms, n_dim))
+
+        return Px
+
+    def _project_norm(self, V:th.Tensor, X:th.Tensor | None = None) -> th.Tensor:
+        """
+        Project V to normal space.
+        for Jacobian matrix J of constraints s_k at X, let J^T M^-1/2 = QR, thus s_k(X + v * dt) = s_k(X) + R^T Q^T M^1/2 v * dt + O(dt^2)
+        define the projector: P = M^-1/2 Q_2 Q_2^T M^1/2 = M^-1/2 (I - Q_1 Q_1^T) M^1/2, where Q = [Q_1, Q_2], Q_1 is from the financial QRF.
+        Args:
+            V: the input tensor of shape (n_batch, n_atom, n_dim). It might be coordinates, velocity, and higher deviations.
+
+        Returns: th.Tensor, the projected X.
+
+        """
+        n_batch, n_atoms, n_dim = V.shape
+        sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
+        negsqrtM = self.negsqrtM  # M^-1/2
+        # check consistency
+        if X is not None:
+            jac, y = self._jacobian(X)
+            self._do_qr(jac)
+
+        # P = M^-1/2 @ (I - Q Q^T) @ M^1/2 = I - M^-1/2 @ Q @ Q^T @ M^1/2
+        Q = self.Q  # Q(n_batch, n_atoms * n_dim, n_constr)
+        Px = (sqrtM * V).reshape(n_batch, n_atoms * n_dim, 1).contiguous()  # (n_batch, n_atoms * n_dim, 1)
+        Px = (Q @ (Q.mT.contiguous() @ Px)).reshape(n_batch, n_atoms, n_dim)  # (n_batch, n_atoms, n_dim)
+        Px.mul_(negsqrtM)
+
+        return Px
+
+    def _project2(
+            self,
+            X: th.Tensor,
+            X_orig: th.Tensor | None = None,
+            V: th.Tensor | None = None
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """
+        Continuously project the Jacobian of all constrains to the exact manifold.
+        ** Update X and V (if given) in-place.
+        If V is provided, it is updated in-place with the constraint force contribution
+        to velocity, using the converged multiplier mu to avoid subtraction cancellation.
+
+        Args:
+            X: (n_batch, n_atom, n_dim) coordinates to be projected. Modified in-place.
+            X_orig: reference coordinates for fixed Jacobian basis. Defaults to X.
+            V: (n_batch, n_atom, n_dim) velocities. If given, updated in-place by
+               dv = M^{-1/2} Q mu / time_step, where mu is the converged multiplier.
+
+        Returns:
+            Fc: constraint forces (eV/atom)
+            G, w: Fixman potential related terms (or None)
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        n_constr = self.R.shape[-1]
+        aux_multipler = th.zeros(n_batch, n_constr, device=self.device, dtype=FLOAT_TYPE)
+        dX = th.zeros_like(X)
+        if X_orig is None: X_orig = X
+        time_step = self.time_step
+        constr_thres = self.constr_thres
+
+        with th.set_grad_enabled(self.require_fixman):
+            X_orig.requires_grad_(self.require_fixman)
+            jac, y = self._jacobian(X_orig)
+            self._do_qr(jac)
+            Q, R = self.Q, self.R
+            # Safe-guard against degenerate constraint directions
+            # (e.g., erf soft-CN with vanishing gradients):
+            #   mask y for convergence — degenerate dirs ignored
+            #   clamp R diagonals — prevents solve_triangular blow-up
+            degenerate_eps = 0.5 * self.constr_thres
+            #degenerate_mask = th.abs(R.diagonal(dim1=-2, dim2=-1)) < degenerate_eps  # (n_batch, n_constr)
+            #R.diagonal(dim1=-2, dim2=-1).clamp_min_(degenerate_eps)
+            sqrtM_Q = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (b, an, c)
+            if self.require_fixman:
+                sqrt_det_Z = th.prod(th.diagonal(R, dim1=-2, dim2=-1), dim=-1).abs()
+                half_logdetZ = th.log(sqrt_det_Z).sum()
+                half_dlnz_dx = th.autograd.grad(half_logdetZ, X_orig)[0].reshape(n_batch, -1)
+                RG = th.einsum('bnc, bn -> bc', sqrtM_Q, half_dlnz_dx)
+                G = th.linalg.solve_triangular(R, RG.unsqueeze(-1), upper=True).squeeze(-1)
+                w = sqrt_det_Z.reciprocal_()
+            else:
+                G = None
+                w = None
+        R.detach_()
+        sqrtM_Q.detach_()
+
+        # MAIN loop.
+        X_tmp = self.X_cache
+        X_tmp.copy_(X)
+        constr_err_old = th.max(th.abs(y))
+        is_fixed = False
+        for i in range(self.max_proj_iter):
+            jac, y = self._jacobian(X_tmp)
+            constr_err = th.max(th.abs(y))
+            if self.verbose > 1: self.logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
+            if th.abs(constr_err - constr_err_old) < degenerate_eps:
+                self.logger.warning(f"Constraint errors are not converged yet, but it has been fixed. This loop will be skipped.")
+                is_fixed = True
+            if (constr_err <= constr_thres) or is_fixed:
+                X.copy_(X_tmp)
+                # compute constraint forces
+                Fc = th.linalg.solve_triangular(R, aux_multipler.unsqueeze(-1), upper=True).squeeze(-1)
+                Fc *= 207.28617 / (time_step ** 2)  # convert to eV/s(X), 1 amu*Ang/fs^2 = 103.64... eV/Ang, Verlet formulae require a factor 2, hence that 207.28617 = 2 * 103.64...
+                # Numerical safe velocity correction
+                if V is not None:
+                    # dv = M^{-1/2} Q mu / time_step
+                    V.add_(dX.div_(time_step))
+                return Fc, G, w
+            constr_err_old = constr_err
+
+            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
+            d_mu, _ = th.linalg.solve_ex(aux, -y)
+            aux_multipler.add_(d_mu)
+            dX = th.einsum(
+                'bnc, bc -> bn',
+                sqrtM_Q, aux_multipler
+            ).reshape(n_batch, n_atoms, n_dim)
+            th.add(
+                X,
+                dX,
+                out=X_tmp
+            )
+
+        # If not converged (warning and still update V if requested)
+        self.logger.warning("Projection of X to the manifold is not converged.")
+        X.copy_(X_tmp)
+        Fc = th.linalg.solve_triangular(R, aux_multipler.unsqueeze(-1), upper=True).squeeze(-1)
+        Fc *= 207.28617 / (time_step ** 2)
+
+        # Numerical safe velocity correction
+        if V is not None:
+            # dv = M^{-1/2} Q mu / time_step
+            V.add_(dX.div_(time_step))
+
+        return Fc, G, w
+
+    def _jacobian_derivative(self, X, v: th.Tensor) -> th.Tensor:
+        """
+        Compute `dJ/dt = v^T H` by auto-differentiation.
+        Args:
+            X:
+            v:
+
+        Returns: v^T H with shape (n_batch, n_constr, n_atom, n_dim)
+
+        """
+        vH: th.Tensor = bhvp(self._constr_func_for_hvp, (X,), (v,), False)  # (n_batch, n_constr, n_atom, n_dim)
+        return vH.contiguous()
+
+    def christoffel_solver(
+            self,
+            X: th.Tensor,
+            V: th.Tensor,
+            F_tan: th.Tensor | None = None,
+            max_iter: int = 20,
+            tol: float = 1e-6,
+            omega: float = 0.7
+    ):
+        r"""
+        Implicit midpoint integration of the constrained geodesic equation:
+
+            dV/dt = -Gamma(V, V) + M^{-1} F_tan
+
+        where Gamma = M^{-1/2} Q R^{-T} (V^T H) V  is the Christoffel symbol
+        capturing the curvature of the constraint manifold, and F_tan is the
+        tangent-space projection of the physical forces.
+
+        Uses the Woodbury identity to reduce the Newton-step matrix inverse
+        from O(N_free^3) to O(k^3), where k << N_free is the number of constraints.
+
+        Args:
+            X:     current positions  (n_batch, n_atom, n_dim)
+            V:     current velocities (n_batch, n_atom, n_dim)
+            F_tan: tangent-projected forces, or None for pure-geodesic flow
+            max_iter: maximum Newton iterations
+            tol:      convergence tolerance on the residual norm
+            omega:    SOR relaxation factor (< 1 damps, =1 pure Newton)
+
+        Returns:
+            X_new, V_new  – updated in-place.
+        """
+        n_batch, n_atom, n_dim = X.shape
+        n_free = n_atom * n_dim
+        dt = self.time_step
+
+        # Precompute Woodbury blocks (independent of X_new, V_new)
+        B = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (B, n_free, k)
+        B_T = B.mT.contiguous()                               # (B, k, n_free)
+        eye_k = th.eye(self.R.shape[-1], device=X.device, dtype=X.dtype).expand(n_batch, -1, -1)
+
+        V_old = V.clone()
+        X_old = X.clone()
+        # Initial guess: explicit Euler half-step
+        X_new = X.add(V_old, alpha=dt)
+        V_new = V.clone()
+        if F_tan is not None:
+            # Include force: V_new = V_old + dt * acc, acc = M^{-1} F_tan (F_tan is already force)
+            acc = F_tan * self.negsqrtM * self.negsqrtM  # M^{-1} = negsqrtM^2
+            V_new.add_(acc, alpha=dt)
+
+        for it in range(max_iter):
+            X_mid = (X_new + X_old) * 0.5
+            V_mid = (V_new + V_old) * 0.5
+
+            # Compute Christoffel symbol: Gamma = B @ R^{-T} @ (J' V_mid)
+            dJ = self._jacobian_derivative(X_mid, V_mid)       # (B, k, N, D)
+            dJ_flat = dJ.flatten(-2, -1)                        # (B, k, n_free)
+            Jp_V = th.einsum('bkn, bn -> bk', dJ_flat, V_mid.flatten(-2, -1))  # J'·V_mid  (B, k)
+            _sol = th.linalg.solve_triangular(
+                self.R.mT.contiguous(), Jp_V.unsqueeze(-1), upper=False
+            )                                                    # R^{-T} J'·V  (B, k, 1)
+            Gamma = (B @ _sol).reshape(n_batch, n_atom, n_dim)  # Christoffel (B, N, D)
+
+            # Residuals for the implicit midpoint system
+            # R_X = X_new - X_old - dt * V_mid
+            R_X = X_new - X_old - dt * V_mid
+            # R_V = V_new - V_old - dt * (acc - Gamma)
+            if F_tan is not None:
+                R_V = V_new - V_old - dt * (acc - Gamma)
+            else:
+                R_V = V_new - V_old + dt * Gamma
+
+            # Convergence check
+            norm_RX = th.linalg.norm(R_X.reshape(n_batch, -1), dim=-1)
+            norm_RV = th.linalg.norm(R_V.reshape(n_batch, -1), dim=-1)
+            if th.all((norm_RX < tol) & (norm_RV < tol)):
+                V.copy_(V_new)
+                X.copy_(X_new)
+                return X_new, V_new
+
+            # --- Newton update with Woodbury identity ---
+            # dJ_flat^T = dJ.mT, shape (B, n_free, k)
+            dJ_T = dJ_flat.mT.contiguous()                     # (B, n_free, k)
+            dJ_T_B = th.bmm(dJ_T, B)                           # (B, k, k)
+            M_wood = eye_k + dt * dJ_T_B                       # I + dt * dJ^T B
+            rv_flat = R_V.reshape(n_batch, -1, 1)               # (B, n_free, 1)
+
+            dJ_T_rv = th.bmm(dJ_T, rv_flat)                    # dJ^T @ R_V  (B, k, 1)
+            sol_W = th.linalg.solve(M_wood, dJ_T_rv)           # (I + dt dJ^T B)^{-1} dJ^T R_V
+            P_RV = rv_flat - dt * th.bmm(B, sol_W)              # P @ R_V  (B, n_free, 1)
+
+            dV = P_RV.reshape(n_batch, n_atom, n_dim)
+            dX = (R_X + 0.5 * dt * dV)
+
+            # SOR relaxation
+            V_new = V_new - dV
+            V_new = omega * V_new + (1.0 - omega) * V
+            X_new = X_new - dX
+
+        # Did not converge – return best effort
+        V.copy_(V_new)
+        X.copy_(X_new)
+        return X_new, V_new

@@ -70,7 +70,7 @@ def index_reduce(
         dim: reduce dimension
         ops: reduce operation
         init_value: default value of the output tensor that reduced values filled in.
-        out_size: size of the output tensor at the given dim. if None, it is equal to `batch_indices.max().item() + 1`
+        out_size: size of the output tensor at the given dim. if None, it is equal to `batch_indices.max() + 1`
         include_self: whether to let `init_value` really participate in the reduction.
         out: the output tensor. If None, a new one will be returned.
 
@@ -80,7 +80,7 @@ def index_reduce(
     assert batch_indices.dim() == 1, f'Invalid dimension of batch indices: {batch_indices.shape}. It must be 1D.'
     dim = dim if dim >= 0 else src.dim() + dim
     output_size = list(src.shape)
-    output_size[dim] = (batch_indices.max().item() + 1) if out_size is None else out_size
+    output_size[dim] = (batch_indices.max() + 1) if out_size is None else out_size
 
     out = th.full(output_size, init_value, device=src.device, dtype=src.dtype) if out is None else out.fill_(init_value)
     if ops == 'sum' and include_self:
@@ -118,9 +118,9 @@ def indices_pairwise_dist(
         Qx: th.Tensor,            # [N]，continuous sample indices in the batch X, 0,0,...,1,1,...,B-1
         Qy: th.Tensor | None = None,
         thres: float | None = None,
-        metric: Literal['euclidean', 'dot', 'cosine']|Callable[[th.Tensor, th.Tensor, ...], th.Tensor] = "euclidean",  # 'euclidean' | 'dot' | 'cosine'
+        metric: Literal['euclidean', 'dot', 'cosine', 'periodic']|Callable[[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, ...], th.Tensor] = "euclidean",  # 'euclidean' | 'dot' | 'cosine'
         metric_kwargs: Dict|None = None,
-        relation: Literal['lt', 'gt'] = "gt",
+        relation: Literal['lt', 'gt'] = "lt",
         exclude_diag: bool = True,
         is_symmetric: bool = False,
         return_values: bool = True,
@@ -135,7 +135,7 @@ def indices_pairwise_dist(
         Qx: Tensor[int64], indices tensor of X.
         Qy: Tensor[int64], indices tensor of Y.
         thres: if not None, only distance greater/less (depends on `relation`) than `thres` will be output. Otherwise, all dist will be output.
-        metric: distance calculation method.
+        metric: distance calculation method. It receives metric(xr, yc, row_s, col_s, Qe_s, **metric_kwargs)
         metric_kwargs: the keyword arguments passed to `metric` if `metric` is Callable.
         relation: check `thres` greater (gt) or less (lt) than `thres`.
         exclude_diag: whether to exclude diagonals.
@@ -146,7 +146,7 @@ def indices_pairwise_dist(
 
     Returns:
         Tuple[indices: Tensor[int64], batch_tensor of dist: Tensor[int64]] |
-        Tuple[indices: Tensor[int64], distance: Tensor, batch_tensor of dist: Tensor[int64]]
+        Tuple[indices: Tensor[(2, E), int64], distance: Tensor[(E, )], batch_tensor of dist: Tensor[(E, ), int64]]
 
     """
     # check
@@ -235,7 +235,7 @@ def indices_pairwise_dist(
     xr, yc = Xs[row_s], Ys[col_s]  # [E, M], x_row, y_column
 
     if isinstance(metric, Callable):
-        val = metric(xr, yc, **metric_kwargs)
+        val = metric(xr, yc, row_s, col_s, Qe_s, **metric_kwargs)
     elif metric == "euclidean":
         n2x = th.linalg.vecdot(Xs, Xs)
         n2y = th.linalg.vecdot(Ys, Ys)
@@ -246,6 +246,16 @@ def indices_pairwise_dist(
         val = th.linalg.vecdot(xr, yc)
     elif metric == "cosine":
         val = th.linalg.vecdot(xr, yc) / (th.linalg.vector_norm(xr, dim=-1) * th.linalg.vector_norm(yc, dim=-1) + eps)
+    elif metric == "periodic":
+        x_diff = xr - yc
+        R = metric_kwargs.get("R", None)
+        if not isinstance(R, th.Tensor):
+            raise ValueError(
+                "Periodic metric requires the key 'R' and a Tensor value that is the cell vectors in `metric_kwargs`, "
+                f"but got {type(R)}.")
+        val = index_periodic_geodesic_dist(
+            x_diff, R, Qe_s
+        )
     else:
         raise ValueError(f"Unknown metric {metric}.")
 
@@ -318,12 +328,14 @@ def inner_product_for_halfspace(u: th.Tensor, v: th.Tensor, volumes: th.Tensor|f
 def standardize_cell(cell: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
     """
     Rotation a cell vector matrix into a standardized form where ay = az = 0, bz = 0, cz > 0.
+    Input and returned tensors are in row order that apply the **right** multiplication to coordinates.
     Args:
         cell: Tensor[B, 3, 3], batch of cell vectors.
 
     Returns:
         L: Tensor[B, 3, 3], standardized cell vector matrix with lower triangular forms.
         Q: Tensor[B, 3, 3], the corresponding rotation transform
+        They satisfy that `cell == L @ Q`. Hence the corresponding rotation of atom coordinates is `pos_std = pos @ Q.mT`
 
     """
     # determined the cell is a right-hand system
@@ -430,3 +442,112 @@ def generate_half_space_grids(n_grids: Tuple[int, int, int], device: str = 'cpu'
     G_indices[1:, :] = indices_orig
 
     return G_indices
+
+def periodic_geodesic_dist(
+        X: th.Tensor,
+        R: th.Tensor,
+) -> th.Tensor:
+    """
+    Compute the geodesic distance on a flat torus defined by a lattice.
+
+    The torus is given by the cell vectors in R (each row is a basis vector).
+    The distance between two points x1 and x2 on the torus is the length of
+    the shortest vector connecting their equivalence classes:
+        d(x1, x2) = min_{k in Z^D} || (x1 - x2) - k @ R ||.
+
+    Args:
+        X: (B, N, D) tensor, the difference vectors (x1 - x2).
+        R: (B, D, D) tensor, the cell matrix where each ROW is a cell axis.
+
+    Returns:
+        dist: (B, N) tensor with the geodesic distances.
+    """
+    # Compute the fractional coordinates of X with respect to the lattice R.
+    # X = frac @ R  =>  frac = X @ R^{-1}
+    B, A, n_dim = X.shape
+    frac, _ = th.linalg.solve_ex(R, X.reshape(B, -1, n_dim), left=False)            # (B, A^2, D)
+
+    # Nearest integer lattice point in fractional coordinates.
+    n = th.round(frac)                   # (B, A^2, D)
+
+    # Corresponding displacement in Cartesian space: t = n @ R.
+    t = th.matmul(n, R)                  # (B, A^2, D)
+
+    # Residual vector and its Euclidean norm.
+    residual = X - t + 1e-20                     # (B, A^2, D)
+    dist = th.linalg.norm(residual, dim=-1)      # (B, A^2)
+
+    return dist
+
+def index_periodic_geodesic_dist(
+        X: th.Tensor,
+        R: th.Tensor,
+        batch_scatter: th.Tensor,
+) -> th.Tensor:
+    """
+    Compute the geodesic distance on a flat torus defined by a lattice.
+    An indexed irregular batch version.
+
+    The torus is given by the cell vectors in R (each row is a basis vector).
+    The distance between two points x1 and x2 on the torus is the length of
+    the shortest vector connecting their equivalence classes:
+        d(x1, x2) = min_{k in Z^D} || (x1 - x2) - k @ R ||.
+
+    Args:
+        X: (sumN, D) tensor, the difference vectors (x1 - x2).
+        R: (B, D, D) tensor, the cell matrix where each ROW is a cell axis.
+        batch_scatter: (sumN, ), the batch indices of X. Format: [0, 0, ..., 1, 1, ..., B-1]
+    Returns:
+        dist: (sumN, ) tensor with the geodesic distances.
+    """
+    # Compute the fractional coordinates of X with respect to the lattice R.
+    # X = frac @ R  =>  frac = X @ R^{-1}
+    sumN, n_dim = X.shape
+    R_scatter = R.index_select(0, batch_scatter)  # (sumN, D, D)
+    frac, _ = th.linalg.solve_ex(R_scatter, X.unsqueeze(-2), left=False)  # (sumN, 1, D) @ (sumN, D, D) = (sumN, 1, D)
+    # Nearest integer lattice point in fractional coordinates.
+    n = th.round(frac)                   # (sumN, 1, D)
+    # Corresponding displacement in Cartesian space: t = n @ R.
+    t = th.matmul(n, R_scatter).squeeze(-2)                  # (sumN, 1, D) @ (sumN, D, D) -squeeze-> (sumN, D)
+
+    # Residual vector and its Euclidean norm.
+    residual = X - t + 1e-20                     # (sumN, D)
+    dist = th.linalg.norm(residual, dim=-1)      # (sumN, )
+
+    return dist
+
+def index_periodic_geodesic_diffvec(
+        X: th.Tensor,
+        R: th.Tensor,
+        batch_scatter: th.Tensor,
+) -> th.Tensor:
+    """
+    Compute the geodesic distance on a flat torus defined by a lattice.
+    An indexed irregular batch version.
+
+    The torus is given by the cell vectors in R (each row is a basis vector).
+    The distance between two points x1 and x2 on the torus is the length of
+    the shortest vector connecting their equivalence classes:
+        d(x1, x2) = min_{k in Z^D} || (x1 - x2) - k @ R ||.
+
+    Args:
+        X: (sumN, D) tensor, the difference vectors (x1 - x2).
+        R: (B, D, D) tensor, the cell matrix where each ROW is a cell axis.
+        batch_scatter: (sumN, ), the batch indices of X. Format: [0, 0, ..., 1, 1, ..., B-1]
+    Returns:
+        dist: (sumN, ) tensor with the geodesic distances.
+    """
+    # Compute the fractional coordinates of X with respect to the lattice R.
+    # X = frac @ R  =>  frac = X @ R^{-1}
+    sumN, n_dim = X.shape
+    R_scatter = R.index_select(0, batch_scatter)  # (sumN, D, D)
+    frac, _ = th.linalg.solve_ex(R_scatter, X.unsqueeze(-2), left=False)  # (sumN, 1, D) @ (sumN, D, D) = (sumN, 1, D)
+    # Nearest integer lattice point in fractional coordinates.
+    n = th.round(frac)                   # (sumN, 1, D)
+    # Corresponding displacement in Cartesian space: t = n @ R.
+    t = th.matmul(n, R_scatter).squeeze(-2)                  # (sumN, 1, D) @ (sumN, D, D) -squeeze-> (sumN, D)
+
+    # Residual vector and its Euclidean norm.
+    diffvec = X - t + 1e-20                     # (sumN, D)
+
+    return diffvec

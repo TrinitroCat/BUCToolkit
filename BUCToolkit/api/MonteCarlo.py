@@ -85,7 +85,7 @@ class MonteCarlo(_CONFIGS):
                     'temperature_init': float(self.MC.get('T_INIT', 298.15)),
                     'temperature_scheme': str(self.MC.get('T_SCHEME', 'constant')),
                     'temperature_update_freq': int(self.MC.get('T_UPDATE_FREQ', 1)),
-                    'temperature_scheme_param': float(self.MC.get('T_SCHEME_PARAM', None)),
+                    'temperature_scheme_param': float(self.MC.get('T_SCHEME_PARAM', 0.)),
                     'coordinate_update_param': float(self.MC.get('COORDINATE_UPDATE_PARAM', 0.2)),
                 }
             )

@@ -4,7 +4,9 @@
 #  File: __init__.py
 #  Environment: Python 3.12
 from .Dimer import Dimer
+from .Krylov import KrylovNewton
 
 __all__ = [
-    'Dimer'
+    'Dimer',
+    'KrylovNewton',
 ]

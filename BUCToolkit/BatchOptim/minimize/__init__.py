@@ -12,6 +12,6 @@ Batched structures optimization by pytorch models or functions.
 
 from .CG import CG
 from .QN import QN
-from .FIRE import FIRE
+from .FIRE import FIRE, ConstrFIRE
 
-__all__ = ['CG', 'QN', 'FIRE']
+__all__ = ['CG', 'QN', 'FIRE', 'ConstrFIRE']

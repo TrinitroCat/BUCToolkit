@@ -21,7 +21,8 @@ from torch import nn
 from BUCToolkit.utils._print_formatter import GLOBAL_SCIENTIFIC_ARRAY_FORMAT, FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils import index_ops
 from BUCToolkit.utils.function_utils import preload_func
-from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers, BaseIO
+from BUCToolkit.utils.setup_loggers import has_any_handler, clear_all_handlers
+from BUCToolkit.Bases.BaseMotion import BaseMotion
 
 np.set_printoptions(**GLOBAL_SCIENTIFIC_ARRAY_FORMAT)
 
@@ -76,7 +77,7 @@ def fin_diff_hvp(
 
     else:
         # X, v: (1, B0*A, D)
-        v_norm = th.sqrt(th.sum(index_ops.index_inner_product(v, v, 1, batch_indices, None), dim=-1, keepdim=True))  # (1, B0, 1)
+        v_norm = th.sqrt(th.sum(index_ops.index_inner_product(v, v, 1, batch_indices, None), dim=-1, keepdim=True)) + eps  # (1, B0, 1)
         v = v / v_norm.index_select(1, batch_indices)
         dX_f = X + delta * v
         dX_b = X - delta * v
@@ -86,9 +87,9 @@ def fin_diff_hvp(
         dX_b.requires_grad_(require_grad)
         if is_g_contain_y:
             y_f = f(dX_f, *f_args, **f_kwargs)
-            g_f = g(y_f, dX_f, *g_args, **g_kwargs)
+            g_f = g(dX_f, y_f, *g_args, **g_kwargs)
             y_b = f(dX_b, *f_args, **f_kwargs)
-            g_b = g(y_b, dX_b, *g_args, **g_kwargs)
+            g_b = g(dX_b, y_b, *g_args, **g_kwargs)
             hvp = (g_f - g_b) / (2 * delta)
         else:
             y_f = f(dX_f, *f_args, **f_kwargs)
@@ -104,7 +105,7 @@ def fin_diff_hvp(
     return y_mean, g_mean, hvp
 
 
-class FindMinEigen(BaseIO):
+class FindMinEigen(BaseMotion):
     """
     Find the eigenvector with minimum eigenvalue by Riemann gradient descent on S^2 manifold v^T v = 1.
     In fact, dimer only requires the direction within negative cone, i.e., v^T H v < 0.
@@ -148,7 +149,7 @@ class FindMinEigen(BaseIO):
 
         # logger
         super().__init__()
-        self.init_logger('Main.TS')
+        self.init_logger('Main.TS.Eigen')
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -226,75 +227,50 @@ class FindMinEigen(BaseIO):
             vHv: the curvature at X given by finite difference.
         """
         t_main = time.perf_counter()
-        if func_kwargs is None:
-            func_kwargs = dict()
-        if grad_func_kwargs is None:
-            grad_func_kwargs = dict()
-        # Check batch indices; irregular batch
-        if isinstance(X, th.Tensor):
-            n_batch, n_atom, n_dim = X.shape
-        else:
+        # Sanitize kwargs
+        func_kwargs = func_kwargs or dict()
+        grad_func_kwargs = grad_func_kwargs or dict()
+        func_args = tuple(func_args)
+        grad_func_args = tuple(grad_func_args)
+
+        # X shape
+        if not isinstance(X, th.Tensor):
             raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
-        if batch_indices is not None:
-            if n_batch != 1:
-                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
-            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
-                batch_indices = batch_indices.tolist()
-            elif not isinstance(batch_indices, (Tuple, List)):
-                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
-                                f'It must be Sequence[int] | th.Tensor | np.ndarray | None')
-            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
-            n_inner_batch = len(batch_indices)
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)
-            self.batch_scatter = th.repeat_interleave(
-                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
-                self.batch_tensor,
-                dim=0
-            )
-        else:
-            raise NotImplementedError
-            n_inner_batch = 1
-            batch_indx_dict = dict()
-            batch_tensor = None
-        # initialize vars
         n_batch, n_atom, n_dim = X.shape
+
+        # Grad func
+        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(grad_func, is_grad_func_contain_y, require_grad)
+
+        # Batch indices (irregular batch)
+        if batch_indices is None:
+            raise NotImplementedError(
+                f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
+                f'It is fully compatible with regular batches, but merely a little performance loss.'
+            )
+        n_inner_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+            batch_indices, n_batch, device=self.device
+        )
+
         self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
-        if grad_func is None:
-            is_grad_func_contain_y = True
-            require_grad = True
 
-            def grad_func_(y, x, grad_shape=None):
-                if grad_shape is None:
-                    grad_shape = th.ones_like(y)
-                _g = th.autograd.grad(y, x, grad_shape)
-                return _g[0]
-        else:
-            grad_func_ = grad_func
-
+        # Batch updater init
         if hasattr(self._update_batch, 'initialize'):
             self._update_batch.initialize()
         elif hasattr(self._update_batch, '__init__'):
             self._update_batch.__init__()
+
         # Selective dynamics
-        if fixed_atom_tensor is None:
-            atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
-        # atom_masks = atom_masks.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
-        # other check
-        if (not isinstance(self.maxiter_rot, int)) or (self.maxiter_rot <= 0):
+        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
+
+        # Maxiter check
+        if not isinstance(self.maxiter_rot, int) or self.maxiter_rot <= 0:
             raise ValueError(f'Invalid value of maxiter_rot: {self.maxiter_rot}. It would be an integer greater than 0.')
 
-        # set variables device
+        # Device placement
         func = preload_func(func, self.device)
-
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
-        X = X.detach()
-        X = X.to(self.device)
+        X = X.detach().to(self.device)
         # normalize v
         v.mul_(atom_masks)
         v_norm = th.sqrt(th.sum(index_ops.index_inner_product(v, v, 1, self.batch_scatter), dim=-1, keepdim=True))
@@ -330,6 +306,7 @@ class FindMinEigen(BaseIO):
             require_grad=require_grad,
             delta=self.dx
         )
+        g.mul_(atom_masks)
         Hv.mul_(atom_masks)
         # curvature, vHv (1, B0, 1)
         vHv = th.sum(
@@ -340,14 +317,16 @@ class FindMinEigen(BaseIO):
         # grad in the tangent space
         gT = Hv - vHv.index_select(1, self.batch_scatter) * v
         gT_norm = th.sqrt(th.sum(index_ops.index_inner_product(gT, gT, 1, self.batch_scatter), dim=-1, keepdim=True))
-        w = gT / (gT_norm.index_select(1, self.batch_scatter) + 1e-20)  # (1, sumB*A, N)
+        w = v.clone()  #gT / (gT_norm.index_select(1, self.batch_scatter) + 1e-20)  # (1, sumB*A, N)
         # cache for dynamically changed batch indices due to convergence, avoiding reallocate mem.
         batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
         for i in range(self.maxiter_rot):
             # threshold. Only need v in the negative cone, i.e., vHv < 0.
             converge_mask_curve = (vHv < self.Curve_thres)
             converge_mask_torque = (gT_norm < self.Torque_thres)
-            converge_mask = converge_mask_curve | converge_mask_torque  # (1, B, 1)
+            #   reinsurance: When w and v are very collinear, stop meaningless update
+            abort_mask = th.sum(index_ops.index_inner_product(v, w, 1, self.batch_scatter), dim=-1, keepdim=True) < 1.e-7
+            converge_mask = (converge_mask_curve | converge_mask_torque)  # (1, B, 1)
             # print
             if self.verbose > 0:
                 self.logger.info(f"Rot {i:>5d}\n "
@@ -362,8 +341,10 @@ class FindMinEigen(BaseIO):
             if th.all(converge_mask):
                 is_main_loop_converge = True
                 break
-            converge_mask_short = converge_mask
-            converge_mask = converge_mask[:, self.batch_scatter, ...]  # (1, sumB*A, 1)
+            elif th.all(converge_mask | abort_mask):
+                break
+            converge_mask_short = converge_mask | abort_mask
+            converge_mask = converge_mask_short[:, self.batch_scatter, ...]  # (1, sumB*A, 1)
             # update batch, remove the already converged ones.
             if not self._hold_samples:
                 func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
@@ -405,6 +386,7 @@ class FindMinEigen(BaseIO):
 
             # construction subspace Hessian [[vHv vHw] [wHv wHw]] with shape (B0, 2, 2) for 2nd order precise linear search
             w_ = gT_ / (gT_norm_.index_select(1, batch_scatter_) + 1e-20)  # (1, sumB*A, N)
+            self.logger.debug(f"w:\n{w_}")
             y2_t, g2_, Hw_ = fin_diff_hvp(
                 func,
                 func_args_,
@@ -419,6 +401,7 @@ class FindMinEigen(BaseIO):
                 require_grad=require_grad,
                 delta=self.dx
             )
+            g2_.mul_(atom_masks_)
             Hw_.mul_(atom_masks_)  # mask
             # subspace Hessian
             vHw_ = th.sum(
@@ -438,6 +421,7 @@ class FindMinEigen(BaseIO):
             )
             nondiag_ = 0.5 * (wHv_ + vHw_)  # (1, B, 1)
             H22_ = th.cat((vHv_, nondiag_, nondiag_, wHw_), dim=-1).reshape(-1, 2, 2)
+            self.logger.debug(f"H22:\n{H22_.numpy(force=True)}")
 
             sub_eigval_, sub_eigvec_ = th.linalg.eigh(H22_)  # (B, 2), (B, 2, 2)
             cos_t_ = sub_eigvec_[None, :, 0:1, 0].index_select(1, batch_scatter_)
@@ -466,7 +450,7 @@ class FindMinEigen(BaseIO):
                 select_indices_short = th.where(select_mask_short)[0]
                 y.index_copy_(0, select_indices_short, y2_t)
                 v.index_copy_(1, select_indices, v_)
-                #w.index_copy_(1, select_indices, w_)
+                w.index_copy_(1, select_indices, w_)
                 #X.index_copy_(1, select_indices, X_)
                 Hv.index_copy_(1, select_indices, Hv_)
                 vHv.index_copy_(1, select_indices_short, vHv_)
@@ -477,12 +461,14 @@ class FindMinEigen(BaseIO):
             else:
                 y = y2_t
                 v = v_
+                w = w_
                 #X = X_
                 Hv = Hv_
                 vHv = vHv_
                 gT_norm = gT_norm_
                 g = g2_
                 theta = theta_
+            pass
 
         if self.verbose and is_main_loop_converge:
             self.logger.info(
@@ -490,7 +476,8 @@ class FindMinEigen(BaseIO):
             )
         else:
             self.logger.warning(
-                '-' * 100 + f'\nWARNING: Some Structures\' Rotation were NOT Converged yet!\nrotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
+                '-' * 100 + f'\nWARNING: Some Structures\' Rotation were NOT Converged yet!\n'
+                            f'rotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
             )
 
         # recalc y, g, Hv (Optional)
@@ -519,7 +506,7 @@ class FindMinEigen(BaseIO):
         return v, y, g, Hv, vHv
 
 
-class Dimer(BaseIO):
+class Dimer(BaseMotion):
     """
     Modified Dimer
     Ref. J Chem Phys 2005, 132, 224101.
@@ -624,7 +611,7 @@ class Dimer(BaseIO):
             grad_func_args: Sequence = tuple(),
             grad_func_kwargs=None,
             is_grad_func_contain_y: bool = True,
-            require_grad: bool = True,
+            require_grad: bool = False,
             output_grad: bool = False,
             fixed_atom_tensor: Optional[th.Tensor] = None,
             batch_indices: Optional[th.Tensor | List] = None,
@@ -655,54 +642,35 @@ class Dimer(BaseIO):
             func_kwargs = dict()
         func_args = tuple(func_args)
         grad_func_args = tuple(grad_func_args)
+
+        # X shape
+        if not isinstance(X, th.Tensor):
+            raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
+        if len(X.shape) == 2:
+            X = X.unsqueeze(0)
+        elif len(X.shape) != 3:
+            raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
+        n_batch, n_atom, n_dim = X.shape
+
+        # X_diff default
         if X_diff is None:
             X_diff = th.randn_like(X)
-        n_batch, n_atom, n_dim = X.shape
-        if grad_func is None:
-            is_grad_func_contain_y = True
 
-            def grad_func_(y, x, grad_shape=None):
-                if grad_shape is None:
-                    grad_shape = th.ones_like(y)
-                g = th.autograd.grad(y, x, grad_shape)
-                return g[0]
-        else:
-            grad_func_ = grad_func
-        if isinstance(X, th.Tensor):
-            n_batch, n_atom, n_dim = X.shape
-        else:
-            raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
-        # batch_check
-        if batch_indices is not None:
-            if n_batch != 1:
-                raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
-            if isinstance(batch_indices, (th.Tensor, np.ndarray)):
-                batch_indices = batch_indices.tolist()
-            elif not isinstance(batch_indices, (Tuple, List)):
-                raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
-                                f'It must be Sequence[int] | th.Tensor | np.ndarray | None')
-            for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
-            n_inner_batch = len(batch_indices)
-            self.batch_tensor = th.as_tensor(batch_indices, device=self.device)
-            self.batch_scatter = th.repeat_interleave(
-                th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
-                self.batch_tensor,
-                dim=0
+        # Grad func
+        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(grad_func, is_grad_func_contain_y, require_grad)
+
+        # Batch indices (irregular batch)
+        if batch_indices is None:
+            raise NotImplementedError(
+                f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
+                f'It is fully compatible with regular batches, but merely a little performance loss.'
             )
-        else:  # temporarily not implemented
-            raise NotImplementedError(f'Regular batch algo. is not implemented yet.')
-            n_inner_batch = 1
-            batch_indx_dict = dict()
-            batch_tensor = None
+        n_inner_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+            batch_indices, n_batch, device=self.device
+        )
 
         # Selective dynamics
-        if fixed_atom_tensor is None:
-            atom_masks = th.ones_like(X, device=self.device)
-        elif fixed_atom_tensor.shape == X.shape:
-            atom_masks = fixed_atom_tensor.to(self.device)
-        else:
-            raise RuntimeError(f'fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not have the same shape of X (shape: {X.shape}).')
+        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
         # other check
         if (not isinstance(self.maxiter_trans, int)) or (not isinstance(self.maxiter_rot, int)) \
                 or (self.maxiter_trans <= 0) or (self.maxiter_rot <= 0):
@@ -717,31 +685,48 @@ class Dimer(BaseIO):
         X = X.to(self.device)
         X_diff = X_diff.to(self.device)
         v = X_diff.mul(atom_masks)
-        #plist = list()  # TEST <<<<
+        plist = list()  # TEST <<<<
         is_main_loop_converge = False
         # Main Loop
         # initialize
-        y, g, Hv = fin_diff_hvp(
-            func,
-            func_args,
-            func_kwargs,
-            grad_func_,
-            grad_func_args,
-            grad_func_kwargs,
-            X,
-            v,
-            self.batch_scatter,
-            is_g_contain_y=is_grad_func_contain_y,
+        #y, g, Hv = fin_diff_hvp(
+        #    func,
+        #    func_args,
+        #    func_kwargs,
+        #    grad_func_,
+        #    grad_func_args,
+        #    grad_func_kwargs,
+        #    X,
+        #    v,
+        #    self.batch_scatter,
+        #    is_g_contain_y=is_grad_func_contain_y,
+        #    require_grad=require_grad,
+        #)
+        #g.mul_(atom_masks)
+        #Hv.mul_(atom_masks)
+        #vHv = th.sum(
+        #    index_ops.index_inner_product(v, Hv, dim=1, batch_indices=self.batch_scatter),
+        #    dim=-1,
+        #    keepdim=True
+        #)
+        v, y, g, Hv, vHv = self.Rotator.run(
+            func=func,
+            X=X,
+            v=v,
+            grad_func=grad_func_,
+            func_args=func_args,
+            func_kwargs=func_kwargs,
+            grad_func_args=grad_func_args,
+            grad_func_kwargs=grad_func_kwargs,
+            is_grad_func_contain_y=is_grad_func_contain_y,
             require_grad=require_grad,
-        )
-        vHv = th.sum(
-            index_ops.index_inner_product(v, Hv, dim=1, batch_indices=self.batch_scatter),
-            dim=-1,
-            keepdim=True
+            fixed_atom_tensor=atom_masks,
+            batch_indices=self.batch_tensor
         )
         y_old = th.full_like(y, th.inf, device=self.device)
-        eig_thres_neg = - 0.01
-        eig_thres_pos = 0.01
+        # NOW hard coded
+        eig_thres_neg = - 0.1
+        eig_thres_pos = 0.1
         batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
         t_st = time.perf_counter()
         with th.no_grad():

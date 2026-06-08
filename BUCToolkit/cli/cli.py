@@ -32,7 +32,7 @@ if has_prmt:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.completion import WordCompleter  # TODO, auto-completion
-    prompt_config = dict(history=FileHistory('.cli_history'), auto_suggest=AutoSuggestFromHistory())
+    prompt_config = dict(history=FileHistory(os.path.join(os.path.expanduser('~'), '.buctoolkit_history')), auto_suggest=AutoSuggestFromHistory())
 else:
     prompt = input
     prompt_config = dict()
