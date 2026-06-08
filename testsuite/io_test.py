@@ -142,6 +142,69 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         assert _arrays_close(ref_coords, bs_app.Coords), 'binary append coords'
         print(f'  Binary append: OK')
 
+        # ----------------------------------------------------------------
+        # Step 6: Test BatchStructures public methods
+        # ----------------------------------------------------------------
+        bs = bs_outcar[:min(10, n_structs)]  # use slicing for subset (no .copy() needed)
+        public_methods = [
+            'change_mode', 'check_full', 'generate_dist_mat',
+            'generate_atom_list', 'generate_atomic_number_list',
+            'cartesian2direct', 'direct2cartesian', 'sort_ids', 'standardize',
+            'shuffle', 'rearrange', 'fix_atoms_by_height',
+            'contain_any', 'contain_all',
+        ]
+        for meth_name in public_methods:
+            try:
+                meth = getattr(bs, meth_name, None)
+                if meth is None:
+                    continue
+                if meth_name in ('change_mode',):
+                    meth('A', release_mem=False)
+                    meth('L')
+                elif meth_name == 'check_full':
+                    meth()
+                elif meth_name == 'generate_dist_mat':
+                    meth()
+                elif meth_name == 'generate_atom_list':
+                    meth()
+                elif meth_name == 'generate_atomic_number_list':
+                    bs.generate_atom_list()
+                    meth()
+                elif meth_name == 'cartesian2direct':
+                    meth()
+                    bs.direct2cartesian()
+                elif meth_name == 'direct2cartesian':
+                    bs.cartesian2direct()
+                    meth()
+                elif meth_name == 'sort_ids':
+                    meth()
+                elif meth_name == 'standardize':
+                    meth()
+                elif meth_name == 'shuffle':
+                    meth(seed=42)
+                elif meth_name == 'rearrange':
+                    meth(list(range(len(bs))))
+                elif meth_name == 'fix_atoms_by_height':
+                    meth(0.5)
+                elif meth_name == 'contain_any':
+                    bs.contain_any(bs.Elements[0])
+                elif meth_name == 'contain_all':
+                    bs.contain_all(bs.Elements[0][:1])
+            except NotImplementedError:
+                pass  # expected for some methods
+            except Exception as e:
+                errors.append(f'** Failed to call the method BatchStructures.{meth_name}: {type(e).__name__}: {e}')
+        print(f'  BatchStructures methods: {len(public_methods)} tested')
+
+        # ----------------------------------------------------------------
+        # Step 7: split_dataset
+        # ----------------------------------------------------------------
+        from BUCToolkit.Preprocessing.preprocessing import split_dataset
+        parts = split_dataset(bs_outcar[:20], ratio=[0.5, 0.3, 0.2], shuffle=True, seed=42)
+        assert len(parts) == 3
+        assert sum(len(p) for p in parts) == 20
+        print(f'  split_dataset: OK (20 -> {[len(p) for p in parts]})')
+
     except Exception as e:
         import traceback
         errors.append(f'{type(e).__name__}: {e}\n{traceback.format_exc()}')

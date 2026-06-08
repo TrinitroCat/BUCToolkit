@@ -178,7 +178,7 @@ class FIRE(_BaseOpt):
             )
             a_.masked_fill_(is_p_lt_0, self.alpha)
             # re-write
-            if self._hold_samples:
+            if not self._hold_samples:
                 select_indices = th.where(select_mask)[0]
                 self.t.index_copy_(1, select_indices, self.t_)
                 self.a.index_copy_(1, select_indices, a_)

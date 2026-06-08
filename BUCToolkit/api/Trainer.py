@@ -9,7 +9,9 @@
 import copy
 import logging
 import os
+import queue
 import re
+import threading
 import time
 from math import ceil
 from typing import Dict, Tuple, Literal, List, Any, Callable, Optional
@@ -141,6 +143,12 @@ class Trainer(_CONFIGS):
         self.EMA = trn_config.get('EMA', False)  # exponential moving average strategy. best_checkpoint saves using ema param, and others do not.
         self.EMA_DECAY = float(trn_config.get('EMA_DECAY', 0.999))
 
+        # compile options: torch.compile on model forward for speed-up (following _BaseMD/_BaseMC pattern)
+        self.IS_COMPILE: bool = bool(trn_config.get('IS_COMPILE', False))
+        self.COMPILE_KWARGS: dict = trn_config.get('COMPILE_KWARGS', dict())
+        if not isinstance(self.COMPILE_KWARGS, dict):
+            raise TypeError('COMPILE_KWARGS must be a dictionary.')
+
         # loss & criterion info
         self.loss_name = trn_config.get('LOSS', None)
         if self.loss_name is not None:
@@ -239,6 +247,67 @@ class Trainer(_CONFIGS):
         else:
             self._layerwise_opt_configs = None
 
+    @staticmethod
+    def _async_save_chkpt(q: queue.Queue):
+        """
+        A backend daemon thread for async checkpoint saving.
+        Follows the BatchMD._do_async_dump pattern: synchronize on CUDA event before I/O.
+
+        Args:
+            q: queue of (event: th.cuda.Event, save_path: str, cpu_states: dict) tuples.
+               Sentinel: (None, None, None) to stop.
+        """
+        while True:
+            event, save_path, cpu_states = q.get()
+            if event is None:
+                break
+            try:
+                event.synchronize()  # ensure all D2H copies on the copy_stream are complete
+                th.save(cpu_states, save_path)
+            except Exception:
+                pass  # silently ignore; main thread handles errors via direct saves
+
+    @staticmethod
+    def _clone_states_to_cpu_async(states: dict, copy_stream: th.cuda.Stream) -> dict:
+        """
+        Recursively clone all CUDA tensors in states to CPU on the given stream (non_blocking).
+        Non-tensor values and CPU tensors are passed through unchanged.
+        Follows BatchMD's D2H async copy pattern: clone on copy_stream, then D2H.
+
+        Returns a new dict with CPU clones. Caller must record a CUDA event on copy_stream
+        after this call, and the consumer must synchronize on that event before accessing.
+        """
+        with th.cuda.stream(copy_stream):
+            return Trainer._clone_states_to_cpu_async_impl(states)
+
+    @staticmethod
+    def _clone_states_to_cpu_async_impl(obj):
+        """Internal recursive implementation. Must be called within a cuda.stream context."""
+        if isinstance(obj, th.Tensor):
+            if obj.is_cuda:
+                # clone (D2D on copy_stream) then non_blocking D2H
+                return obj.clone().to('cpu', non_blocking=True)
+            else:
+                return obj.clone()  # CPU tensor: plain clone
+        elif isinstance(obj, dict):
+            return {k: Trainer._clone_states_to_cpu_async_impl(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(Trainer._clone_states_to_cpu_async_impl(v) for v in obj)
+        else:
+            return obj  # scalar, string, etc.: pass through
+
+    def _launch_async_chk_saver(self) -> Tuple[queue.Queue, threading.Thread, Optional[th.cuda.Stream]]:
+        """
+        Launch the async checkpoint saving daemon thread and create a dedicated copy stream.
+        Returns the queue, thread, and copy_stream for the caller to manage.
+        The copy_stream is used for non_blocking D2H transfers before enqueuing saves.
+        """
+        _chk_queue = queue.Queue(maxsize=4)
+        _chk_thread = threading.Thread(target=self._async_save_chkpt, args=(_chk_queue,), daemon=True)
+        _chk_thread.start()
+        _copy_stream = th.cuda.Stream() if 'cuda' in str(self.DEVICE) else None
+        return _chk_queue, _chk_thread, _copy_stream
+
     def train(self, model):
         r"""
         Start Training.
@@ -279,6 +348,12 @@ class Trainer(_CONFIGS):
         # model vars
         _model = _model.to(self.DEVICE)
         _model.requires_grad_()
+        # optimization: enable cudnn benchmark for faster conv kernels (if GPU)
+        if 'cuda' in str(self.DEVICE):
+            th.backends.cudnn.benchmark = True
+        # optimization: torch.compile the model (following _BaseMD/_BaseMC pattern)
+        if self.IS_COMPILE and hasattr(th, 'compile'):
+            _model = th.compile(_model, **self.COMPILE_KWARGS)
         # loss & eval vars
         if self.LOSS is None:
             self.logger.exception('ERROR: the loss function is None. Please set the loss function.')
@@ -363,7 +438,10 @@ class Trainer(_CONFIGS):
             self.VAL_IF_TRN_LOSS_BELOW = th.nan  # set it to nan to avoid validation.
         n_batch = ceil(n_trn_samp / self.BATCH_SIZE)  # total batch number per epoch
         history: Dict[Literal['train_loss', 'val_loss'], List[float]] = {'train_loss': list(), 'val_loss': list()}
-        OPTIMIZER.zero_grad()
+        OPTIMIZER.zero_grad(set_to_none=True)  # optimization: set_to_none avoids zero-filling overhead
+        # optimization: launch async checkpoint saving daemon with dedicated copy_stream
+        # (following BatchMD/BatchMC async D2H pattern: copy_stream + event for timing safety)
+        _chk_queue, _chk_thread, _copy_stream = self._launch_async_chk_saver()
         i = epoch_now
         if not os.path.isdir(self.CHK_SAVE_PATH):
             os.makedirs(self.CHK_SAVE_PATH, )
@@ -420,7 +498,7 @@ class Trainer(_CONFIGS):
                                 if isinstance(pred_y[key], th.Tensor):
                                     is_nan = th.isnan(pred_y[key]) + th.isinf(pred_y[key])
                                 elif isinstance(pred_y[key], list):  # for ensemble wrapper model
-                                    is_nan = sum([th.isnan(_p) + th.isinf(_p) for _p in pred_y[key]])
+                                    is_nan = th.tensor(sum([th.isnan(_p) + th.isinf(_p) for _p in pred_y[key]]))
                                 else:
                                     break
                                 if th.any(is_nan):
@@ -534,7 +612,16 @@ class Trainer(_CONFIGS):
                                                 'val_loss': _val_loss,
                                             }
                                             if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
-                                            th.save(states, os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
+                                            _save_path = os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt')
+                                            if _copy_stream is not None:
+                                                # Async D2H clone + event (following BatchMD/BatchMC pattern)
+                                                _copy_stream.wait_stream(th.cuda.default_stream(self.DEVICE))
+                                                cpu_states = self._clone_states_to_cpu_async(states, _copy_stream)
+                                                _chk_event = th.cuda.Event()
+                                                _chk_event.record(_copy_stream)
+                                                _chk_queue.put((_chk_event, _save_path, cpu_states))
+                                            else:
+                                                th.save(states, _save_path)
                                             if self.VERBOSE: self.logger.info('Done.')
                                         else:
                                             if self.VERBOSE: self.logger.info(f'Validation loss NOT descent. Minimum loss: {val_loss_old:< 4.4e}.')
@@ -578,13 +665,24 @@ class Trainer(_CONFIGS):
                     'val_loss': history['val_loss'][-1],
                 }
                 if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
-                th.save(states, os.path.join(self.CHK_SAVE_PATH, f'checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
+                _save_path = os.path.join(self.CHK_SAVE_PATH, f'checkpoint{self.CHK_SAVE_POSTFIX}.pt')
+                if _copy_stream is not None:
+                    _copy_stream.wait_stream(th.cuda.default_stream(self.DEVICE))
+                    cpu_states = self._clone_states_to_cpu_async(states, _copy_stream)
+                    _chk_event = th.cuda.Event()
+                    _chk_event.record(_copy_stream)
+                    _chk_queue.put((_chk_event, _save_path, cpu_states))
+                else:
+                    th.save(states, _save_path)
                 if self.VERBOSE: self.logger.info('Done.')
 
         except Exception as e:
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:{traceback.format_exc()}\n')
 
         finally:
+            # optimization: send sentinel to async checkpoint saver and wait for completion
+            _chk_queue.put((None, None, None))
+            _chk_thread.join(timeout=30.)
             # If the program stopped, recording checkpoints.
             if self.EMA: ema.restore()
             if i != self.EPOCH - 1:

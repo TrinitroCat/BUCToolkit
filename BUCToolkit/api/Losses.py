@@ -1,6 +1,7 @@
 """
 Build-in Losses function
 """
+import warnings
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -94,6 +95,7 @@ class Energy_Loss(nn.Module):
 class WrapperBoostLoss(nn.Module):
     def __init__(self, loss_E: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MAE', loss_F = None) -> None:
         super().__init__()
+        warnings.warn(f"WrapperBoostLoss is experimental without sufficient tests.")
         if loss_E == 'MAE':
             self.loss_E = nn.L1Loss()
         elif loss_E == 'SmoothMAE':
@@ -137,6 +139,7 @@ class WrapperMeanLoss(nn.Module):
             loss_F: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module | None = None
     ) -> None:
         super().__init__()
+        warnings.warn(f"WrapperBoostLoss is experimental without sufficient tests.")
         if loss_E == 'MAE':
             self.loss_E = nn.L1Loss()
         elif loss_E == 'SmoothMAE':
