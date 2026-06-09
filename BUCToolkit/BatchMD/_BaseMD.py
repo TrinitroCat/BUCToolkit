@@ -655,16 +655,6 @@ class _BaseMD(BaseMotion):
                     V.add_(_dV)
             else:
                 mass_center_graph = None
-            # preload Verlet update
-            #self.Verlet1_graph = th.cuda.CUDAGraph()
-            #with th.cuda.graph(self.Verlet1_graph):
-            #    V.addcdiv_(Forces, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            #    X.add_(V, alpha=self.time_step)
-            #self.Verlet2_graph = th.cuda.CUDAGraph()
-            #with th.cuda.graph(self.Verlet2_graph):
-            #    Forces.mul_(atom_masks)
-            #    # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
-            #    V.addcdiv_(Forces, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
 
             copy_stream = th.cuda.Stream()
             copy_event = th.cuda.Event()

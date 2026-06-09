@@ -199,7 +199,8 @@ class _BaseMC(BaseMotion):
             else:
                 raise NotImplementedError(F"device {self.device} not supported.")
         finally:
-            self.dumper.close()
+            if not self._HOLD_DUMPER:
+                self.dumper.close()
 
     def __run_on_cuda(
             self,
@@ -433,9 +434,6 @@ class _BaseMC(BaseMotion):
                     move_to_center_freq,
                     SHAPE_CENTER
                 )
-
-                if not self._HOLD_DUMPER:
-                    self.dumper.close()
                 th.cuda.synchronize()
             finally:
                 dump_queue.put([None]*4)
@@ -726,9 +724,6 @@ class _BaseMC(BaseMotion):
                 move_to_center_freq,
                 SHAPE_CENTER
             )
-
-            if not self._HOLD_DUMPER:
-                self.dumper.close()
 
         if self.verbose > 0:
             self.logger.info(
