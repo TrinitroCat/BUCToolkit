@@ -762,6 +762,7 @@ class _BaseMD(BaseMotion):
             if i % self.output_structures_per_step == 0:
                 _do_print = True
                 compute_event.wait(th.cuda.default_stream(self.device))
+                th.cuda.default_stream(self.device).wait_event(copy_event)
                 # D2D, fast copy purely on GPU.
                 #   Because I cannot determine whether input X would be updated in various functions,
                 #   these vars cannot be ensured as read-only. Hence, double buffer scheme is not used.
