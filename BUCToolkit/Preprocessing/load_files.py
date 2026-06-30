@@ -1035,7 +1035,7 @@ class ExtXyz2Feat(BatchStructures):
                 else:
                     col_content = {
                         f'{element_tag}': ('S', 0, 1),
-                        f'{coordinates_tag}': ('R', 1, 3)
+                        f'{coordinates_tag}': ('R', 1, 4)
                     }
                 # energy
                 ener = re.search(self.ENER_PARTTEN, info)
@@ -1156,7 +1156,7 @@ class ExtXyz2Feat(BatchStructures):
             raise ValueError(f'Invalid `n_core` number: {n_core}.')
         # search pattern
         self.CELL_PARTTEN = re.compile(rf'{lattice_tag}\s?=\s?\"([-+E0-9.\s]+)\"', re.IGNORECASE)
-        self.PROP_PARTTEN = re.compile(rf'{column_info_tag}\s?=\s?([a-zA-Z:0-9_]+)', re.IGNORECASE)
+        self.PROP_PARTTEN = re.compile(rf'{column_info_tag}\s?=\s?"?([^\s"]+)"?', re.IGNORECASE)
         self.ENER_PARTTEN = re.compile(rf'{energy_tag}\s?=\s?([-+.0-9e]+)')
 
         _para = jb.Parallel(n_jobs=n_core, backend=backend, verbose=self.verbose)

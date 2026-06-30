@@ -470,15 +470,16 @@ class FindMinEigen(BaseMotion):
                 theta = theta_
             pass
 
-        if self.verbose and is_main_loop_converge:
-            self.logger.info(
-                '-' * 100 + f'\nrotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
-            )
-        else:
-            self.logger.warning(
-                '-' * 100 + f'\nWARNING: Some Structures\' Rotation were NOT Converged yet!\n'
-                            f'rotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
-            )
+        if self.verbose:
+            if is_main_loop_converge:
+                self.logger.info(
+                    '-' * 100 + f'\nrotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
+                )
+            else:
+                self.logger.warning(
+                    '-' * 100 + f'\nWARNING: Some Structures\' Rotation were NOT Converged yet!\n'
+                                f'rotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
+                )
 
         # recalc y, g, Hv (Optional)
         #y, g, Hv = fin_diff_hvp(

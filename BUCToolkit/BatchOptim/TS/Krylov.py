@@ -116,7 +116,7 @@ class FindEigen(BaseMotion):
             fixed_atom_tensor: Optional[th.Tensor] = None,
             batch_indices: None | List[int] | Tuple[int, ...] | th.Tensor = None,
             eigen_order: int = 1,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """
         Find the eigenvector of Hessian at X with the minimum eigenvalue, by Riemannian gradient descent on S^n manifold v^T v = I.
 
@@ -141,9 +141,8 @@ class FindEigen(BaseMotion):
         Return: y, g, KRYLOV_BASES, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC;
             y: the mean value of function at X, i.e., (f(X + delta * v) + f(X - delta * v))/2
             g: the mean grad of function at X, i.e., (grad(X + delta * v) + grad(X - delta * v))/2
-            KRYLOV_BASES: the subspace bases of krylov subspace
             KRYLOV_EIGENVAL: the eigen values of krylov subspace Hessian
-            KRYLOV_EIGENVEC: the eigen vectors of krylov subspace Hessian
+            KRYLOV_EIGENVEC: the corresponding eigen vectors of Hessian
         """
         t_main = time.perf_counter()
         if func_kwargs is None:
@@ -152,9 +151,18 @@ class FindEigen(BaseMotion):
             grad_func_kwargs = dict()
         # Check batch indices; irregular batch
         if isinstance(X, th.Tensor):
+            if X.ndim == 2:
+                X.unsqueeze_(0)
             n_batch, n_atom, n_dim = X.shape
         else:
-            raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
+            raise TypeError(f'`X` must be torch.Tensor, but got {type(X)}.')
+        if isinstance(v, th.Tensor):
+            if v.ndim == 2:
+                v.unsqueeze_(0)
+            if v.shape != X.shape:
+                raise ValueError(f"`v` must have same shape as `X`, but got shape {v.shape}.")
+        else:
+            raise TypeError(f'`v` must be torch.Tensor, but got {type(v)}.')
         if batch_indices is None:
             raise NotImplementedError(
                 f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
@@ -238,7 +246,7 @@ class FindEigen(BaseMotion):
         u = Hv - vHv.index_select(1, self.batch_scatter) * v
         beta = th.sqrt(th.sum(index_ops.index_inner_product(
             u, u, 1, self.batch_scatter), dim=-1, keepdim=True)
-        )  # i.e., the lanczos beta.
+        )  # i.e., the lanczos beta. (1, B0, 1)
         KRYLOV_BASES = th.zeros((self.subspace_maxdim, v.shape[1], v.shape[2]), device=self.device, dtype=X.dtype)
         KRYLOV_BASES[0] = v[0].clone()
         KRYLOV_HESSIAN = th.zeros(
@@ -256,10 +264,10 @@ class FindEigen(BaseMotion):
         iter_min = eigen_order
         for i in range(1, self.maxiter_lanczos):
             # threshold. Only need v in the negative cone, i.e., vHv < 0.
-            monitor_indx = min(eigen_order, i) - 1
-            converge_mask_eig = (
-                    th.abs(krylov_eigenval_old[:, monitor_indx] - KRYLOV_EIGENVAL[:, monitor_indx]) < self.Eigen_thres
-            ).reshape(1, -1, 1)
+            last_comp = KRYLOV_EIGENVEC[:, i - 1, :eigen_order]  # (B, k)
+            residual_norms = (beta * th.abs(last_comp)).amax(dim=-1, keepdim=True)  # (1, B, 1)
+            converge_mask_eig = (residual_norms < self.Eigen_thres)  # (1, B, 1)
+            #monitor_indx = min(eigen_order, i) - 1
             converge_mask_torque = (beta < self.Torque_thres)
             converge_mask = (converge_mask_eig | converge_mask_torque)  # (1, B, 1)
             # print
@@ -269,8 +277,8 @@ class FindEigen(BaseMotion):
             if self.verbose > 0:
                 self.logger.info(
                     f"Eigen {i:>5d}\n "
-                    f"Torque:       {np.array2string(beta.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                    f"target Eig.:  {np.array2string(KRYLOV_EIGENVAL[:, monitor_indx].squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                    f"Krylov Resi.: {np.array2string(residual_norms.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                    f"target Eig.:  {np.array2string(KRYLOV_EIGENVAL[:, eigen_order].squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                     f"Energies:     {np.array2string(y.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
                     f"Eig. Conv.:   {np.array2string(converge_mask.squeeze().numpy(force=True), **STRING_ARRAY_FORMAT)}\n "
                     f"TIME:         {time.perf_counter() - t_st:>6.4f} s"
@@ -425,22 +433,26 @@ class FindEigen(BaseMotion):
                 krylov_eigenval_old = krylov_eigenval_old_
             pass
 
-        if self.verbose and is_main_loop_converge:
-            self.logger.info(
-                '-' * 100 + f'\nrotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
-            )
-        elif not is_main_loop_converge:
-            self.logger.warning(
-                '-' * 100 + f'\nWARNING: Some Structures\' Rotation were NOT Converged yet!\n'
-                            f'rotation done. time: {time.perf_counter() - t_main:<.4f} s\n'
-            )
+        if self.verbose:
+            if is_main_loop_converge:
+                self.logger.info(
+                    '-' * 100 + f'\neig done. time: {time.perf_counter() - t_main:<.4f} s\n'
+                )
+            else:
+                self.logger.warning(
+                    '-' * 100 + f'\nWARNING: Some Structures\' Hessian eigenvectors were NOT Converged yet!\n'
+                                f'eig done. time: {time.perf_counter() - t_main:<.4f} s\n'
+                )
 
         # DEBUG
         #H = th.autograd.functional.hessian(func, X)[0].squeeze()
         #eigval, eigvec = th.linalg.eigh(H)
         #print(f"KRYLOV_EIGENVAL: {KRYLOV_EIGENVAL[0, :eigen_order+1]}\nTRUE_EIGENVAL: {eigval[:eigen_order+1]}")
 
-        return y, g, KRYLOV_BASES, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC
+        # KRYLOV_BASES: (m, a, d); KRYLOV_EIGENVEC: (a, m, m) 'mad, amk -> kad'
+        EIGVEC = th.einsum('mad, amk -> kad', KRYLOV_BASES, KRYLOV_EIGENVEC.index_select(0, self.batch_scatter))
+
+        return y, g, KRYLOV_EIGENVAL, EIGVEC
 
 
 class KrylovNewton(BaseMotion):
@@ -476,7 +488,7 @@ class KrylovNewton(BaseMotion):
 
         self.steplength = float(steplength)
         self._trust_reg_rad_max = 5. * self.steplength
-        self._trust_reg_rad_min = 0.1 * self.steplength
+        self._trust_reg_rad_min = 0.001 * self.steplength
 
         self.dx = float(dx)
         self.device = device
@@ -832,7 +844,7 @@ class KrylovNewton(BaseMotion):
         X = X.to(self.device)
         X_diff = X_diff.to(self.device)
         v = X_diff.mul(atom_masks)
-        plist = list()  # TEST <<<<
+        #plist = list()  # TEST <<<<
         is_main_loop_converge = False
         # initialize
         #   Constants
@@ -848,7 +860,7 @@ class KrylovNewton(BaseMotion):
         IOTA1 = 0.25
         IOTA2 = 0.75
         #   init Krylov
-        y, g, KRYLOV_BASES, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC = self.EigenFinder.run(
+        y, g, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC = self.EigenFinder.run(
             func=func,
             X=X,
             v=v,
@@ -865,16 +877,15 @@ class KrylovNewton(BaseMotion):
         )
         # y: (B, )
         # g: (1, B*A, D)
-        # KRYLOV_BASES: (K, B*A, D), K is the Krylov subspaces dimension.
-        # KRYLOV_EIGENVAL: (B, K)
-        # KRYLOV_EIGENVEC: (B, K, K)
+        # KRYLOV_EIGENVEC: (K, B*A, D), K is the Krylov subspaces dimension.
+        # KRYLOV_EIGENVAL: (B, K, )
         y_old = th.full_like(y, th.inf, device=self.device)
         # Main loop
         batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
         t_st = time.perf_counter()
         with th.no_grad():
             for i in range(self.maxiter_trans):
-                plist.append(X[:, None, :, 0].clone().numpy(force=True))  # TEST <<<<<<<<<<<<<
+                #plist.append(X[:, None, :, 0].clone().numpy(force=True))  # TEST <<<<<<<<<<<<<
                 # Section: check threshold  <<<
                 # threshold.
                 min_eig = KRYLOV_EIGENVAL[:, 0]  # (B, )
@@ -929,9 +940,8 @@ class KrylovNewton(BaseMotion):
                 n_local_batch = th.sum(select_mask_short)
                 X_ = X[:, select_mask, :]
                 g_ = g[:, select_mask, :]  # (1, ba, D)
-                krylov_bases_ = KRYLOV_BASES[:, select_mask, :]        # (K, ba, D)
+                sub_eigvec_ = KRYLOV_EIGENVEC[:, select_mask, :]        # (K, ba, D)
                 sub_eigval_ = KRYLOV_EIGENVAL[select_mask_short, ...]  # (b, K)
-                sub_eigvec_ = KRYLOV_EIGENVEC[select_mask_short, ...]  # (b, K, K)
 
                 atom_masks_ = atom_masks[:, select_mask, :]
                 batch_tensor_ = self.batch_tensor[select_mask_short]
@@ -953,17 +963,17 @@ class KrylovNewton(BaseMotion):
                 #print(f"neg_cut_val: {spectra_cut_off}")
                 T = th.zeros_like(sub_eigval_[:, :MORSE_INDEX + extra_krylov_dim])
                 T[:, :MORSE_INDEX] = sub_eigval_[:, :MORSE_INDEX].clamp(-spectra_cut_off, EIG_THRES_NEG)
-                T[:, MORSE_INDEX:] = sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim].clamp(EIG_THRES_POS, spectra_cut_off)
-                krylov_bases_cut_ = krylov_bases_[:MORSE_INDEX + extra_krylov_dim]
+                T[:, MORSE_INDEX:] = sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim].clamp(EIG_THRES_POS, None)
+                sub_eigvec_cut_ = sub_eigvec_[:MORSE_INDEX + extra_krylov_dim]
                 Vg = index_ops.index_reduce(
-                    th.sum(krylov_bases_cut_ * g_, dim=-1),
+                    th.sum(sub_eigvec_cut_ * g_, dim=-1),
                     batch_scatter_,
                     dim=1,
                     out_size=n_local_batch
                 )  # (K, b)
                 # the complement positive-definite space
                 #   x' += a * (I - V V^T) g, a > 0.
-                dX_complement = g_ - th.einsum("kbd, kb -> bd", krylov_bases_cut_, Vg.index_select(1, batch_scatter_))  # (1, ba, D)
+                dX_complement = g_ - th.einsum("kbd, kb -> bd", sub_eigvec_cut_, Vg.index_select(1, batch_scatter_))  # (1, ba, D)
                 # self.logger.debug(f"TRANSLATION: dX_complement:\n{dX_complement}")
                 # complement trust-reg:
                 dX_comp_square_ = th.sum(
@@ -975,8 +985,8 @@ class KrylovNewton(BaseMotion):
                     #   Section: trust region search (K, ba, D) (1, ba, D)
                     DELTA2_ = DELTA2[select_mask_short, ...]  # (b, 1)
                     steplength_ = _stp_cache
-                    mu = self._diag_trust_region(Vg, T, dX_comp_square_[0], DELTA2_, )*0.1
-                    #print(f"{i}: mu = {mu}")
+                    mu = self._diag_trust_region(Vg, T, dX_comp_square_[0], DELTA2_, )
+                    #print(f"{i}: mu = {mu.tolist()}")
                     #(D + mu D ^ -1)
                     T_inv = (T + mu * T.reciprocal()).reciprocal_()
                     complement_steplength = (mu + 1.).reciprocal_().index_select(0, batch_scatter_).unsqueeze(0)
@@ -986,10 +996,13 @@ class KrylovNewton(BaseMotion):
                     T_inv = T.reciprocal()
                     complement_steplength = _stp_cache
                 #   x' = - V_nk Q_kk Ainv_kk Q^T V^T g_n
-                sub_eigvec_cut_ = sub_eigvec_[:, :MORSE_INDEX + extra_krylov_dim, :MORSE_INDEX + extra_krylov_dim]
-                A_ = sub_eigvec_cut_ @ (T_inv.unsqueeze(-1) * sub_eigvec_cut_.mT)  # (b, K, K)
-                AVg = th.einsum("bij, jb -> bi", A_, Vg).index_select(0, batch_scatter_)  # (ba, K)
-                dX_tangent_ = th.einsum("kbd, bk -> bd", krylov_bases_cut_, AVg).unsqueeze(0)
+                # sub_eigvec_cut_: (k, ba, d), T_inv: (b, k)
+                dX_tangent_ = th.einsum(
+                    "kad, ak, ka -> ad",
+                    sub_eigvec_cut_,
+                    T_inv.index_select(0, batch_scatter_),
+                    Vg.index_select(1, batch_scatter_)
+                ).unsqueeze(0)
                 dX_ = th.addcmul(dX_tangent_, dX_complement, complement_steplength).neg_()
 
                 dX_norm_ = th.sum(
@@ -1045,11 +1058,13 @@ class KrylovNewton(BaseMotion):
                         index_ops.index_inner_product(g_, g_, 1, batch_scatter_, out_size=n_local_batch),
                         dim=-1, keepdim=True
                     ).sqrt_()  # (1, B, 1)
+                    #print(f"grad_norm: {g_norm_.squeeze().tolist()}")
                     # (b, 1)/((b, k)**2 + (b, 1))
                     g_Gg_norm_ = (th.einsum('bk,bk,bk->b', mu / (T ** 2 + mu), Vg.T, Vg.T).unsqueeze(-1)
                                   + (mu / (1. + mu)) ** 2 * dX_comp_square_[0]).sqrt_().reshape(1, -1, 1)
 
                     predicted_grad_desc_ = g_norm_ - g_Gg_norm_
+                    #print(f"predicted_grad_desc: {predicted_grad_desc_.squeeze().tolist()}")
                 else:
                     raise NotImplementedError
 
@@ -1077,13 +1092,10 @@ class KrylovNewton(BaseMotion):
 
                 # Section: Find Eigen at new points  <<<
                 # update initial guess v_
-                #   v_ = Q V[:, 0], the eigenvec with min eigenval given by last Lanczos iteration
-                v_ = th.einsum(
-                    "kbd, bk -> bd",
-                    krylov_bases_cut_, sub_eigvec_cut_[:, :, 0].index_select(0, batch_scatter_)
-                ).unsqueeze(0) + g_  # (1, ba, D)
+                #   v_ = Q V[:, 0], the invariant space given by last Lanczos iteration
+                v_ = th.mean(sub_eigvec_cut_, dim=0, keepdim=True) # (1, ba, D)
                 #   Lanczos finder
-                y_, g_, krylov_bases_, sub_eigval_, sub_eigvec_ = self.EigenFinder.run(
+                y_, g_, sub_eigval_, sub_eigvec_ = self.EigenFinder.run(
                     func=func,
                     X=X_,
                     v=v_,
@@ -1107,8 +1119,7 @@ class KrylovNewton(BaseMotion):
                 v.index_copy_(1, select_indices, v_)
                 X.index_copy_(1, select_indices, X_)
                 g.index_copy_(1, select_indices, g_)
-                KRYLOV_BASES.index_copy_(1, select_indices, krylov_bases_)
-                KRYLOV_EIGENVEC.index_copy_(0, select_indices_short, sub_eigvec_)
+                KRYLOV_EIGENVEC.index_copy_(1, select_indices, sub_eigvec_)
                 KRYLOV_EIGENVAL.index_copy_(0, select_indices_short, sub_eigval_)
 
                 if self.steplength_sheme == 'trust_region':
@@ -1125,16 +1136,18 @@ class KrylovNewton(BaseMotion):
                     _DELTA = DELTA2_.sqrt()
                     _DELTA = th.where(
                         rho >= IOTA2,
-                        _DELTA + 0.5 * (self._trust_reg_rad_max - _DELTA),
+                        (_DELTA * 1.1).clamp_max_(self._trust_reg_rad_max),
                         th.where(
-                            rho >= IOTA1,
+                            (rho >= IOTA1), #| (g_norm_new_ < IOTA2),
                             _DELTA,
-                            _DELTA - 0.5 * (_DELTA - self._trust_reg_rad_min)
+                            (_DELTA * 0.5).clamp_min_(self._trust_reg_rad_min)
                         )
                     )
                     DELTA2_ = _DELTA.square_().reshape(-1, 1)
                     DELTA2.index_copy_(0, select_indices_short, DELTA2_)
-                    #print(f"Delta2 now: {DELTA2_}")
+                    #print(f"\npredicted_grad_desc: {predicted_grad_desc_.squeeze().tolist()}\n"
+                    #      f"g_norm: {g_norm_new_.squeeze().tolist()}\nrho: {rho.squeeze().tolist()}\n"
+                    #      f"Delta2 now: {DELTA2_.squeeze().tolist()}\n")
 
                 # Section DEBUG
                 #var_dict = {}
@@ -1156,7 +1169,7 @@ class KrylovNewton(BaseMotion):
         if output_grad:
             return y, X, g
         else:
-            return y, X, plist  # TEST <<<<<<
+            return y, X#, plist  # TEST <<<<<<
 
 
 class KrylovDynamics(BaseMotion):
@@ -1375,13 +1388,13 @@ class KrylovDynamics(BaseMotion):
         X = X.to(self.device)
         X_diff = X_diff.to(self.device)
         v = X_diff.mul(atom_masks)
-        plist = list()  # TEST <<<<
+        #plist = list()  # TEST <<<<
         is_main_loop_converge = False
         # initialize
         #   Constants
         _stp_cache = th.scalar_tensor(1., device=self.device, dtype=X.dtype)
-        EIG_THRES_NEG = self.neg_spectra_cutoff
-        EIG_THRES_POS = self.pos_spectra_cutoff
+        EIG_THRES_NEG = th.scalar_tensor(self.neg_spectra_cutoff, dtype=X.dtype, device=self.device)
+        EIG_THRES_POS = th.scalar_tensor(self.pos_spectra_cutoff, dtype=X.dtype, device=self.device)
         MORSE_INDEX = self._morse_index
         if n_atom <= (MORSE_INDEX + extra_krylov_dim):
             raise ValueError(f"The sum of the Morse index and extra Krylov dimensions is larger than total free degree.")
@@ -1396,7 +1409,7 @@ class KrylovDynamics(BaseMotion):
         N_min = self.N_min
 
         #   init Krylov
-        y, g, KRYLOV_BASES, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC = self.EigenFinder.run(
+        y, g, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC = self.EigenFinder.run(
             func=func,
             X=X,
             v=v,
@@ -1422,7 +1435,7 @@ class KrylovDynamics(BaseMotion):
         t_st = time.perf_counter()
         with th.no_grad():
             for i in range(self.maxiter_trans):
-                plist.append(X[:, None, :, 0].clone().numpy(force=True))  # TEST <<<<<<<<<<<<<
+                #plist.append(X[:, None, :, 0].clone().numpy(force=True))  # TEST <<<<<<<<<<<<<
                 # Section: check threshold  <<<
                 # threshold.
                 min_eig = KRYLOV_EIGENVAL[:, 0]  # (B, )
@@ -1477,9 +1490,8 @@ class KrylovDynamics(BaseMotion):
                 n_local_batch = th.sum(select_mask_short)
                 X_ = X[:, select_mask, :]
                 g_ = g[:, select_mask, :]  # (1, ba, D)
-                krylov_bases_ = KRYLOV_BASES[:, select_mask, :]        # (K, ba, D)
+                sub_eigvec_ = KRYLOV_EIGENVEC[:, select_mask, :]        # (K, ba, D)
                 sub_eigval_ = KRYLOV_EIGENVAL[select_mask_short, ...]  # (b, K)
-                sub_eigvec_ = KRYLOV_EIGENVEC[select_mask_short, ...]  # (b, K, K)
 
                 atom_masks_ = atom_masks[:, select_mask, :]
                 batch_tensor_ = self.batch_tensor[select_mask_short]
@@ -1497,37 +1509,38 @@ class KrylovDynamics(BaseMotion):
                 # Section: Transition to the saddle  <<<
                 # Krylov subspace Newton Search
                 #   spectra modification. The unconverged Krylov eigenvec are not reliable, thus dropping them.
+                spectra_cut_off = (
+                                          MORSE_INDEX * sub_eigval_[:, 0].abs() +
+                                          extra_krylov_dim * sub_eigval_[:, -1] +
+                                          batch_tensor_ - MORSE_INDEX - extra_krylov_dim
+                                  ) / batch_tensor_
+                spectra_cut_off.unsqueeze_(-1)
                 T = th.zeros_like(sub_eigval_[:, :MORSE_INDEX + extra_krylov_dim])
-                T[:, :MORSE_INDEX] = sub_eigval_[:, :MORSE_INDEX].clamp_(-1., EIG_THRES_NEG)
-                T[:, MORSE_INDEX:] = th.where(
-                    sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim] < EIG_THRES_POS,
+                T[:, :MORSE_INDEX] = sub_eigval_[:, :MORSE_INDEX].clamp(-spectra_cut_off, EIG_THRES_NEG)
+                T[:, MORSE_INDEX:] = sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim].clamp(
                     EIG_THRES_POS,
-                    sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim],
+                    spectra_cut_off
                 )
                 T_inv = T.reciprocal()
 
-                krylov_bases_cut_ = krylov_bases_[:MORSE_INDEX + extra_krylov_dim]
+                sub_eigvec_cut_ = sub_eigvec_[:MORSE_INDEX + extra_krylov_dim]
                 Vg = index_ops.index_reduce(
-                    th.sum(krylov_bases_cut_ * g_, dim=-1),
+                    th.sum(sub_eigvec_cut_ * g_, dim=-1),
                     batch_scatter_,
                     dim=1,
                     out_size=n_local_batch
                 )  # (K, b)
                 # the complement positive-definite space
                 #   x' += a * (I - V V^T) g, a > 0.
-                dX_complement = g_ - th.einsum("kbd, kb -> bd", krylov_bases_cut_, Vg.index_select(1, batch_scatter_))  # (1, ba, D)
+                dX_complement = g_ - th.einsum("kbd, kb -> bd", sub_eigvec_cut_, Vg.index_select(1, batch_scatter_))  # (1, ba, D)
                 complement_steplength = _stp_cache
                 #   x' = - V_nk Q_kk Ainv_kk Q^T V^T g_n
-                sub_eigvec_cut_ = sub_eigvec_[:, :MORSE_INDEX + extra_krylov_dim, :MORSE_INDEX + extra_krylov_dim]
-                A_ = sub_eigvec_cut_ @ (T_inv.unsqueeze(-1) * sub_eigvec_cut_.mT)  # (b, K, K)
-                #self.logger.debug(f"TRANSLATION: T_inv:\n{T_inv}")
-                #self.logger.debug(f"TRANSLATION: A:\n{A_}")
-                #self.logger.debug(f"TRANSLATION: K_EIG_VEC:\n{sub_eigvec_}")
-                #self.logger.debug(f"TRANSLATION: K_EIG_VAL:\n{sub_eigval_}")
-                #self.logger.debug(f"TRANSLATION: K_BASES:{krylov_bases_.shape}\n{krylov_bases_}")
-
-                AVg = th.einsum("bij, jb -> bi", A_, Vg).index_select(0, batch_scatter_)  # (ba, K)
-                dX_tangent_ = th.einsum("kbd, bk -> bd", krylov_bases_cut_, AVg).unsqueeze(0)
+                dX_tangent_ = th.einsum(
+                    "kad, ak, ka -> ad",
+                    sub_eigvec_cut_,
+                    T_inv.index_select(0, batch_scatter_),
+                    Vg.index_select(1, batch_scatter_)
+                ).unsqueeze(0)
                 #self.logger.debug(f"TRANSLATION: dX_tengent:\n{dX_tangent_}")
                 Ginv_g_ = th.add(dX_tangent_, dX_complement)  # (1, ba, d)
                 F_ = Ginv_g_.neg() * atom_masks_  # reuse the memory of dX_tangent_
@@ -1589,12 +1602,9 @@ class KrylovDynamics(BaseMotion):
                 # Section: Find Eigen at new points  <<<
                 # update initial guess v_
                 #   v_ = Q V[:, 0], the eigenvec with min eigenval given by last Lanczos iteration
-                v_ = th.einsum(
-                    "kbd, bk -> bd",
-                    krylov_bases_cut_, sub_eigvec_cut_[:, :, 0].index_select(0, batch_scatter_)
-                ).unsqueeze(0) + g_  # (1, ba, D)
+                v_ = th.mean(sub_eigvec_cut_, dim=0, keepdim=True)  # (1, ba, D)
                 #   Lanczos finder
-                y_, g_, krylov_bases_, sub_eigval_, sub_eigvec_ = self.EigenFinder.run(
+                y_, g_, sub_eigval_, sub_eigvec_ = self.EigenFinder.run(
                     func=func,
                     X=X_,
                     v=v_,
@@ -1618,8 +1628,7 @@ class KrylovDynamics(BaseMotion):
                 v.index_copy_(1, select_indices, v_)
                 X.index_copy_(1, select_indices, X_)
                 g.index_copy_(1, select_indices, g_)
-                KRYLOV_BASES.index_copy_(1, select_indices, krylov_bases_)
-                KRYLOV_EIGENVEC.index_copy_(0, select_indices_short, sub_eigvec_)
+                KRYLOV_EIGENVEC.index_copy_(1, select_indices, sub_eigvec_)
                 KRYLOV_EIGENVAL.index_copy_(0, select_indices_short, sub_eigval_)
 
                 t.index_copy_(1, select_indices, t_)
@@ -1636,5 +1645,5 @@ class KrylovDynamics(BaseMotion):
         if output_grad:
             return y, X, g
         else:
-            return y, X, plist  # TEST <<<<<<
+            return y, X#, plist  # TEST <<<<<<
 
