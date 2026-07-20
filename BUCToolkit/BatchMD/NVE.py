@@ -57,23 +57,46 @@ class NVE(_BaseMD):
             compile_kwargs
         )
 
+    def _register_dump_vars(self):
+        """Return the legacy default NVE trajectory-column names.
+
+        Returns:
+            List ``['Energy', 'X', 'V', 'Force']`` in binary-column order.
+        """
+        return ['Energy', 'X', 'V', 'Force']
+
     def _updateXV(
-            self, X, V, Force,
+            self, s,
             func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
             masses, atom_masks, is_grad_func_contain_y, batch_indices,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """ Update X, V, Force, and return X, V, Energy, Force. """
-        #X: th.Tensor = X.contiguous()
-        #V: th.Tensor = V.contiguous()
-        #masses: th.Tensor = masses.contiguous()
+    ) -> None:
+        """Advance one velocity-Verlet NVE step in place.
+
+        Args:
+            s: Live state containing coordinates, velocities, forces, and
+                energies.
+            func: Potential-energy callable evaluated at the new coordinates.
+            grad_func_: Normalized gradient callable used by ``_calc_EF``.
+            func_args: Positional arguments forwarded to ``func``.
+            func_kwargs: Keyword arguments forwarded to ``func``.
+            grad_func_args: Positional arguments forwarded to ``grad_func_``.
+            grad_func_kwargs: Keyword arguments forwarded to ``grad_func_``.
+            masses: Atomic masses broadcastable to ``s.X``.
+            atom_masks: Selective-dynamics mask applied to the new forces.
+            is_grad_func_contain_y: Whether the gradient callable accepts the
+                energy output.
+            batch_indices: Irregular-batch atom counts, or ``None`` for a
+                regular batch. The NVE update itself does not split tensors.
+
+        Returns:
+            None. ``s.X``, ``s.V``, ``s.Force``, and ``s.Energy`` are updated
+            in place.
+        """
         with th.no_grad():
-            # X = X + V * self.time_step + (Force / (2. * masses)) * self.time_step ** 2 * 9.64853329045427e-3
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-            X.add_(V, alpha=self.time_step)
-            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3  # half-step veloc. update, to avoid saving 2 Forces Tensors.
-            # Update V
-            Energy, Force = self._calc_EF(
-                X,
+            s.V.addcdiv_(s.Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            s.X.add_(s.V, alpha=self.time_step)
+            Energy, Forces = self._calc_EF(
+                s.X,
                 func,
                 func_args,
                 func_kwargs,
@@ -83,9 +106,8 @@ class NVE(_BaseMD):
                 self.require_grad,
                 is_grad_func_contain_y
             )
-            Force.mul_(atom_masks)
+            Forces.mul_(atom_masks)
 
-            # V = V + (Force / (2. * masses)) * self.time_step * 9.64853329045427e-3
-            V.addcdiv_(Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
-
-        return X, V, Energy, Force
+            s.V.addcdiv_(Forces, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            s.Energy = Energy
+            s.Force = Forces

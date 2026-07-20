@@ -7,7 +7,7 @@
 #  Environment: Python 3.12
 
 # ruff: noqa: E701, E702, E703
-from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
+from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Set, Tuple  # noqa: F401
 import os
 
 import torch as th
@@ -63,6 +63,10 @@ class _BaseConstrMD(_BaseMD):
         run: run BatchMD.
 
     """
+
+    #: Additional allowed dump / log names beyond the base MD set.
+    ALLOWED_QUANTITIES: Set[str] = _BaseMD.ALLOWED_QUANTITIES | {'Fc', 'G', 'w'}
+
     def __init__(
             self,
             time_step: float,
@@ -163,6 +167,38 @@ class _BaseConstrMD(_BaseMD):
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
         self._do_qr(jac)
+        # Register constraint diagnostics so they appear in StdContainer
+        # s / s_cpu and are automatically dumped and logged.
+        _n_batch = X.shape[0]
+        _n_constr = self.R.shape[-1]
+        _Fc = th.zeros(_n_batch, _n_constr, device=self.device, dtype=FLOAT_TYPE)
+        if self.require_fixman:
+            _G = th.zeros(_n_batch, _n_constr, device=self.device, dtype=FLOAT_TYPE)
+            _w = th.zeros(_n_batch, device=self.device, dtype=FLOAT_TYPE)
+            _constraint_vars = {'Fc': _Fc, 'G': _G, 'w': _w}
+        else:
+            _constraint_vars = {'Fc': _Fc}
+
+        # ``initialize()`` runs for every invocation of ``run()``. Keep the
+        # registration persistent, but refresh the placeholder tensors because
+        # a later run may use a different batch size or number of constraints.
+        # Registering the same names twice would otherwise raise on the second
+        # run even though ``reset_register_vars()`` intentionally preserves
+        # late-bound extension quantities.
+        self._extra_vars.update(_constraint_vars)
+        _new_print_vars = {
+            _name: _value for _name, _value in _constraint_vars.items()
+            if _name not in self._extra_print_names
+        }
+        _new_dump_vars = {
+            _name: _value for _name, _value in _constraint_vars.items()
+            if _name not in self._extra_dump_names
+        }
+        if _new_print_vars:
+            self.register_extra_print_vars(**_new_print_vars)
+        if _new_dump_vars:
+            self.register_extra_dump_vars(**_new_dump_vars)
+
         ProjV = self._project1(V_init)
         Ek = th.sum(
             masses * V_init ** 2,

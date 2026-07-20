@@ -5,6 +5,8 @@
 #  Environment: Python 3.12
 import logging
 import sys
+import queue
+import threading
 from itertools import accumulate
 from typing import Dict, Any, Literal, Optional, Sequence, Tuple, List, Callable
 import time
@@ -19,11 +21,17 @@ from BUCToolkit.BatchOptim._utils._line_search import LineSearch
 from BUCToolkit.BatchOptim._utils._warnings import NotConvergeWarning
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.Bases.BaseMotion import BaseMotion
+from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
 
 
 class _BaseOpt(BaseMotion, ABC):
+
+    #: Quantities known to the optimisation framework that may appear in
+    #: ``dump_quantities`` / ``log_quantities``.
+    ALLOWED_QUANTITIES: set = {'Energy', 'X', 'Force', 'E_diff', 'F_eps', 'X_grad'}
+
     def __init__(
             self,
             iter_scheme: str,
@@ -40,10 +48,12 @@ class _BaseOpt(BaseMotion, ABC):
             device: str | th.device = 'cpu',
             verbose: int = 2,
             _hold_samples: bool = False,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
     ) -> None:
         r"""
         A Base Framework of Algorithm for optimization.
-        
+
         Args:
             E_threshold: float, threshold of difference of func between 2 iterations.
             F_threshold: float, threshold of gradient of func.
@@ -100,12 +110,22 @@ class _BaseOpt(BaseMotion, ABC):
         self.is_concat_X = False   # whether the output of `func` was concatenated.
 
         self._hold_samples = _hold_samples
-        self.device = device
+        self.device = th.device(device)
         self.verbose = verbose
+
+        # If True, `dumper.close()` is skipped in `run()`, allowing continuous
+        # dumping across multiple `run()` calls (used by `StructureOptimization`).
+        self._HOLD_DUMPER = False
+
+        # Optional dump-header metadata — set before ``run()`` if needed.
+        # Format matches ``_BaseMD``: per-structure lists of atomic numbers.
+        self.cell_vec: th.Tensor | np.ndarray | None = None
+        self.atomic_numbers: List[List[int]] | None = None
 
         # logger
         super().__init__(output_file)
         self.init_logger('Main.OPT')
+        self._setup_register_vars(dump_quantities, log_quantities)
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -117,6 +137,122 @@ class _BaseOpt(BaseMotion, ABC):
 
         """
         return func_args, func_kwargs, grad_func_args, grad_func_kwargs
+
+    def set_system_info(
+            self,
+            cell_vec: th.Tensor | np.ndarray | None = None,
+            atomic_numbers: List[int] | np.ndarray | th.Tensor | None = None,
+    ):
+        """Register static system information used by trajectory output.
+
+        Args:
+            cell_vec: Optional unit-cell vectors. A regular batch normally uses
+                shape ``[n_batch, 3, 3]``; an irregular batch still stores one
+                cell per real structure. The values are metadata and do not
+                alter the optimization calculation.
+            atomic_numbers: Optional atomic numbers corresponding to the active
+                coordinates. Regular data may be nested per structure;
+                irregular data may be flat or concatenated in atom order.
+
+        Returns:
+            None. Non-``None`` inputs replace the corresponding values retained
+            on the optimizer for subsequent :meth:`run` calls.
+        """
+        if cell_vec is not None:
+            self.cell_vec = cell_vec
+        if atomic_numbers is not None:
+            self.atomic_numbers = atomic_numbers
+
+    def _do_async_dump(self, q: queue.Queue):
+        """Consumer thread: drain queue and call ``dumper.step()``.
+
+        ``self._dump_done`` is set in ``finally`` to guarantee the
+        handshake even on exception.
+
+        Args:
+            q: Single-slot queue. Normal items contain
+                ``(dumper, sync_event, *cpu_tensors)`` and ``None`` terminates
+                the thread. ``sync_event`` is a CUDA event or ``None`` on CPU;
+                tensors follow :meth:`get_dump_vars` order.
+
+        Returns:
+            None. Write failures are reported through ``self.logger`` and the
+            completion event is still set so the optimizer cannot deadlock.
+        """
+        while True:
+            items = q.get()
+            if items is None:
+                break
+            try:
+                dumper, sync, *rest = items
+                if sync is not None:
+                    sync.synchronize()
+                    rest = [t.numpy() for t in rest]
+                dumper.step(*rest)
+            except Exception as e:
+                self.logger.error(f"Error: Failed to dump data due to \"{e}\"")
+            finally:
+                self._dump_done.set()
+
+    def _do_async_print(self, q: queue.Queue):
+        """Consumer thread: format and log.
+
+        Queue items: ``(event, numit, converge_str, t_st, *log_vals)``
+        where *log_vals* are packed in :meth:`get_log_vars` order.
+        Scalars (ndim ≤ 1) are printed under an ``ITERATION`` header;
+        arrays (ndim ≥ 2) go through ``handle_arrays_print``.
+        ``self._print_done`` is set in ``finally``.
+
+        Args:
+            q: Single-slot queue. Normal items have the form
+                ``(sync_event, iteration, converge_flags, step_start_time,
+                *cpu_tensors)``; tensors follow :meth:`get_log_vars` order and
+                ``None`` terminates the thread.
+
+        Returns:
+            None. Formatting failures are logged and always release the shared
+            snapshot buffer through ``self._print_done``.
+        """
+        numit = 0
+        while True:
+            items = q.get()
+            if items is None:
+                break
+            try:
+                sync, numit, converge_str, t_st = items[0], items[1], items[2], items[3]
+                if sync is not None:
+                    sync.synchronize()
+                # Map log-var name → value (items[4:] in log_names order)
+                _data = dict(zip(self.get_log_vars(), items[4:]))
+                _valid = [(_n, _v) for _n, _v in _data.items() if _n and _v is not None]
+                _scalars = [(_n, _v) for _n, _v in _valid if _v.ndim <= 1]
+                _arrays  = [(_n, _v) for _n, _v in _valid if _v.ndim >= 2]
+
+                if _scalars and self.verbose > 0:
+                    _DISP = {'Energy': 'Energies', 'E_diff': 'MAD_energies', 'F_eps': 'MAX_F'}
+                    _lines = [f'ITERATION {numit:>5d}']
+                    for _n, _v in _scalars:
+                        _label = _DISP.get(_n, _n)
+                        _lines.append(f' {_label:<14s}: {np.array2string(_v.numpy(), **SCIENTIFIC_ARRAY_FORMAT)}')
+                    _lines.append(f' Converged:    {np.array2string(converge_str, **STRING_ARRAY_FORMAT)}')
+                    _lines.append(f' TIME:         {time.perf_counter() - t_st:>6.4f} s')
+                    self.logger.info('\n'.join(_lines))
+
+                if _arrays and self.verbose > 1:
+                    # Map internal names to display labels (X -> Coordinates,
+                    # X_grad -> Forces with sign flip)
+                    _ARR_DISP = {'X': 'Coordinates', 'X_grad': 'Forces'}
+                    _arr_names = [_ARR_DISP.get(_n, _n) for _n, _ in _arrays]
+                    _arr_vals  = [(-_v if _n == 'X_grad' else _v) for _n, _v in _arrays]
+                    self.handle_arrays_print(
+                        self.logger, self.batch_indices, self.batch_slice_indx,
+                        [_arr_vals], [_arr_names],
+                        verbose=self.verbose,
+                    )
+            except Exception as e:
+                self.logger.error(f"Error: Failed to logout at {numit}-th iteration due to \"{e}\".")
+            finally:
+                self._print_done.set()
 
     def set_batch_updater(
             self,
@@ -171,6 +307,9 @@ class _BaseOpt(BaseMotion, ABC):
         """
         Run the Optimization Algorithm.
 
+        Set ``self.cell_vec`` and ``self.atomic_numbers`` before calling
+        to include them in the dump header group.
+
         Args:
             func: the main function of instantiated torch.nn.Module class.
             X: Tensor[n_batch, n_atom, 3], the atom coordinates that input to func.
@@ -218,7 +357,8 @@ class _BaseOpt(BaseMotion, ABC):
                 raise TypeError(f'Invalid type of batch_indices {type(batch_indices)}. '
                                 f'It must be List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None')
             for i in batch_indices: assert isinstance(i, int), f'All elements in batch_indices must be int, but occurred {type(i)}'
-            batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
+            self.batch_indices = batch_indices
+            self.batch_slice_indx = [0] + list(accumulate(batch_indices))  # convert n_atom of each batch into split point of each batch
             self.batch_tensor = th.as_tensor(batch_indices, device=self.device)  # the tensor version of batch_indices which is a List.
             self.batch_scatter = th.repeat_interleave(
                 th.arange(0, len(batch_indices), dtype=th.int64, device=self.device),
@@ -238,7 +378,8 @@ class _BaseOpt(BaseMotion, ABC):
                 (n_batch, 1, 1), fill_value=self.steplength, device=self.device, dtype=th.float32
             )  # (n_batch, sumN, 1), initial step length
             batch_tensor_indx_cache = None
-            batch_slice_indx = None
+            self.batch_indices = None
+            self.batch_slice_indx = None
             self.batch_tensor = None
             self.batch_scatter = None
 
@@ -287,7 +428,7 @@ class _BaseOpt(BaseMotion, ABC):
             self.logger.info('-' * 100)
             self.logger.info(f'Iteration Scheme: {self.iterform}')
             self.logger.info('-' * 100)
-        # MAIN LOOP
+
         with th.no_grad():
             with th.set_grad_enabled(require_grad):
                 X.requires_grad_(require_grad)
@@ -316,311 +457,453 @@ class _BaseOpt(BaseMotion, ABC):
             X = X.detach()
             # Section: initialize custom algorithm state.
             self.initialize_algo_param()
-            # cache for dynamically changed batch indices due to convergence, avoiding reallocate mem.
-            for numit in range(maxiter):
-                # Calc. Criteria
-                E_diff = energies - energies_old
-                E_eps = th.abs(E_diff)  # (n_batch, )
-                energies_old.copy_(energies)
-                # manage the irregular tensors
-                if self.is_concat_X:
-                    # (1, n_batch*n_atom, 3)
-                    F_eps = index_reduce(
-                        th.max(th.abs(X_grad[0]), dim=-1).values, self.batch_scatter, 0, 'amax', -1.
-                    )
-                    f_converge = F_eps < self.F_threshold
-                    converge_mask = (E_eps < self.E_threshold) & f_converge  # (n_true_batch, ), to stop the update of converged samples.
-                    converge_check = converge_mask
-                    self.converge_mask = converge_check
-                    converge_str = converge_check.numpy(force=True)
-                    converge_mask = converge_mask.reshape(1, -1, 1)[:, self.batch_scatter, ...]  # (1, n_batch*n_atom, 3)
-                else:
-                    F_eps = th.amax(th.abs(X_grad), dim=(-2, -1))  # (n_batch, n_atom, 3) -> (n_batch)
-                    f_converge = (F_eps < self.F_threshold).reshape(-1, 1, 1)
-                    converge_mask = (E_eps < self.E_threshold).reshape(-1, 1, 1) & f_converge  # To stop the update of converged samples.
-                    converge_check = converge_mask[:, 0, 0]
-                    self.converge_mask = converge_check
-                    converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
 
-                # Print information / Verbose
-                if self.verbose > 0:
-                    self.logger.info(f"ITERATION {numit:>5d}\n "
-                                     f"MAD_energies: {np.array2string(E_diff.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"MAX_F:        {np.array2string(F_eps.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"Energies:     {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                                     f"Converged:    {np.array2string(converge_str, **STRING_ARRAY_FORMAT)}\n "
-                                     f"TIME:         {time.perf_counter() - t_st:>6.4f} s")
-                if self.verbose > 1:
-                    # split batches if specified batch
-                    if batch_indices is not None:
-                        X_np = X.numpy(force=True)
-                        X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
-                        if self.verbose > 2:
-                            F_np = (- X_grad).numpy(force=True)
-                            F_tup = np.split(F_np, batch_slice_indx[1:-1], axis=1)
-                    else:
-                        X_tup = (X.numpy(force=True),)
-                        if self.verbose > 2:
-                            F_tup = (- X_grad.numpy(force=True),)
-                    self.logger.info(f" Coordinates:\n")
-                    X_str = [
-                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                        for xi in X_tup
-                    ]
-                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
-                if self.verbose > 2:
-                    self.logger.info(f" Forces:\n")
-                    X_str = [
-                        np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                        for xi in F_tup
-                    ]
-                    [self.logger.info(f'{x_str}\n') for x_str in X_str]
+            # ================================================================
+            # Section: async dump infrastructure
+            # ================================================================
+            dumper = self.dumper
+            dump_names = self.get_dump_vars()
+            log_names  = self.get_log_vars()
+            total_names = self.get_transfer_vars()
+            _is_cuda = (self.device.type == 'cuda')
 
-                # judge thres
-                if th.all(self.converge_mask):
-                    is_main_loop_converge = True
-                    break
+            # --- state container (all transfer vars, lazily filled) ---
+            s = StdContainer(Energy=energies, X=X, Force=-X_grad)
+            # Add log-only vars that aren't yet on s
+            for _n in total_names:
+                if not hasattr(s, _n):
+                    setattr(s, _n, th.empty_like(energies) if _n in ('E_diff', 'F_eps') else th.empty_like(X))
 
-                #g: th.Tensor = th.flatten(X_grad, 1, 2).unsqueeze(-1).contiguous()  # (n_batch, n_atom*3, 1)
-                # Section: update batch
-                if not self._hold_samples:
-                    func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                        ~converge_check,
-                        func_args,
-                        func_kwargs,
-                        grad_func_args,
-                        grad_func_kwargs
-                    )
+            # --- header group (static metadata, 1 cycle) ---
+            if self.cell_vec is None:
+                _cell_np = np.zeros((n_true_batch, 3, 3), dtype=np.float32)
+            elif isinstance(self.cell_vec, th.Tensor):
+                _cell_np = self.cell_vec.numpy(force=True)
+            else:
+                _cell_np = np.asarray(self.cell_vec, dtype=np.float32)
+
+            # --- resolve atomic_numbers to numpy ---
+            #   Regular batch  → 2-D (n_batch, n_atom)
+            #   Irregular batch → 1-D (Σn_i,)
+            _atm = self.atomic_numbers
+            if _atm is None:
+                # No atomic numbers provided → zeros placeholder
+                _total = X.shape[1] if self.is_concat_X else n_batch * n_atom
+                _atm_np = np.zeros(_total, dtype=np.int64)
+            elif isinstance(_atm, th.Tensor):
+                # Flat or 2-D tensor → ravel for irregular, keep for regular
+                _atm_np = _atm.numpy(force=True).astype(np.int64)
+                if self.is_concat_X and _atm_np.ndim == 2:
+                    _atm_np = _atm_np.ravel()
+            elif isinstance(_atm, (list, tuple)) and len(_atm) > 0 and isinstance(_atm[0], (list, tuple)):
+                # Nested List[List[int]] (per-structure, matches _BaseMD format)
+                _parts = [np.asarray(sub, dtype=np.int64) for sub in _atm]
+                _atm_np = np.stack(_parts) if not self.is_concat_X else np.concatenate(_parts)
+            else:
+                # Flat list / 1-D array
+                _atm_np = np.asarray(_atm, dtype=np.int64)
+                if self.is_concat_X and _atm_np.ndim == 2:
+                    _atm_np = _atm_np.ravel()
+
+            _fix_np = atom_masks.numpy(force=True)
+
+            if self.batch_tensor is not None:
+                _batch_np = self.batch_tensor.numpy(force=True)
+                dumper.start_from_arrays(1, _batch_np, _cell_np, _atm_np, _fix_np)
+                dumper.step(_batch_np, _cell_np, _atm_np, _fix_np)
+            else:
+                dumper.start_from_arrays(1, _cell_np, _atm_np, _fix_np)
+                dumper.step(_cell_np, _atm_np, _fix_np)
+
+            # --- data group (trajectory, dynamic steps) ---
+            # Allocate CPU (pinned) + optional GPU staging buffers for every
+            # name in total_names (union of dump + log).  The same s_cpu is
+            # shared by both consumers — each picks the attrs it needs.
+            _dump_queue: queue.Queue = queue.Queue(maxsize=1)
+            _log_queue: queue.Queue = queue.Queue(maxsize=1)
+            _s_cpu, _s_buf = self._allocate_cpu_buffers(s, total_names, self.device, require_buffer=self._hold_samples)
+            if _is_cuda:
+                _copy_stream = th.cuda.Stream()
+                _copy_event = th.cuda.Event()
+            else:
+                _copy_stream = None  # CPU path: no async D2H
+                _copy_event = None
+            # Prototype arrays for the dumper (shapes / dtypes from _s_cpu)
+            _protos = tuple(getattr(_s_cpu, name).numpy() for name in dump_names)
+            dumper.start_from_arrays(-1, *_protos, names=dump_names)
+
+            # Launch async consumer threads (shared by CPU and CUDA paths)
+            _dump_thread = threading.Thread(target=self._do_async_dump, args=(_dump_queue,), daemon=True)
+            _log_thread = threading.Thread(target=self._do_async_print, args=(_log_queue,), daemon=True)
+            # Handshake events — initially set so iteration 0 passes without blocking
+            self._dump_done = threading.Event()
+            self._print_done = threading.Event()
+            self._dump_done.set()
+            self._print_done.set()
+
+            try:
+                _dump_thread.start()
+                _log_thread.start()
+
+                # cache for dynamically changed batch indices due to convergence, avoiding reallocate mem.
+                # MAIN LOOP
+                for numit in range(maxiter):
+                    # Calc. Criteria
+                    E_diff = energies - energies_old
+                    E_eps = th.abs(E_diff)  # (n_batch, )
+                    energies_old.copy_(energies)
+                    # manage the irregular tensors
                     if self.is_concat_X:
+                        # (1, n_batch*n_atom, 3)
+                        F_eps = index_reduce(
+                            th.max(th.abs(X_grad[0]), dim=-1).values, self.batch_scatter, 0, 'amax', -1.
+                        )
+                        f_converge = F_eps < self.F_threshold
+                        converge_mask = (E_eps < self.E_threshold) & f_converge  # (n_true_batch, ), to stop the update of converged samples.
+                        converge_check = converge_mask
+                        self.converge_mask = converge_check
+                        converge_str = converge_check.numpy(force=True)
+                        converge_mask = converge_mask.reshape(1, -1, 1)[:, self.batch_scatter, ...]  # (1, n_batch*n_atom, 3)
+                    else:
+                        F_eps = th.amax(th.abs(X_grad), dim=(-2, -1))  # (n_batch, n_atom, 3) -> (n_batch)
+                        f_converge = (F_eps < self.F_threshold).reshape(-1, 1, 1)
+                        converge_mask = (E_eps < self.E_threshold).reshape(-1, 1, 1) & f_converge  # To stop the update of converged samples.
+                        converge_check = converge_mask[:, 0, 0]
+                        self.converge_mask = converge_check
+                        converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
+
+                    # --- dump + print snapshot ---
+                    # Update live state container with current iteration values
+                    s.Energy = energies; s.X = X; s.Force = -X_grad
+                    s.E_diff = E_diff; s.F_eps = F_eps; s.X_grad = X_grad
+                    self._dump_done.clear()
+                    if _is_cuda:
+                        # GPU: D2D staging → async D2H on copy stream
+                        self._transfer_buffers_D2H(s, _s_buf, _s_cpu, total_names, _copy_stream, self.device)
+                        _copy_event.record(_copy_stream)
+                        _dump_queue.put((dumper, _copy_event, *(getattr(_s_cpu, n) for n in dump_names)))
+                        if self.verbose > 0:
+                            self._print_done.clear()
+                            _log_queue.put((_copy_event, numit, converge_str, t_st,
+                                            *(getattr(_s_cpu, n) for n in log_names)))
+                    else:
+                        # CPU: synchronous snapshot s → _s_cpu, then dispatch
+                        for _n in total_names:
+                            getattr(_s_cpu, _n).copy_(getattr(s, _n))
+                        _dump_queue.put((dumper, None, *(getattr(_s_cpu, n) for n in dump_names)))
+                        if self.verbose > 0:
+                            self._print_done.clear()
+                            _log_queue.put((None, numit, converge_str, t_st,
+                                            *(getattr(_s_cpu, n) for n in log_names)))
+                    # judge thres
+                    if th.all(self.converge_mask):
+                        is_main_loop_converge = True
+                        break
+
+                    #g: th.Tensor = th.flatten(X_grad, 1, 2).unsqueeze(-1).contiguous()  # (n_batch, n_atom*3, 1)
+                    # Section: update batch
+                    if not self._hold_samples:
+                        func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
+                            ~converge_check,
+                            func_args,
+                            func_kwargs,
+                            grad_func_args,
+                            grad_func_kwargs
+                        )
+                        if self.is_concat_X:
+                            select_mask = ~(converge_mask[0, :, 0])
+                            select_mask_short = ~converge_check
+                            energies_ = energies[select_mask_short]
+                            X_grad_ = X_grad[:, select_mask, :]
+                            X_grad_old_ = X_grad_old[:, select_mask, :]
+                            p_ = p[:, select_mask, :]
+                            X_ = X[:, select_mask, :]
+                            displace_ = displace[:, select_mask, :]
+                            atom_masks_ = atom_masks[:, select_mask, :]
+                            steplength_ = steplength_tensor[:, select_mask_short, :]
+                            batch_tensor_ = self.batch_tensor[select_mask_short]
+                            batch_scatter_ = th.repeat_interleave(
+                                batch_tensor_indx_cache[:len(batch_tensor_)],
+                                batch_tensor_,
+                                dim=0
+                            )
+                        else:
+                            select_mask = ~converge_check
+                            select_mask_short = select_mask
+                            energies_ = energies[select_mask]
+                            X_grad_ = X_grad[select_mask, ...]
+                            X_grad_old_ = X_grad_old[select_mask, ...]
+                            p_ = p[select_mask, ...]
+                            X_ = X[select_mask, ...]
+                            atom_masks_ = atom_masks[select_mask, ...]
+                            displace_ = displace[select_mask, ...]
+                            steplength_ = steplength_tensor[select_mask, ...]
+                            batch_tensor_ = None
+                            batch_scatter_ = None
+                    else:
+                        func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = (
+                            func_args,
+                            func_kwargs,
+                            grad_func_args,
+                            grad_func_kwargs
+                        )
                         select_mask = ~(converge_mask[0, :, 0])
                         select_mask_short = ~converge_check
-                        energies_ = energies[select_mask_short]
-                        X_grad_ = X_grad[:, select_mask, :]
-                        X_grad_old_ = X_grad_old[:, select_mask, :]
-                        p_ = p[:, select_mask, :]
-                        X_ = X[:, select_mask, :]
-                        displace_ = displace[:, select_mask, :]
-                        atom_masks_ = atom_masks[:, select_mask, :]
-                        steplength_ = steplength_tensor[:, select_mask_short, :]
-                        batch_tensor_ = self.batch_tensor[select_mask_short]
-                        batch_scatter_ = th.repeat_interleave(
-                            batch_tensor_indx_cache[:len(batch_tensor_)],
-                            batch_tensor_,
-                            dim=0
-                        )
-                    else:
-                        select_mask = ~converge_check
-                        select_mask_short = select_mask
-                        energies_ = energies[select_mask]
-                        X_grad_ = X_grad[select_mask, ...]
-                        X_grad_old_ = X_grad_old[select_mask, ...]
-                        p_ = p[select_mask, ...]
-                        X_ = X[select_mask, ...]
-                        atom_masks_ = atom_masks[select_mask, ...]
-                        displace_ = displace[select_mask, ...]
-                        steplength_ = steplength_tensor[select_mask, ...]
-                        batch_tensor_ = None
-                        batch_scatter_ = None
-                else:
-                    func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = (
-                        func_args,
-                        func_kwargs,
-                        grad_func_args,
-                        grad_func_kwargs
+                        energies_ = energies
+                        X_grad_ = X_grad
+                        X_grad_old_ = X_grad_old
+                        p_ = p
+                        X_ = X
+                        displace_ = displace
+                        atom_masks_ = atom_masks
+                        steplength_ = steplength_tensor
+                        batch_tensor_ = self.batch_tensor
+                        batch_scatter_ = self.batch_scatter
+
+                    # Section: update algo. parameters.
+                    self._update_algo_param(
+                        select_mask,
+                        select_mask_short,
+                        batch_scatter_,
+                        X_grad_,
+                        X_grad_old_,
+                        p_,
+                        displace_
                     )
-                    select_mask = ~(converge_mask[0, :, 0])
-                    select_mask_short = ~converge_check
-                    energies_ = energies
-                    X_grad_ = X_grad
-                    X_grad_old_ = X_grad_old
-                    p_ = p
-                    X_ = X
-                    displace_ = displace
-                    atom_masks_ = atom_masks
-                    steplength_ = steplength_tensor
-                    batch_tensor_ = self.batch_tensor
-                    batch_scatter_ = self.batch_scatter
+                    self.select_mask = select_mask
 
-                # Section: update algo. parameters.
-                self._update_algo_param(
-                    select_mask,
-                    select_mask_short,
-                    batch_scatter_,
-                    X_grad_,
-                    X_grad_old_,
-                    p_,
-                    displace_
-                )
-                self.select_mask = select_mask
-
-                t_st = time.perf_counter()
-                # Section: search directions
-                p_ = self._update_direction(
-                    X_grad_,
-                    X_grad_old_,
-                    p_,
-                    X_,
-                    batch_scatter_,
-                )  # (n_batch, n_atom, n_dim)
-                # use BB steplength_tensor
-                if self.use_bb:
-                    g_go = X_grad_ - X_grad_old_  # (n_batch, n_atom, n_dim)
-                    if self.is_concat_X:
-                        _steplength_ = th.sum(index_inner_product(
-                            displace_,
-                            displace_,
-                            dim=1,
-                            batch_indices=batch_scatter_
-                        ), dim=-1, keepdim=True) / th.sum(index_inner_product(
-                            displace_,
-                            g_go,
-                            dim=1,
-                            batch_indices=batch_scatter_
-                        ), dim=-1, keepdim=True)  # BB1, (1, B, 1)
-                        _steplength_ = th.where(
-                            (_steplength_ < 2. * self.steplength) & (_steplength_ > 1e-4),
-                            _steplength_,
-                            steplength_
-                        )
-                    else:
-                        # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) =
-                        _steplength_ = th.sum(
-                            displace_ * displace_, dim=(-2, -1), keepdim=True
-                        ) / th.sum(
-                            displace_ * g_go, dim=(-2, -1), keepdim=True
-                        )  # BB1
-                        _steplength_ = th.where(
-                            (_steplength_ < 2. * self.steplength) * (_steplength_ > 1e-4),
-                            _steplength_,
-                            steplength_
-                        )
-                else:
-                    _steplength_ = steplength_
-                # Section: search step length -> steplength_tensor: (n_batch, 1, 1)
-                steplength_: th.Tensor = self._line_search.run(
-                    func,
-                    grad_func_,
-                    X_,
-                    energies_,
-                    X_grad_,
-                    p_,
-                    _steplength_,
-                    is_grad_func_contain_y,
-                    require_grad,
-                    func_args=func_args_,
-                    func_kwargs=func_kwargs_,
-                    grad_func_args=grad_func_args_,
-                    grad_func_kwargs=grad_func_kwargs_,
-                    batch_indices=batch_tensor_
-                )
-                # update X
-                if self.is_concat_X:
-                    alpha = steplength_.index_select(1, batch_scatter_)
-                else:
-                    alpha = steplength_
-                displace_ = alpha * p_  # (n_batch, 1, 1) * (n_batch, n_atom, n_dim) or (1, sumN, 1) * (1, sumN, n_dim)
-                X_.add_(displace_)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
-                # update old grad
-                X_grad_old_ = X_grad_  # (n_batch, n_atom, n_dim)
-                # calc. new energy & grad.
-                if not self._line_search.HAS_GRAD:
-                    energies_, X_grad_ = self._calc_y_grad(
+                    t_st = time.perf_counter()
+                    # Section: search directions
+                    p_ = self._update_direction(
+                        X_grad_,
+                        X_grad_old_,
+                        p_,
                         X_,
+                        batch_scatter_,
+                    )  # (n_batch, n_atom, n_dim)
+                    # use BB steplength_tensor
+                    if self.use_bb:
+                        g_go = X_grad_ - X_grad_old_  # (n_batch, n_atom, n_dim)
+                        if self.is_concat_X:
+                            _steplength_ = th.sum(index_inner_product(
+                                displace_,
+                                displace_,
+                                dim=1,
+                                batch_indices=batch_scatter_
+                            ), dim=-1, keepdim=True) / th.sum(index_inner_product(
+                                displace_,
+                                g_go,
+                                dim=1,
+                                batch_indices=batch_scatter_
+                            ), dim=-1, keepdim=True)  # BB1, (1, B, 1)
+                            _steplength_ = th.where(
+                                (_steplength_ < 2. * self.steplength) & (_steplength_ > 1e-4),
+                                _steplength_,
+                                steplength_
+                            )
+                        else:
+                            # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) =
+                            _steplength_ = th.sum(
+                                displace_ * displace_, dim=(-2, -1), keepdim=True
+                            ) / th.sum(
+                                displace_ * g_go, dim=(-2, -1), keepdim=True
+                            )  # BB1
+                            _steplength_ = th.where(
+                                (_steplength_ < 2. * self.steplength) * (_steplength_ > 1e-4),
+                                _steplength_,
+                                steplength_
+                            )
+                    else:
+                        _steplength_ = steplength_
+                    # Section: search step length -> steplength_tensor: (n_batch, 1, 1)
+                    steplength_: th.Tensor = self._line_search.run(
                         func,
-                        func_args_,
-                        func_kwargs_,
                         grad_func_,
-                        grad_func_args_,
-                        grad_func_kwargs_,
+                        X_,
+                        energies_,
+                        X_grad_,
+                        p_,
+                        _steplength_,
+                        is_grad_func_contain_y,
                         require_grad,
-                        is_grad_func_contain_y
+                        func_args=func_args_,
+                        func_kwargs=func_kwargs_,
+                        grad_func_args=grad_func_args_,
+                        grad_func_kwargs=grad_func_kwargs_,
+                        batch_indices=batch_tensor_
                     )
-                else:
-                    energies_ = self._line_search.STORE_Y
-                    X_grad_ = self._line_search.STORE_GRAD
-                energies_ = energies_.detach()
-                X_grad_ = X_grad_.detach()
-                X_grad_.mul_(atom_masks_)
-                X_.detach_()
-
-                # Section: rewrite. update origin variables
-                if not self._hold_samples:
+                    # update X
                     if self.is_concat_X:
-                        select_indices = th.where(select_mask)[0]
-                        select_indices_short = th.where(select_mask_short)[0]
-                        energies.index_copy_(0, select_indices_short, energies_)
-                        X_grad.index_copy_(1, select_indices, X_grad_)
-                        X_grad_old.index_copy_(1, select_indices, X_grad_old_)
-                        p.index_copy_(1, select_indices, p_)
-                        X.index_copy_(1, select_indices, X_)
-                        displace.index_copy_(1, select_indices, displace_)
-                        #atom_masks.index_copy_(1, select_indices, atom_masks_)
-                        #steplength_tensor.index_copy_(1, select_indices_short, steplength_)
+                        alpha = steplength_.index_select(1, batch_scatter_)
+                    else:
+                        alpha = steplength_
+                    displace_ = alpha * p_  # (n_batch, 1, 1) * (n_batch, n_atom, n_dim) or (1, sumN, 1) * (1, sumN, n_dim)
 
+                    if self._hold_samples and not _is_cuda:
+                        # gate: in this mode `X_` aliases `X`, whose zero-copy views
+                        # were queued to the consumers above; `_update_direction` /
+                        # `X_.add_` below mutate it in place, so consumers must
+                        # finish reading first. (CUDA path is protected by s_buf
+                        # D2D staging — stream ordering after wait_event suffices.)
+                        self._dump_done.wait()
+                        self._print_done.wait()
+
+                    # MAIN UPDATE
+                    X_.add_(displace_)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
+                    # update old grad
+                    X_grad_old_ = X_grad_  # (n_batch, n_atom, n_dim)
+                    # calc. new energy & grad.
+                    if not self._line_search.HAS_GRAD:
+                        energies_, X_grad_ = self._calc_y_grad(
+                            X_,
+                            func,
+                            func_args_,
+                            func_kwargs_,
+                            grad_func_,
+                            grad_func_args_,
+                            grad_func_kwargs_,
+                            require_grad,
+                            is_grad_func_contain_y
+                        )
+                    else:
+                        energies_ = self._line_search.STORE_Y
+                        X_grad_ = self._line_search.STORE_GRAD
+                    energies_ = energies_.detach()
+                    X_grad_ = X_grad_.detach()
+                    X_grad_.mul_(atom_masks_)
+                    X_.detach_()
+
+                    # Section: rewrite. update origin variables
+                    # --- gate: wait for consumers from previous iteration ---
+                    if _is_cuda: th.cuda.default_stream(self.device).wait_event(_copy_event)
+                    self._dump_done.wait()
+                    self._print_done.wait()
+                    if not self._hold_samples:
+                        if self.is_concat_X:
+                            select_indices = th.where(select_mask)[0]
+                            select_indices_short = th.where(select_mask_short)[0]
+                            energies.index_copy_(0, select_indices_short, energies_)
+                            X_grad.index_copy_(1, select_indices, X_grad_)
+                            X_grad_old.index_copy_(1, select_indices, X_grad_old_)
+                            p.index_copy_(1, select_indices, p_)
+                            X.index_copy_(1, select_indices, X_)
+                            displace.index_copy_(1, select_indices, displace_)
+                            #atom_masks.index_copy_(1, select_indices, atom_masks_)
+                            #steplength_tensor.index_copy_(1, select_indices_short, steplength_)
+
+                        else:
+                            select_indices = th.where(select_mask)[0]
+                            select_indices_short = th.where(select_mask_short)[0]
+                            energies.index_copy_(0, select_indices, energies_)
+                            X_grad.index_copy_(0, select_indices, X_grad_)
+                            X_grad_old.index_copy_(0, select_indices, X_grad_old_)
+                            p.index_copy_(0, select_indices, p_)
+                            X.index_copy_(0, select_indices, X_)
+                            displace.index_copy_(0, select_indices, displace_)
+                            #atom_masks.index_copy_(0, select_indices, atom_masks_)
+                            #steplength_tensor.index_copy_(0, select_indices, steplength_)
                     else:
                         select_indices = th.where(select_mask)[0]
                         select_indices_short = th.where(select_mask_short)[0]
-                        energies.index_copy_(0, select_indices, energies_)
-                        X_grad.index_copy_(0, select_indices, X_grad_)
-                        X_grad_old.index_copy_(0, select_indices, X_grad_old_)
-                        p.index_copy_(0, select_indices, p_)
-                        X.index_copy_(0, select_indices, X_)
-                        displace.index_copy_(0, select_indices, displace_)
-                        #atom_masks.index_copy_(0, select_indices, atom_masks_)
-                        #steplength_tensor.index_copy_(0, select_indices, steplength_)
+                        energies = energies_
+                        X_grad = X_grad_
+                        X_grad_old = X_grad_old_
+                        p = p_
+                        X = X_
+                        displace = displace_
+                        #steplength_tensor = steplength_
+                    # Section: update batch information of algos if necessary
+                    self._update_algo_batches(select_indices, select_indices_short)
+                    # Check NaN
+                    #if not th.all(energies.isfinite()): raise RuntimeError(f'NaN Occurred in output: {energies}')
+
+                    #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
+
+                # --- wait for last dump consumer before scatter-back touched tensors ---
+                self._dump_done.wait()
+                self._print_done.wait()
+
+                # Final human-readable output is independent of the configured
+                # dump/log columns. Copy directly from the live result so
+                # omitting ``X`` or ``Force`` from ``dump_quantities`` does not
+                # make final reporting access a missing ``s_cpu`` attribute.
+                _X_print = X.detach().cpu()
+                _F_print = (-X_grad).detach().cpu()
+
+                if is_main_loop_converge:
+                    if self.verbose > 0:
+                        self.logger.info(
+                            '-' * 100 + f'\nAll Structures were Converged.\n'
+                                        f'MAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s\n'
+                        )
                 else:
-                    select_indices = th.where(select_mask)[0]
-                    select_indices_short = th.where(select_mask_short)[0]
-                    energies = energies_
-                    X_grad = X_grad_
-                    X_grad_old = X_grad_old_
-                    p = p_
-                    X = X_
-                    displace = displace_
-                    #steplength_tensor = steplength_
-                # Section: update batch information of algos if necessary
-                self._update_algo_batches(select_indices, select_indices_short)
-                # Check NaN
-                #if not th.all(energies.isfinite()): raise RuntimeError(f'NaN Occurred in output: {energies}')
+                    if self.verbose > 0:
+                        self.logger.info(
+                            '-' * 100 + f'\nSome Structures were NOT Converged yet!\n'
+                                        f'MAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s\n'
+                        )
+                    # final dump: capture last state when maxiter exhausted
+                    self._dump_done.clear()
+                    # Refresh every built-in state quantity before taking the
+                    # final snapshot. During the main loop ``s`` describes the
+                    # state at the beginning of an iteration; after the last
+                    # update, local tensors contain the true max-iteration
+                    # result. This assignment is required on both CPU and CUDA
+                    # paths, especially for ``Energy``/``Force`` which may have
+                    # been replaced rather than mutated in-place.
+                    if self.is_concat_X:
+                        _final_F_eps = index_reduce(
+                            th.max(th.abs(X_grad[0]), dim=-1).values,
+                            self.batch_scatter, 0, 'amax', -1.
+                        )
+                    else:
+                        _final_F_eps = th.amax(th.abs(X_grad), dim=(-2, -1))
+                    s.Energy = energies
+                    s.X = X
+                    s.Force = -X_grad
+                    s.E_diff = energies - energies_old
+                    s.F_eps = _final_F_eps
+                    s.X_grad = X_grad
+                    if _is_cuda:
+                        self._transfer_buffers_D2H(s, _s_buf, _s_cpu, dump_names, _copy_stream, self.device)
+                        _copy_event.record(_copy_stream)
+                        _dump_queue.put((dumper, _copy_event, *(getattr(_s_cpu, n) for n in dump_names)))
+                    else:
+                        for _n in dump_names:
+                            getattr(_s_cpu, _n).copy_(getattr(s, _n))
+                        _dump_queue.put((dumper, None, *(getattr(_s_cpu, n) for n in dump_names)))
+                    self._dump_done.wait()
 
-                #ptlist.append(X[:, None, :, 0].numpy(force=True))  # test <<<
-
-        if self.verbose > 0:
-            if is_main_loop_converge:
-                self.logger.info(
-                    '-' * 100 + f'\nAll Structures were Converged.\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s\n'
-                )
-            else:
-                self.logger.info(
-                    '-' * 100 + f'\nSome Structures were NOT Converged yet!\nMAIN LOOP Done. Total Time: {time.perf_counter() - t_main:<.4f} s\n'
-                )
-
-            if self.verbose < 2:  # verbose = 1, brief mode only output last step coords.
-                # split batches if specified batch
-                if batch_indices is not None:
-                    X_np = X.numpy(force=True)
-                    X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
-                    F_np = (- X_grad).numpy(force=True)
-                    F_tup = np.split(F_np, batch_slice_indx[1:-1], axis=1)
-                else:
-                    X_tup = (X.numpy(force=True),)
-                    F_tup = (- X_grad.numpy(force=True),)
-                self.logger.info(f" Final Coordinates:\n")
-                X_str = [
-                    np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                    for xi in X_tup
-                ]
-                [self.logger.info(f'{x_str}\n') for x_str in X_str]
-                self.logger.info(f" Final Forces:\n")
-                X_str = [
-                    np.array2string(xi, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
-                    for xi in F_tup
-                ]
-                [self.logger.info(f'{x_str}\n') for x_str in X_str]
-        else:
-            if not is_main_loop_converge: warnings.warn('Some Structures were NOT Converged yet!',
-                                                        NotConvergeWarning)
-        # release
+                if self.verbose < 2 or (not is_main_loop_converge and self.verbose > 0):
+                    # If verbose >= 2 and converged, the final coo and forces have already output
+                    #   and verbose == 0 is the strict silent mode that output nothing
+                    #   only verbose == 1 outputs only shortcut info during the loop and finally output the complete COO and forces.
+                    #   And, if not converged, the final step is not output yet, so it SHOULD be output here.
+                    E_diff = energies - energies_old
+                    if not is_main_loop_converge:
+                        self.logger.info(
+                            f"FINAL STEP\n "
+                            f"MAD_energies: {np.array2string(E_diff.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                            f"Energies:     {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                            f"Converged:    {np.array2string(converge_str, **STRING_ARRAY_FORMAT)}\n "
+                        )
+                    self.handle_arrays_print(
+                        self.logger,
+                        batch_indices,
+                        self.batch_slice_indx,
+                        [[_X_print, _F_print]],
+                        [['Final Coordinates', 'Final Forces']],
+                        verbose=(self.verbose + 1),  # when verbose=0 (silence mode), not printing. But for verbose=1, Only print the last results
+                    )
+            # release resources
+            finally:
+                # --- dump cleanup ---
+                _dump_queue.put(None)  # sentinel
+                _dump_thread.join()
+                _log_queue.put(None)
+                _log_thread.join()
+                if not self._HOLD_DUMPER:
+                    dumper.close()
 
         # output
         if output_grad:

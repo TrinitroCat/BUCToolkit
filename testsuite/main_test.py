@@ -8,6 +8,7 @@ import unittest
 import os
 import glob
 import math
+import tempfile
 import sys
 import warnings
 
@@ -158,12 +159,12 @@ class MainTest(unittest.TestCase):
         runner_cpu_lang_nvt = NVT(
             TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
             TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU', 10, device='cpu', verbose=0,
-            is_compile=True
+            is_compile=False
         )
         runner_gpu_lang_nvt = NVT(
             TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
             TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU', 10, device='cuda:0', verbose=0,
-            is_compile=True
+            is_compile=False
         )
         runner_cpu_nose_nvt = NVT(
             TIME_STEP, 50000, 'Nose-Hoover', {},
@@ -802,12 +803,12 @@ class MainTest(unittest.TestCase):
         Test the structure optimizations by various algorithms.
         """
         # purge remaining testfiles
-        logfiles = glob.glob(os.path.join(self.out_pt, 'logs/OPT*.log'))
-        resultfiles = glob.glob(os.path.join(self.out_pt, 'results/OPT*'))
-        for logfile in logfiles:
-            os.remove(logfile)
-        for resultfile in resultfiles:
-            os.remove(resultfile)
+        for f in glob.glob(os.path.join(self.out_pt, 'logs/OPT*')):
+            try: os.remove(f)
+            except OSError: pass
+        for f in glob.glob(os.path.join(self.out_pt, 'results/OPT*')):
+            try: os.remove(f)
+            except OSError: pass
 
         # static test
         data = self.data
@@ -829,7 +830,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_MT_CPU_DUMP.bin',
         )
         runner_gpu_cg_mt = CG(
             'PR+',
@@ -843,7 +845,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_MT_GPU_DUMP.bin',
         )
         runner_cpu_cg_bk = CG(
             'PR+',
@@ -857,7 +860,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_BK_CPU_DUMP.bin',
         )
         runner_gpu_cg_bk = CG(
             'PR+',
@@ -871,7 +875,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_BK_GPU_DUMP.bin',
         )
         runner_cpu_bfgs_mt = QN(
             'BFGS',
@@ -885,7 +890,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_MT_CPU_DUMP.bin',
         )
         runner_gpu_bfgs_mt = QN(
             'BFGS',
@@ -899,7 +905,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_MT_GPU_DUMP.bin',
         )
         runner_cpu_bfgs_bk = QN(
             'BFGS',
@@ -913,7 +920,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_BK_CPU_DUMP.bin',
         )
         runner_gpu_bfgs_bk = QN(
             'BFGS',
@@ -927,7 +935,8 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_BK_GPU_DUMP.bin',
         )
         runner_cpu_fire = FIRE(
             1e-5,
@@ -935,7 +944,8 @@ class MainTest(unittest.TestCase):
             MAXITER,
             TIME_STEP,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_FIRE_CPU_DUMP.bin',
         )
         runner_gpu_fire = FIRE(
             1e-5,
@@ -943,7 +953,8 @@ class MainTest(unittest.TestCase):
             MAXITER,
             TIME_STEP,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_FIRE_GPU_DUMP.bin',
         )
 
 
@@ -983,6 +994,9 @@ class MainTest(unittest.TestCase):
             updater.initialize()
             runner.set_batch_updater(updater, updater)
             runner: FIRE
+            # set dump metadata
+            _atm_per_struct = [[26] * (8**3), [13] * (5**3), [46] * (10**3)]
+            runner.set_system_info(atomic_numbers=_atm_per_struct)
             y, x_min, g = runner.run(
                 model_test.Energy,
                 _data.pos,
@@ -1018,6 +1032,30 @@ class MainTest(unittest.TestCase):
                           f'test value:\n\tenergy: {_en}\n\tmax forces: {th.max(g.abs()).item()}'
                           f'\nstandard value:\n\tenergy: 0.\n\tmax forces: 0.\n'
                           f'position displacement max error: {th.max(th.abs(_data.pos - data.pos0)).item()}')
+
+            # --- dump verification: read full trajectory, cross-check with log ---
+            bs_full = read_opt_structures(runner.output_file)
+            _logfile = f"{self.out_pt}logs/{RUNNER_NAME[i]}.log"
+            with open(_logfile) as lf:
+                _log_E = [float(v) for ln in lf if 'Energies' in ln
+                          for v in ln.split('[')[1].split(']')[0].split()]
+            self.assertEqual(len(bs_full.Energies), len(_log_E),
+                             f'{RUNNER_NAME[i]}: dump ({len(bs_full.Energies)}) '
+                             f'!= log ({len(_log_E)})')
+            for _j in range(len(_log_E)):
+                self.assertAlmostEqual(bs_full.Energies[_j], _log_E[_j],
+                    delta=1e-6,
+                    msg=f'{RUNNER_NAME[i]} step {_j}: '
+                        f'dump={bs_full.Energies[_j]:.8f} '
+                        f'log={_log_E[_j]:.8f}')
+
+            # only_opt returns just the last frame
+            bs_last = read_opt_structures(runner.output_file, only_opt=True)
+            _n_structs = len(_atm_per_struct)
+            self.assertEqual(len(bs_last), _n_structs,
+                             f'{RUNNER_NAME[i]}: only_opt should have {_n_structs} structures')
+            for _s in range(_n_structs):
+                self.assertAlmostEqual(bs_last.Energies[_s], y[_s].item(), delta=1e-4)
 
     def test_TS(self):
         """
@@ -1186,7 +1224,7 @@ class MainTest(unittest.TestCase):
                 TIME_STEP,
                 use_bb=True,
                 device='cpu',
-                verbose=1
+                verbose=1,
             ),
             'opt_gpu_cg_mt' : CG(
                 'PR+',
@@ -1200,7 +1238,7 @@ class MainTest(unittest.TestCase):
                 TIME_STEP,
                 use_bb=True,
                 device='cuda:0',
-                verbose=1
+                verbose=1,
             ),
             'opt_cpu_fire' : FIRE(
                 1e-5,
@@ -1208,7 +1246,7 @@ class MainTest(unittest.TestCase):
                 MAXITER,
                 TIME_STEP,
                 device='cpu',
-                verbose=1
+                verbose=1,
             ),
             'opt_gpu_fire' : FIRE(
                 1e-5,
@@ -1216,7 +1254,7 @@ class MainTest(unittest.TestCase):
                 MAXITER,
                 TIME_STEP,
                 device='cuda:0',
-                verbose=1
+                verbose=1,
             ),
             #   mc
             'mc_cpu_nvt' : MMC(

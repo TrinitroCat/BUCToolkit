@@ -5,12 +5,13 @@
 #  Environment: Python 3.12
 
 from BUCToolkit.BatchStructures.BatchStructuresBase import BatchStructures
-from BUCToolkit.BatchStructures.StructuresIO import read_opt_structures, read_md_traj, read_mc_traj, ArrayDumper, ArrayDumpReader
+from BUCToolkit.BatchStructures.StructuresIO import read_opt_structures, read_md_traj, read_mc_traj, read_dump_arrays, ArrayDumper, ArrayDumpReader
 from BUCToolkit.BatchStructures.batch import Batch
 from BUCToolkit.BatchStructures.data import Data
 
 
 __all__ = [
+    "read_dump_arrays",
     "read_opt_structures",
     "read_md_traj",
     "read_mc_traj",

@@ -14,7 +14,7 @@ from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Seque
 import torch as th
 from torch import nn
 
-from BUCToolkit.utils._Element_info import MASS, N_MASS
+from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER
 from .._BaseOpt import _BaseOpt
 from BUCToolkit.Bases.BaseConstraints import BaseConstr
 from BUCToolkit.utils.index_ops import index_inner_product
@@ -280,7 +280,7 @@ class FIRE(_BaseOpt):
             elements: List[List[str | int]] | None = None,
     ) -> Tuple[th.Tensor, th.Tensor] | Tuple[th.Tensor, th.Tensor, th.Tensor]:
         r"""
-        Run the Conjugate gradient
+        Run the FIRE
 
         Args:
             func: the main function of instantiated torch.nn.Module class.
@@ -320,6 +320,13 @@ class FIRE(_BaseOpt):
         else:
             raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
         self.v = th.zeros_like(X, device=self.device)
+
+        # pass system info to _BaseOpt for dump header
+        if elements is not None:
+            _atm = []
+            for _Elem in elements:
+                _atm.extend([MASS[__e] if isinstance(__e, str) else __e for __e in _Elem])
+            self.atomic_numbers = _atm
 
         _results = super().run(
             func,
@@ -420,6 +427,13 @@ class ConstrFIRE(FIRE):
         self.v_.addcdiv_(g * self.t_, self.masses_, value=-9.64853329045427e-3)
         # trick: not really return the displacement, but return 0. as a placeholder
         # instead, update X in-place
+        #   gate: in hold mode X_ aliases X, whose zero-copy views were queued
+        #   to consumers; X.addcmul_ below mutates it in place — consumers must
+        #   finish reading first. (CUDA path is protected by s_buf D2D staging;
+        #   stream ordering after wait_event suffices.)
+        if self._hold_samples and self.device.type == 'cpu':
+            self._dump_done.wait()
+            self._print_done.wait()
         X.addcmul_(self.v_, self.t_)
         self._project2(X, X_init, self._v)
         self._project1(self.v_, X, out=self._v)

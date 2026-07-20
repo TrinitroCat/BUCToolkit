@@ -8,7 +8,7 @@ import math
 
 import torch as th
 from ._BaseMC import _BaseMC
-from typing import Callable, Literal
+from typing import Callable, List, Literal, Tuple
 
 
 class MMC(_BaseMC):
@@ -30,7 +30,11 @@ class MMC(_BaseMC):
             device: str | th.device = 'cpu',
             verbose: int = 2,
             is_compile: bool = False,
-            compile_kwargs: dict | None = None
+            compile_kwargs: dict | None = None,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X'),
+            log_quantities: Tuple[str, ...] | List[str] = (
+                'Energy', 'delta_E', 'is_accept', 'temperature', 'X'
+            ),
     ):
         """
 
@@ -57,16 +61,21 @@ class MMC(_BaseMC):
             is_compile: whether to use jit to compile integrator or not.
             compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
                 default value: {'mode':'max-autotune-no-cudagraphs'}
+            dump_quantities: names of MC state tensors written to the binary
+                trajectory. Defaults preserve the legacy Energy/X layout.
+            log_quantities: names included in the name-driven per-step log.
         """
         super().__init__(
-            iter_scheme,
-            maxiter,
-            output_file,
-            output_structures_per_step,
-            device,
-            verbose,
-            is_compile,
-            compile_kwargs
+            iter_scheme=iter_scheme,
+            maxiter=maxiter,
+            output_file=output_file,
+            output_structures_per_step=output_structures_per_step,
+            device=device,
+            verbose=verbose,
+            is_compile=is_compile,
+            compile_kwargs=compile_kwargs,
+            dump_quantities=dump_quantities,
+            log_quantities=log_quantities,
         )
         self.T_begin = float(temperature_init)
         self.T_now = copy.deepcopy(self.T_begin)

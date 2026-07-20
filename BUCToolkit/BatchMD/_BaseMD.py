@@ -6,7 +6,7 @@
 #  Environment: Python 3.12
 
 import sys
-from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
+from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Set, Tuple  # noqa: F401
 import time
 import math
 import logging
@@ -24,6 +24,7 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARR
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.Bases.BaseMotion import BaseMotion
+from BUCToolkit.Bases.StdContainer import StdContainer
 
 FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
 FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
@@ -31,6 +32,11 @@ FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 class _BaseMD(BaseMotion):
     """ Base BatchMD """
+
+    #: Quantities known to the MD framework that may appear in
+    #: ``dump_quantities`` / ``log_quantities``.  Subclasses extend
+    #: this set (e.g. ``_BaseConstrMD`` adds ``'Fc'``, ``'G'``, ``'w'``).
+    ALLOWED_QUANTITIES: Set[str] = {'Energy', 'Ek', 'temperature', 'X', 'V', 'Force'}
 
     __slots__ = [
         'time_step', 'time_now',
@@ -56,6 +62,8 @@ class _BaseMD(BaseMotion):
             verbose: int = 0,
             is_compile: bool = False,
             compile_kwargs: dict | None = None,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'V', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'Ek', 'temperature', 'X', 'V'),
     ):
         """
         Parameters:
@@ -71,6 +79,11 @@ class _BaseMD(BaseMotion):
                 Note: verbose > 0 will be very slow, especially for computation on GPU.
             is_compile: whether to use jit to compile integrator or not.
             compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
+            dump_quantities: names of StdContainer attributes to write to the
+                binary trajectory file.  Must be a subset of :attr:`ALLOWED_QUANTITIES`.
+            log_quantities: names of StdContainer attributes to include in the
+                per-step log queue / inline print.  Must be a subset of
+                :attr:`ALLOWED_QUANTITIES`.
         """
         self.time_step = time_step
         self.time_now = th.scalar_tensor(0., device=device)  # the accumulated time
@@ -102,6 +115,7 @@ class _BaseMD(BaseMotion):
         # logging & dumper
         super().__init__(output_file)
         self.init_logger('Main.MD')
+        self._setup_register_vars(dump_quantities, log_quantities)
 
     def _reduce_Ek_T(self, batch_indices, masses, V):
         if batch_indices is not None:
@@ -147,101 +161,104 @@ class _BaseMD(BaseMotion):
         return mass_center
 
     def _do_async_dump(self, q: queue.Queue):
-        """
-        A backend thread to async. dump
-        Args:
-            q: queue to receive data. contains: tuple of (dumper, event, *data)
+        """Consumer thread: drain queue, call ``dumper.step()``, signal done.
 
-        Returns: None
+        Queue item: ``(dumper, event, *cpu_tensors)``.
+        *event* may be ``None`` on the CPU path (no async D2H).
 
-        """
-        while True:
-            try:
-                dumper, event, _print_Ep, _print_X, _print_V, _print_F = q.get()
-                if dumper is None:
-                    break
-                # event: th.cuda.Event, ensure copy done
-                event.synchronize()
-                dumper.step(
-                    _print_Ep.numpy(),
-                    _print_X.numpy(),
-                    _print_V.numpy(),
-                    _print_F.numpy(),
-                )
-            except Exception as e:
-                self.logger.error(f"Error: Failed to dump data due to \"{e}\"")
-
-    def _do_async_print(self, q: queue.Queue):
-        """
+        ``self._dump_done`` is set in ``finally`` after ``step()`` to
+        guarantee the handshake even on exception.
 
         Args:
-            q:
+            q: Producer/consumer queue. Normal items have the form
+                ``(dumper, event, *cpu_tensors)`` and a sentinel whose dumper
+                is ``None`` terminates the thread. ``event`` is a CUDA event or
+                ``None`` on CPU; tensors follow :meth:`get_dump_vars` order.
 
         Returns:
+            None. Background-thread errors are written to ``self.logger``.
+        """
+        while True:
+            items = q.get()
+            dumper, event = items[0], items[1]
+            if dumper is None:
+                break
+            try:
+                if event is not None:
+                    event.synchronize()
+                dumper.step(*(t.numpy() for t in items[2:]))
+            except Exception as e:
+                self.logger.error(f"Error: Failed to dump data due to \"{e}\"")
+            finally:
+                self._dump_done.set()
 
+    def _do_async_print(self, q: queue.Queue):
+        """Consumer thread: format and log.
+
+        Drains *q* (items packed in :meth:`get_log_vars` order after
+        the ``(i, copy_event, batch_indices)`` header) and dispatches
+        by tensor dimensionality:
+
+        * ndim ≤ 1 — printed inline as ``name = value`` under a
+          ``Step:`` header (verbosity ≥ 1).
+        * ndim ≥ 2 — printed via :meth:`handle_arrays_print`
+          (verbosity ≥ 2).
+
+        ``self._print_done`` is set in ``finally`` to guarantee the
+        handshake even on exception.
+
+        Args:
+            q: Producer/consumer queue. Normal items contain
+                ``(step, copy_event, batch_indices, *cpu_tensors)`` with
+                tensors ordered by :meth:`get_log_vars`; a sentinel whose
+                first item is ``None`` terminates the thread.
+
+        Returns:
+            None. The method formats registered scalar and array values and
+            signals ``self._print_done`` after every consumed snapshot.
         """
         formatter1 = {'float': '{:> .2f}'.format}
-        formatter2 = {'float': '{:> 5.10f}'.format}
-        i = 0  # reinsurance for Exception part
-        # Note: PRINTING IS VERY EXPENSIVE !!!
+        i = 0
         while True:
+            items = q.get()
+            if items[0] is None:
+                break
+            i, copy_event, batch_indices = items[0], items[1], items[2]
             try:
-                i, batch_indices, _print_Ep, _print_Ek, _print_temperature, _print_X, _print_V, _print_F = q.get()
-                if i is None:
-                    break
-                if self.verbose > 0:
-                    # print format
+                if copy_event is not None:
+                    copy_event.synchronize()
+
+                # Build name → value map from the log-var order
+                _data = dict(zip(self.get_log_vars(), items[3:]))
+                _valid = [(_n, _v) for _n, _v in _data.items() if _n and _v is not None]
+                _scalars = [(_n, _v) for _n, _v in _valid if _v.ndim <= 1]
+                _arrays  = [(_n, _v) for _n, _v in _valid if _v.ndim >= 2]
+
+                # Scalars — verbose ≥ 1
+                if _scalars and self.verbose > 0:
                     np.set_printoptions(
-                        precision=8,
-                        linewidth=1024,
-                        floatmode='fixed',
-                        suppress=True,
-                        formatter=formatter1,
-                        threshold=2000
+                        precision=8, linewidth=1024, floatmode='fixed',
+                        suppress=True, formatter=formatter1, threshold=2000,
                     )
-                    self.logger.info(
-                        f'Step: {i:>12d}\n\t'
-                        f'T     = {_print_temperature.numpy(force=True)}\n\t'
-                        f'E_tol = {np.array2string((_print_Ek + _print_Ep).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        f'Ek    = {np.array2string(_print_Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        f'Ep    = {np.array2string(_print_Ep.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        # f'Time: {time.perf_counter() - t_step:>5.4f}'
+                    self.logger.info(f'Step: {i:>12d}')
+                    for _n, _v in _scalars:
+                        self.logger.info(
+                            f'\t{_n:<12s} = '
+                            f'{np.array2string(_v.numpy(), **SCIENTIFIC_ARRAY_FORMAT)}'
+                        )
+
+                # Arrays — verbose ≥ 2
+                if _arrays and self.verbose > 1:
+                    self.handle_arrays_print(
+                        self.logger, batch_indices, self.batch_slice_indx,
+                        [[_v for _, _v in _arrays]],
+                        [[_n for _, _n in _arrays]],
+                        verbose=self.verbose, force=False,
                     )
-                    # t_step = time.perf_counter()
-                if self.verbose > 1:
-                    # split to print
-                    if batch_indices is not None:
-                        X_tup = th.split(_print_X, batch_indices, dim=1)
-                        V_tup = th.split(_print_V, batch_indices, dim=1)
-                    else:
-                        X_tup = (_print_X,)
-                        V_tup = (_print_V,)
-                    np.set_printoptions(
-                        precision=8,
-                        floatmode='fixed',
-                        suppress=True,
-                        formatter=formatter2,
-                        threshold=3000000
-                    )
-                    self.logger.info('_' * 100)
-                    self.logger.info(f'Configuration {i}:')
-                    for __x in X_tup:
-                        X_str = np.array2string(
-                            __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                        ).replace("[", " ").replace("]", " ")
-                        self.logger.info(f'{X_str}\n')
-                    del X_str, X_tup
-                    if self.verbose > 2:
-                        self.logger.info(f'Velocities {i}:')
-                        for __x in V_tup:
-                            V_str = np.array2string(
-                                __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                            ).replace("[", " ").replace("]", " ")
-                            self.logger.info(f'{V_str}\n')
-                        del V_str
-                    self.logger.info('_' * 100)
             except Exception as e:
                 self.logger.error(f"Error: Failed to logout at {i}-th iteration due to \"{e}\".")
+            finally:
+                self._print_done.set()
 
     def _print_elem_info(self, Element_list, batch_indices):
         # elem info
@@ -347,6 +364,11 @@ class _BaseMD(BaseMotion):
         """
         try:
             X, Cell_vector, V_init = self.handle_dtype_device(FLOAT_TYPE, self.device, X, Cell_vector, V_init)
+
+            # Reset to the base set each run(); subclasses may extend in
+            # __init__ or initialize() via register_extra_dump_vars /
+            # register_extra_print_vars.
+            self.reset_register_vars()
             if self.device.type == "cuda":
                 self.__run_on_cuda(
                     func,
@@ -424,7 +446,7 @@ class _BaseMD(BaseMotion):
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
 
-        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, self.batch_slice_indx = self.handle_batch_indices(
             batch_indices, n_batch, device=self.device
         )
         self.scatter_dim_out_size = self.batch_scatter.max().item() + 1 if self.batch_scatter is not None else None
@@ -519,34 +541,10 @@ class _BaseMD(BaseMotion):
         # whether grad needs autograd
         self.require_grad = require_grad
 
-        # pre-allocate the tensors
-        #   _buf_* is the vars on GPU that apply copy.
-        #   _print_* is the vars on CPU that async. do D2H for _buf_*.
-        if batch_indices is not None:
-            _print_temperature = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-            _print_Ek = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-            _print_Ep = th.empty(len(batch_indices), device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-            _buf_Tp = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
-            _buf_Ek = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
-            _buf_Ep = th.empty(len(batch_indices), device=self.device, dtype=FLOAT_TYPE)
-        else:
-            _print_temperature = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-            _print_Ek = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-            _print_Ep = th.empty(n_batch, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-            _buf_Tp = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
-            _buf_Ek = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
-            _buf_Ep = th.empty(n_batch, device=self.device, dtype=FLOAT_TYPE)
-        _print_X = th.empty_like(X, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-        _print_V = th.empty_like(V, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-        _print_F = th.empty_like(X, device='cpu', dtype=FLOAT_TYPE, pin_memory=True)
-        _buf_X = th.empty_like(X, device=self.device, dtype=FLOAT_TYPE)
-        _buf_V = th.empty_like(V, device=self.device, dtype=FLOAT_TYPE)
-        _buf_F = th.empty_like(X, device=self.device, dtype=FLOAT_TYPE)
         # initialize the dumper
         X_arr = X.numpy(force=True)
         _x_dtype = X_arr.dtype.str
         atom_masks_arr = atom_masks.numpy(force=True).astype(_x_dtype)
-        _num_dump =  math.ceil(self.max_step/self.output_structures_per_step)
         dumper = self.dumper
         # write head information.
         if Cell_vector is None:
@@ -581,14 +579,7 @@ class _BaseMD(BaseMotion):
                 np.asarray(atomic_numbers),
                 atom_masks_arr
             )
-        # continue to write main data
-        dumper.start_from_arrays(
-            _num_dump,
-            _print_Ep.numpy(),
-            _print_X.numpy(),
-            _print_V.numpy(),
-            _print_F.numpy(),
-        )
+        # (main data arrays registered dynamically after first model eval)
         # custom initialization
         self.initialize(
             func,
@@ -636,23 +627,45 @@ class _BaseMD(BaseMotion):
                     Forces = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
                 Forces = Forces.contiguous()
 
-            Ek = th.zeros_like(Energy)
-            temperature = th.zeros_like(Energy)
+            # wrap into StdContainer
+            s = StdContainer(
+                X=X,
+                V=V,
+                Force=Forces,
+                Energy=Energy,
+                Ek=th.zeros_like(Energy),
+                temperature=th.zeros_like(Energy),
+                **self._extra_vars
+            )
+
+            # dynamic dump buffers
+            dump_names = self.get_dump_vars()  # self._dump_vars
+            log_names = self.get_log_vars()
+            total_names = self.get_transfer_vars()
+            s_cpu, s_buf = self._allocate_cpu_buffers(s, total_names, self.device)
+            _num_dump = math.ceil(self.max_step / self.output_structures_per_step)
+            dumper.start_from_arrays(
+                _num_dump,
+                *(getattr(s_cpu, name).numpy() for name in dump_names),
+                names=dump_names,
+            )
+
             # preload a graph of Ek, T
             Ek_T_graph = th.cuda.CUDAGraph()
             with th.cuda.graph(Ek_T_graph):
-                _e_tmp, _t_tmp = self._reduce_Ek_T(batch_indices, masses, V)
-                Ek.copy_(_e_tmp)
-                temperature.copy_(_t_tmp)
+                _e_tmp, _t_tmp = self._reduce_Ek_T(batch_indices, masses, s.V)
+                s.Ek.copy_(_e_tmp)
+                s.temperature.copy_(_t_tmp)
             self.Ek_T_graph = Ek_T_graph
+            self.Ek = s.Ek
             # preload a graph of mass center
             if is_fix_mass_center:
                 mass_center_graph = th.cuda.CUDAGraph()
                 with th.cuda.graph(mass_center_graph):
-                    _dX = MASS_CENTER - self.calc_mass_center(masses, masses_short, X)
-                    _dV = - self.calc_mass_center(masses, masses_short, V)
-                    X.add_(_dX)  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
-                    V.add_(_dV)
+                    _dX = MASS_CENTER - self.calc_mass_center(masses, masses_short, s.X)
+                    _dV = - self.calc_mass_center(masses, masses_short, s.V)
+                    s.X.add_(_dX)  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
+                    s.V.add_(_dV)
             else:
                 mass_center_graph = None
 
@@ -661,40 +674,33 @@ class _BaseMD(BaseMotion):
             compute_event = th.cuda.Event()
             compute_event.record(th.cuda.default_stream(self.device))  # the default stream is the compute (main) stream.
             # launch the dumping thread
-            dump_queue = queue.Queue()
+            dump_queue = queue.Queue(maxsize=1)
             dump_thread = threading.Thread(target=self._do_async_dump, args=(dump_queue, ), daemon=True)
-            logout_queue = queue.Queue()
+            logout_queue = queue.Queue(maxsize=1)
             logout_thread = threading.Thread(target=self._do_async_print, args=(logout_queue, ), daemon=True)
+            # consumer→main handshake events
+            self._dump_done = threading.Event()
+            self._print_done = threading.Event()
+            self._dump_done.set()
+            self._print_done.set()
             try:
                 dump_thread.start()
                 logout_thread.start()
                 #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                 if self.is_compile:
-                    fl = th.compile(self._main_for_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
+                    _main_loop = th.compile(self._main_for_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
                 else:
-                    fl = self._main_for_loop_cuda
-                fl(
+                    _main_loop = self._main_for_loop_cuda
+                _main_loop(
+                    s,
+                    s_cpu,
+                    s_buf,
+                    dump_names,
+                    log_names,
+                    total_names,
                     Ek_T_graph,
-                    Ek,
-                    Energy,
-                    X,
-                    V,
-                    Forces,
                     compute_event,
-                    temperature,
                     copy_stream,
-                    _buf_Tp,
-                    _buf_Ek,
-                    _buf_Ep,
-                    _buf_X,
-                    _buf_V,
-                    _buf_F,
-                    _print_temperature,
-                    _print_Ek,
-                    _print_Ep,
-                    _print_X,
-                    _print_V,
-                    _print_F,
                     copy_event,
                     dump_queue,
                     dumper,
@@ -709,9 +715,9 @@ class _BaseMD(BaseMotion):
                 if self.verbose > 0:
                     self.logger.info(f'MAIN LOOP DONE. Elapsed time: {time.perf_counter() - t_main_loop:>5.4f} s')
             finally:
-                dump_queue.put([None]*6)
+                dump_queue.put((None, None))
                 dump_thread.join()
-                logout_queue.put([None]*8)
+                logout_queue.put((None, None))
                 logout_thread.join()
 
         del self.Ekt_vir
@@ -719,27 +725,15 @@ class _BaseMD(BaseMotion):
 
     def _main_for_loop_cuda(
             self,
+            s,
+            s_cpu,
+            s_buf,
+            dump_names,
+            log_names,
+            total_names,
             Ek_T_graph,
-            Ek,
-            Energy,
-            X,
-            V,
-            Forces,
             compute_event,
-            temperature,
             copy_stream,
-            _buf_Tp,
-            _buf_Ek,
-            _buf_Ep,
-            _buf_X,
-            _buf_V,
-            _buf_F,
-            _print_temperature,
-            _print_Ek,
-            _print_Ep,
-            _print_X,
-            _print_V,
-            _print_F,
             copy_event,
             dump_queue,
             dumper,
@@ -750,59 +744,32 @@ class _BaseMD(BaseMotion):
             move_to_center_freq,
             mass_center_graph
     ):
-        #t_step = time.perf_counter()
-        _do_print = False
         for i in range(self.max_step):
-            #with th.profiler.record_function('Calc. E, T <<<<<'):
             Ek_T_graph.replay()
-            # Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V)
-            self.Ek = Ek  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
-            # if self.verbose > 0:
-            #with th.profiler.record_function('D2H COPY <<<<<'):
+            self.Ek = s.Ek
             if i % self.output_structures_per_step == 0:
-                _do_print = True
+                # gate: wait for consumers from previous dump cycle
+                self._dump_done.wait()
+                self._print_done.wait()
                 compute_event.wait(th.cuda.default_stream(self.device))
                 th.cuda.default_stream(self.device).wait_event(copy_event)
-                # D2D, fast copy purely on GPU.
-                #   Because I cannot determine whether input X would be updated in various functions,
-                #   these vars cannot be ensured as read-only. Hence, double buffer scheme is not used.
-                #   instead, use D2D then D2H to async. dump.
-                _buf_Tp.copy_(temperature.squeeze().contiguous())
-                _buf_Ek.copy_(Ek.squeeze().contiguous())
-                _buf_Ep.copy_(Energy.squeeze().contiguous())
-                _buf_X.copy_(X)
-                _buf_V.copy_(V)
-                _buf_F.copy_(Forces)
-                # D2H, async.
-                with th.cuda.stream(copy_stream):
-                    copy_stream.wait_stream(th.cuda.default_stream(self.device))
-                    _print_temperature.copy_(_buf_Tp, non_blocking=True)
-                    _print_Ek.copy_(_buf_Ek, non_blocking=True)
-                    _print_Ep.copy_(_buf_Ep, non_blocking=True)
-                    _print_X.copy_(_buf_X, non_blocking=True)  # D2H
-                    _print_V.copy_(_buf_V, non_blocking=True)
-                    _print_F.copy_(_buf_F, non_blocking=True)
-                # ptlist.append(X.numpy(force=True))  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                # dynamic dump transition
+                self._transfer_buffers_D2H(s, s_buf, s_cpu, total_names, copy_stream, self.device)
                 copy_event.record(copy_stream)
-                # use backend thread to dump
-                dump_queue.put((dumper, copy_event, _print_Ep, _print_X, _print_V, _print_F))
+                # dump
+                self._dump_done.clear()
+                dump_queue.put((dumper, copy_event, *(getattr(s_cpu, _n) for _n in dump_names)))
+                # print logs
+                self._print_done.clear()
+                logout_queue.put((i, copy_event, batch_indices, *(getattr(s_cpu, _n) for _n in log_names)))
 
-            # Update X, V
-            #with th.profiler.record_function('MAIN UPDATE <<<<<'):
-            X, V, Energy, Forces = self._updateXV(
-                X, V, Forces,
+            self._updateXV(
+                s,
                 func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
                 masses, atom_masks, is_grad_func_contain_y, batch_indices
             )
-            compute_event.record(th.cuda.default_stream(self.device))  # the default stream is the compute (main) stream.
-            # print
-            #with th.profiler.record_function('PRINT <<<<<'):
-            if _do_print:
-                logout_queue.put((i, batch_indices, _print_Ep, _print_Ek, _print_temperature, _print_X, _print_V, _print_F))
-                _do_print = False
+            compute_event.record(th.cuda.default_stream(self.device))
 
-            # Correct barycentric transition
-            #with th.profiler.record_function('MOVE TO CENTER <<<<<'):
             if is_fix_mass_center and (i % move_to_center_freq == 0):
                 mass_center_graph.replay()
             self.time_now += self.time_step
@@ -980,14 +947,7 @@ class _BaseMD(BaseMotion):
                 np.asarray(atomic_numbers),
                 atom_masks_arr
             )
-        # continue to write main data
-        dumper.start_from_arrays(
-            _num_dump,
-            self.Ekt_vir.numpy(),
-            X.numpy(),
-            V.numpy(),
-            V.numpy(),  # Here F is not calculated yet, but V has the same shape, hence can do this replacement
-        )
+        # (main data arrays registered dynamically after first model eval)
         # custom initialization
         self.initialize(
             func,
@@ -1011,8 +971,6 @@ class _BaseMD(BaseMotion):
         #   if has no handler, means the handler is upper level 'Main', thus not print repeatedly
         if (self.verbose > 0) and len(self.logger.handlers) > 0:
             self._print_elem_info(Element_list, batch_indices)
-        formatter1 = {'float': '{:> .2f}'.format}
-        formatter2 = {'float': '{:> 5.10f}'.format}
 
         # MAIN Loop
         with th.no_grad():
@@ -1021,7 +979,6 @@ class _BaseMD(BaseMotion):
             masses = masses.contiguous()
             atom_masks = atom_masks.contiguous()
 
-            t_in = time.perf_counter()
             with th.set_grad_enabled(require_grad):
                 X.requires_grad_(require_grad)
                 Energy = func(X, *func_args, **func_kwargs)  # Note: func must return th.Tensor(n_batch, )
@@ -1037,137 +994,94 @@ class _BaseMD(BaseMotion):
                     Forces = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
                 Forces = Forces.contiguous()
 
-            #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-            if self.is_compile:
-                fl = th.compile(self._main_for_loop_cpu, **self.compile_kwargs, disable=(not self.is_compile))
-            else:
-                fl = self._main_for_loop_cpu
-            fl(
-                Energy,
-                X,
-                V,
-                Forces,
-                dumper,
-                func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-                masses, atom_masks, is_grad_func_contain_y, batch_indices,
-                MASS_CENTER,
-                masses_short,
-                formatter1,
-                formatter2,
-                is_fix_mass_center,
-                move_to_center_freq,
+            # wrap into StdContainer
+            s = StdContainer(
+                X=X,
+                V=V,
+                Force=Forces,
+                Energy=Energy,
+                Ek=th.zeros_like(Energy),
+                temperature=th.zeros_like(Energy),
+                **self._extra_vars,
             )
+
+            # dynamic dump buffers
+            dump_names = self.get_dump_vars()
+            log_names = self.get_log_vars()
+            total_names = self.get_transfer_vars()
+            _num_dump = math.ceil(self.max_step / self.output_structures_per_step)
+            if dump_names:
+                s_cpu, s_buf = self._allocate_cpu_buffers(s, total_names, self.device)
+                dumper.start_from_arrays(
+                    _num_dump,
+                    *(getattr(s_cpu, name).numpy() for name in dump_names),
+                    names=dump_names,
+                )
+            else:
+                s_cpu, s_buf = None, None
+
+            #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            # --- async threading (same pattern as CUDA, GIL released during I/O) ---
+            dump_queue = queue.Queue(maxsize=1)
+            dump_thread = threading.Thread(target=self._do_async_dump, args=(dump_queue,), daemon=True)
+            logout_queue = queue.Queue(maxsize=1)
+            logout_thread = threading.Thread(target=self._do_async_print, args=(logout_queue,), daemon=True)
+            self._dump_done = threading.Event()
+            self._print_done = threading.Event()
+            self._dump_done.set()
+            self._print_done.set()
+            try:
+                dump_thread.start()
+                logout_thread.start()
+                t_main_loop = time.perf_counter()
+                for i in range(self.max_step):
+                    Ek, temperature = self._reduce_Ek_T(batch_indices, masses, s.V)
+                    self.Ek = Ek
+                    s.Ek.copy_(Ek)
+                    s.temperature.copy_(temperature)
+
+                    if i % self.output_structures_per_step == 0:
+                        # Gate: wait for consumers from previous dump cycle
+                        self._dump_done.wait()
+                        self._print_done.wait()
+
+                        # Snapshot s → s_cpu (CPU memcpy — synchronous, fast)
+                        for _n in total_names:
+                            getattr(s_cpu, _n).copy_(getattr(s, _n))
+
+                        # Dispatch consumers (event=None: no GPU D2H to sync)
+                        self._dump_done.clear()
+                        dump_queue.put((dumper, None, *(getattr(s_cpu, _n) for _n in dump_names)))
+                        self._print_done.clear()
+                        logout_queue.put((i, None, batch_indices, *(getattr(s_cpu, _n) for _n in log_names)))
+
+                    self._updateXV(
+                        s, func, grad_func_, func_args, func_kwargs,
+                        grad_func_args, grad_func_kwargs,
+                        masses, atom_masks, is_grad_func_contain_y, batch_indices,
+                    )
+
+                    if is_fix_mass_center and (i % move_to_center_freq == 0):
+                        dX = MASS_CENTER - self.calc_mass_center(masses, masses_short, s.X)
+                        dV = - self.calc_mass_center(masses, masses_short, s.V)
+                        s.X.add_(dX)
+                        s.V.add_(dV)
+                    self.time_now += self.time_step
+                if self.verbose > 0:
+                    self.logger.info(f'MAIN LOOP DONE. Elapsed time: {time.perf_counter() - t_main_loop:>5.4f} s')
+            finally:
+                dump_queue.put((None, None))
+                dump_thread.join()
+                logout_queue.put((None, None))
+                logout_thread.join()
 
         del self.Ekt_vir
         #return ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-    def _main_for_loop_cpu(
-            self,
-            Energy,
-            X,
-            V,
-            Forces,
-            dumper,
-            func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-            masses, atom_masks, is_grad_func_contain_y, batch_indices,
-            MASS_CENTER,
-            masses_short,
-            formatter1,
-            formatter2,
-            is_fix_mass_center,
-            move_to_center_freq,
-    ):
-        _do_print = False
-        for i in range(self.max_step):
-            #with th.profiler.record_function('Calc. E, T <<<<<'):
-            Ek, temperature = self._reduce_Ek_T(batch_indices, masses, V)
-            self.Ek = Ek  # th.sum(Ek, dim=0)  # saving the real kinetic energy for VR & CSVR to avoid double counting.
-            # if self.verbose > 0:
-            #with th.profiler.record_function('DUMPING <<<<<'):
-            if i % self.output_structures_per_step == 0:
-                _do_print = True
-                dumper.step(
-                    Energy.numpy(),
-                    X.numpy(),
-                    V.numpy(),
-                    Forces.numpy(),
-                )
-            # print, ensure print data correspond to dumping data, and then update. differ from cuda orders.
-            #with th.profiler.record_function('PRINT <<<<<'):
-            if _do_print:
-                # Note: PRINTING IS VERY EXPENSIVE !!!
-                if self.verbose > 0:
-                    # print format
-                    np.set_printoptions(
-                        precision=8,
-                        linewidth=1024,
-                        floatmode='fixed',
-                        suppress=True,
-                        formatter=formatter1,
-                        threshold=2000
-                    )
-                    self.logger.info(
-                        f'Step: {i:>12d}\n\t'
-                        f'T     = {temperature.numpy(force=True)}\n\t'
-                        f'E_tol = {np.array2string((Ek + Energy).numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        f'Ek    = {np.array2string(Ek.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        f'Ep    = {np.array2string(Energy.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n\t'
-                        #f'Time: {time.perf_counter() - t_in:>5.4f}'
-                    )
-                    #t_in = time.perf_counter()
-                if self.verbose > 1:
-                    # split to print
-                    if batch_indices is not None:
-                        X_tup = th.split(X, batch_indices, dim=1)
-                        V_tup = th.split(V, batch_indices, dim=1)
-                    else:
-                        X_tup = (X,)
-                        V_tup = (V,)
-                    np.set_printoptions(
-                        precision=8, floatmode='fixed', suppress=True, formatter=formatter2, threshold=3000000
-                    )
-                    self.logger.info('_' * 100)
-                    self.logger.info(f'Configuration {i}:')
-                    for __x in X_tup:
-                        X_str = np.array2string(
-                            __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                        ).replace("[", " ").replace("]", " ")
-                        self.logger.info(f'{X_str}\n')
-                    del X_str, X_tup
-                    if self.verbose > 2:
-                        self.logger.info(f'Velocities {i}:')
-                        for __x in V_tup:
-                            V_str = np.array2string(
-                                __x.numpy(force=True), **FLOAT_ARRAY_FORMAT
-                            ).replace("[", " ").replace("]", " ")
-                            self.logger.info(f'{V_str}\n')
-                        del V_str
-                    self.logger.info('_' * 100)
-                _do_print = False
-
-            # Update X, V
-            #with th.profiler.record_function('MAIN UPDATE <<<<<'):
-            X, V, Energy, Forces = self._updateXV(
-                X, V, Forces,
-                func, grad_func_, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
-                masses, atom_masks, is_grad_func_contain_y, batch_indices
-            )
-
-            # Correct barycentric transition
-            #with th.profiler.record_function('MOVE TO CENTER <<<<<'):
-            if is_fix_mass_center and (i % move_to_center_freq == 0):
-                dX = MASS_CENTER - self.calc_mass_center(masses, masses_short, X)
-                dV = - self.calc_mass_center(masses, masses_short, V)
-                X.add_(dX)  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
-                V.add_(dV)
-            self.time_now += self.time_step
-
     # OVERRIDE THIS METHOD TO IMPLEMENT BatchMD UNDER VARIOUS ENSEMBLES.
     def _updateXV(
             self,
-            X,
-            V,
-            Force,
+            s: StdContainer,
             func,
             grad_func_,
             func_args,
@@ -1178,7 +1092,27 @@ class _BaseMD(BaseMotion):
             atom_masks,
             is_grad_func_contain_y,
             batch_indices
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """ Update X, V, Force, and return X, V, Energy, Force. """
+    ) -> None:
+        """Advance one ensemble-specific MD step in place.
+
+        Args:
+            s: Live :class:`StdContainer` containing at least ``X``, ``V``,
+                ``Force``, and ``Energy``.
+            func: Potential-energy callable.
+            grad_func_: Normalized force/gradient callable.
+            func_args: Positional arguments forwarded to ``func``.
+            func_kwargs: Keyword arguments forwarded to ``func``.
+            grad_func_args: Positional arguments forwarded to ``grad_func_``.
+            grad_func_kwargs: Keyword arguments forwarded to ``grad_func_``.
+            masses: Atomic masses broadcastable to the coordinate shape.
+            atom_masks: Selective-dynamics mask multiplied into new forces.
+            is_grad_func_contain_y: Whether ``grad_func_`` receives the energy
+                output as its second positional argument.
+            batch_indices: Irregular-batch atom counts, or ``None`` for a
+                regular batch.
+
+        Returns:
+            None. Implementations update ``s.X``, ``s.V``, ``s.Force``, and
+            ``s.Energy`` in place and may additionally update ensemble fields.
+        """
         raise NotImplementedError
-        # return X, V, Energy, Force

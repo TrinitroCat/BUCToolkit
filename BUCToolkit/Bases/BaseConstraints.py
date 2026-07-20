@@ -388,7 +388,7 @@ class BaseConstr(BaseIO):
             jac, y = self._jacobian(X_orig)
             self._do_qr(jac)
             Q, R = self.Q, self.R
-            # Safe-guard against degenerate constraint directions
+            # Safeguard against degenerate constraint directions
             # (e.g., erf soft-CN with vanishing gradients):
             #   mask y for convergence — degenerate dirs ignored
             #   clamp R diagonals — prevents solve_triangular blow-up
