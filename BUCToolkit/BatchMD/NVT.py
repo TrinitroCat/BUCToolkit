@@ -101,6 +101,9 @@ class NVT(_BaseMD):
             self.alpha = math.exp(- damp_coeff * self.time_step)
             return self.__Langevin
         elif self.thermostat == "VR":
+            # VR rescales the new velocity from the kinetic energy evaluated
+            # at the beginning of the same integration step.
+            self.require_Ek_update = True
             return self.__VR
         elif self.thermostat == "Nose-Hoover":
             # read thermostat config

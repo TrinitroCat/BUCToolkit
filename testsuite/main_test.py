@@ -158,21 +158,21 @@ class MainTest(unittest.TestCase):
         )
         runner_cpu_lang_nvt = NVT(
             TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU', 10, device='cpu', verbose=0,
+            TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU', 10, device='cpu', verbose=1,
             is_compile=False
         )
         runner_gpu_lang_nvt = NVT(
             TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU', 10, device='cuda:0', verbose=0,
+            TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU', 10, device='cuda:0', verbose=1,
             is_compile=False
         )
         runner_cpu_nose_nvt = NVT(
             TIME_STEP, 50000, 'Nose-Hoover', {},
-            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU', 10, device='cpu', verbose=0
+            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU', 10, device='cpu', verbose=1
         )
         runner_gpu_nose_nvt = NVT(
             TIME_STEP, 50000, 'Nose-Hoover', {},
-            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU', 10, device='cuda:0', verbose=0
+            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU', 10, device='cuda:0', verbose=1
         )
 
         RUNNER_NAME = [
@@ -200,12 +200,6 @@ class MainTest(unittest.TestCase):
                 _data.pos = _data.pos0  # avoid uneq perturbation
 
             print("*"*89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*"*89 + '\n')
-            with th.profiler.profile(
-                    activities=[th.profiler.ProfilerActivity.CPU, th.profiler.ProfilerActivity.CUDA],
-                    with_stack=False,
-                    profile_memory=False,
-            ) as prof:
-                pass
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             runner.run(

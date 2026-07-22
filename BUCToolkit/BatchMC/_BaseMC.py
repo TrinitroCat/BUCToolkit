@@ -209,12 +209,9 @@ class _BaseMC(BaseMotion):
                     sync_event.synchronize()
 
                 _data = dict(zip(self.get_log_vars(), items[3:]))
-                _valid = [(_name, _value) for _name, _value in _data.items()
-                          if _name and _value is not None]
-                _scalars = [(_name, _value) for _name, _value in _valid
-                            if _value.ndim <= 1]
-                _arrays = [(_name, _value) for _name, _value in _valid
-                           if _value.ndim >= 2]
+                _valid = [(_name, _value) for _name, _value in _data.items() if _name and _value is not None]
+                _scalars = [(_name, _value) for _name, _value in _valid if _value.ndim <= 1]
+                _arrays = [(_name, _value) for _name, _value in _valid if _value.ndim >= 2]
 
                 if _scalars and self.verbose > 0:
                     _lines = [f'ITERATION    {_numit:>5d}']
@@ -223,9 +220,7 @@ class _BaseMC(BaseMotion):
                         if _value.dtype == th.bool:
                             _value_str = np.array2string(_value.numpy())
                         else:
-                            _value_str = np.array2string(
-                                _value.numpy(), **SCIENTIFIC_ARRAY_FORMAT
-                            )
+                            _value_str = np.array2string(_value.numpy(), **SCIENTIFIC_ARRAY_FORMAT)
                         _lines.append(f' {_label:<12s}: {_value_str}')
                     self.logger.info('\n'.join(_lines))
 
@@ -235,8 +230,7 @@ class _BaseMC(BaseMotion):
                         batch_indices,
                         self.batch_slice_indx,
                         [[_value for _, _value in _arrays]],
-                        [[_display_names.get(_name, _name)
-                          for _name, _ in _arrays]],
+                        [[_display_names.get(_name, _name) for _name, _ in _arrays]],
                         verbose=self.verbose,
                         force=False,
                     )
@@ -276,6 +270,24 @@ class _BaseMC(BaseMotion):
             out_size=self.scatter_dim_out_size,
         ) / self.batch_tensor.reshape(1, -1, 1)
         return shape_center.index_select(1, self.batch_scatter)
+
+    def initialize(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            Element_list: List[List[str]] | List[List[int]] | None = None,
+            Cell_vector: th.Tensor | None = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            batch_indices: None | List[int] | Tuple[int, ...] | th.Tensor = None,
+            fixed_atom_tensor: Optional[th.Tensor] = None,
+            move_to_center_freq: int = -1,
+    ) -> None:
+        """
+        Do some possible initialization before entering main loop.
+        Default is doing nothing.
+        """
+        pass
 
     def run(
             self,
@@ -350,6 +362,9 @@ class _BaseMC(BaseMotion):
         X, Cell_vector = self.handle_dtype_device(
             FLOAT_TYPE, self.device, X, Cell_vector
         )
+        has_nonfinite_coordinates = not bool(th.all(th.isfinite(X)).item())
+        if has_nonfinite_coordinates:
+            raise ValueError('`X` must contain only finite coordinates.')
         self.reset_register_vars()
         try:
             self._run(
@@ -464,6 +479,15 @@ class _BaseMC(BaseMotion):
             ).squeeze(0)
             self.free_degree -= _n_reduced
 
+        has_nonpositive_free_degree = bool(
+            th.any(self.free_degree <= 0).item()
+        )
+        if has_nonpositive_free_degree:
+            raise ValueError(
+                'Every MC structure must have at least one movable degree of '
+                f'freedom, but got {self.free_degree.tolist()}.'
+            )
+
         func = preload_func(func, self.device)
         _atom_masks_array = self.atom_masks.numpy(force=True).astype(
             X.numpy(force=True).dtype.str
@@ -513,6 +537,19 @@ class _BaseMC(BaseMotion):
                 Cell_vector, _atomic_numbers_array, _atom_masks_array,
             )
 
+        # custom initialization
+        self.initialize(
+            func,
+            X,
+            Element_list,
+            th.as_tensor(Cell_vector, dtype=X.dtype, device=self.device),
+            func_args,
+            func_kwargs,
+            batch_indices,
+            fixed_atom_tensor,
+            move_to_center_freq,
+        )
+
         self.initialize_algo_param()
         if self.verbose > 0:
             self.logger.info('-' * 100)
@@ -522,13 +559,11 @@ class _BaseMC(BaseMotion):
             energies: th.Tensor = func(X, *func_args, **func_kwargs)
             if batch_indices is None and energies.shape[0] != _n_batch:
                 raise ValueError(
-                    f'Model output shape {energies.shape} does not match '
-                    f'batch size {_n_batch}.'
+                    f'Model output shape {energies.shape} does not match batch size {_n_batch}.'
                 )
             if batch_indices is not None and energies.shape[0] != _n_true_batch:
                 raise ValueError(
-                    f'Model output shape {energies.shape} does not match '
-                    f'{_n_true_batch} entries in batch_indices.'
+                    f'Model output shape {energies.shape} does not match {_n_true_batch} entries in batch_indices.'
                 )
 
             self.is_accept = th.zeros_like(energies, dtype=th.bool)
@@ -544,35 +579,45 @@ class _BaseMC(BaseMotion):
 
             dump_names = self.get_dump_vars()
             log_names = self.get_log_vars()
-            total_names = self.get_transfer_vars()
+            # Logging is disabled completely at verbose=0, so log-only fields
+            # do not need staging or device-to-host transfer buffers.
+            total_names = (
+                self.get_transfer_vars()
+                if self.verbose > 0 else set(dump_names)
+            )
             s_cpu, s_buf = self._allocate_cpu_buffers(
                 s,
                 total_names,
                 self.device,
                 require_buffer=(self.device.type == 'cuda'),
             )
-            if dump_names:
-                _n_dump = math.ceil(
+            # Start a trajectory group only when at least one quantity was
+            # selected through `dump_quantities`.
+            if len(dump_names) > 0:
+                n_dump_cycles = math.ceil(
                     self.maxiter / self.output_structures_per_step
                 )
                 self.dumper.start_from_arrays(
-                    _n_dump,
+                    n_dump_cycles,
                     *(getattr(s_cpu, _name).numpy() for _name in dump_names),
                     names=dump_names,
                 )
 
-            if batch_indices is None:
-                _shape_center = th.mean(X, dim=1, keepdim=True)
+            if _fix_shape_center:
+                if batch_indices is None:  # _shape_center should be READ-ONLY
+                    _shape_center = th.mean(X, dim=1, keepdim=True)
+                else:
+                    _shape_center = index_reduce(
+                        X,
+                        self.batch_scatter,
+                        dim=1,
+                        out_size=self.scatter_dim_out_size,
+                    ) / self.batch_tensor.reshape(1, -1, 1)
+                    _shape_center = _shape_center.index_select(
+                        1, self.batch_scatter
+                    )
             else:
-                _shape_center = index_reduce(
-                    X,
-                    self.batch_scatter,
-                    dim=1,
-                    out_size=self.scatter_dim_out_size,
-                ) / self.batch_tensor.reshape(1, -1, 1)
-                _shape_center = _shape_center.index_select(
-                    1, self.batch_scatter
-                )
+                _shape_center = None
 
             if self.device.type == 'cuda':
                 copy_stream = th.cuda.Stream()
@@ -597,25 +642,54 @@ class _BaseMC(BaseMotion):
             try:
                 dump_thread.start()
                 log_thread.start()
-                if self.is_compile:
-                    _main_loop = th.compile(
-                        self._main_for_loop, **self.compile_kwargs
-                    )
-                else:
-                    _main_loop = self._main_for_loop
-                _main_loop(
-                    s, s_cpu, s_buf,
-                    dump_names, log_names, total_names,
-                    copy_stream, copy_event,
-                    dump_queue, log_queue,
-                    func, func_args, func_kwargs,
-                    batch_indices,
-                    _fix_shape_center, move_to_center_freq, _shape_center,
-                )
-                self._dump_done.wait()
-                self._print_done.wait()
+
                 if self.device.type == 'cuda':
+                    if _fix_shape_center:
+                        shape_center_graph = th.cuda.CUDAGraph()
+                        with th.cuda.graph(shape_center_graph):
+                            s.X.add_(
+                                _shape_center - self.calc_shape_center(s.X)
+                            )
+                    else:
+                        shape_center_graph = None
+
+                    if self.is_compile:
+                        _main_loop_cuda = th.compile(
+                            self._main_loop_cuda, **self.compile_kwargs
+                        )
+                    else:
+                        _main_loop_cuda = self._main_loop_cuda
+                    _main_loop_cuda(
+                        s, s_cpu, s_buf,
+                        dump_names, log_names, total_names,
+                        copy_stream, copy_event,
+                        shape_center_graph,
+                        dump_queue, log_queue,
+                        func, func_args, func_kwargs,
+                        batch_indices,
+                        _fix_shape_center, move_to_center_freq, _shape_center,
+                    )
+                    self._dump_done.wait()
+                    self._print_done.wait()
                     th.cuda.synchronize(self.device)
+                else:
+                    if self.is_compile:
+                        _main_loop_cpu = th.compile(
+                            self._main_loop_cpu, **self.compile_kwargs
+                        )
+                    else:
+                        _main_loop_cpu = self._main_loop_cpu
+                    _main_loop_cpu(
+                        s, s_cpu, s_buf,
+                        dump_names, log_names, total_names,
+                        copy_stream, copy_event,
+                        dump_queue, log_queue,
+                        func, func_args, func_kwargs,
+                        batch_indices,
+                        _fix_shape_center, move_to_center_freq, _shape_center,
+                    )
+                    self._dump_done.wait()
+                    self._print_done.wait()
             finally:
                 dump_queue.put(None)
                 dump_thread.join()
@@ -628,7 +702,7 @@ class _BaseMC(BaseMotion):
                 f'{time.perf_counter() - _t_main:<.4f} s\n'
             )
 
-    def _main_for_loop(
+    def _main_loop_cpu(
             self,
             s,
             s_cpu,
@@ -685,35 +759,29 @@ class _BaseMC(BaseMotion):
             signal completion. On CUDA, the consumers additionally synchronize
             with ``copy_event`` before accessing NumPy views of pinned memory.
         """
-        _is_cuda = self.device.type == 'cuda'
         for numit in range(self.maxiter):
-            if numit % self.output_structures_per_step == 0 and total_names:
+            if (
+                    numit % self.output_structures_per_step == 0 and
+                    len(total_names) > 0
+            ):
                 # The two CPU buffers are shared with consumer threads. Wait
                 # until both consumers release the previous snapshot before
                 # overwriting any registered field.
                 self._dump_done.wait()
                 self._print_done.wait()
 
-                if _is_cuda:
-                    self._transfer_buffers_D2H(
-                        s, s_buf, s_cpu, total_names,
-                        copy_stream, self.device,
-                    )
-                    copy_event.record(copy_stream)
-                    sync_event = copy_event
-                else:
-                    for _name in total_names:
-                        getattr(s_cpu, _name).copy_(getattr(s, _name))
-                    sync_event = None
+                for _name in total_names:
+                    getattr(s_cpu, _name).copy_(getattr(s, _name))
+                sync_event = None
 
-                if dump_names:
+                if len(dump_names) > 0:
                     self._dump_done.clear()
                     dump_queue.put((
                         self.dumper,
                         sync_event,
                         *(getattr(s_cpu, _name) for _name in dump_names),
                     ))
-                if self.verbose > 0 and log_names:
+                if self.verbose > 0 and len(log_names) > 0:
                     self._print_done.clear()
                     log_queue.put((
                         sync_event,
@@ -723,23 +791,137 @@ class _BaseMC(BaseMotion):
                     ))
 
             # Proposal/update work overlaps with disk I/O and log formatting.
-            _X_old = s.X.clone()
-            _energies_old = s.Energy.clone()
+            X_old = s.X
+            energies_old = s.Energy
             _energies, _delta_E, _X = self._update_X(
-                func, func_args, func_kwargs, _energies_old, s.X
+                func, func_args, func_kwargs, energies_old, X_old
             )
-            _X_diff = _X - _X_old
+            _X_diff = _X - X_old
             s.Energy = _energies
             s.delta_E = _delta_E
             s.X = _X
             s.is_accept = self.is_accept
 
             self._update_algo_param(numit, _X_diff)
-            _temperature = 0. if self.T_now is None else float(self.T_now)
-            s.temperature.fill_(_temperature)
+            if 'temperature' in total_names:
+                _temperature = 0. if self.T_now is None else float(self.T_now)
+                s.temperature.fill_(_temperature)
 
             if fix_shape_center and numit % move_to_center_freq == 0:
                 s.X.add_(shape_center - self.calc_shape_center(s.X))
+
+    def _main_loop_cuda(
+            self,
+            s,
+            s_cpu,
+            s_buf,
+            dump_names,
+            log_names,
+            total_names,
+            copy_stream,
+            copy_event,
+            shape_center_graph: th.cuda.CUDAGraph,
+            dump_queue,
+            log_queue,
+            func,
+            func_args,
+            func_kwargs,
+            batch_indices,
+            fix_shape_center,
+            move_to_center_freq,
+            shape_center,
+    ):
+        """Execute the proposal/update loop with a shared snapshot protocol.
+
+        Args:
+            s: Live :class:`StdContainer` holding every allowed MC quantity.
+            s_cpu: Pinned CPU mirror used by the dump and print consumers.
+            s_buf: CUDA staging mirror used to protect asynchronous D2H copies;
+                ``None`` on CPU.
+            dump_names: Ordered state names written to the trajectory.
+            log_names: Ordered state names passed to the log consumer.
+            total_names: Union of dump and log names copied at each output
+                iteration.
+            copy_stream: CUDA stream used for D2H copies, or ``None`` on CPU.
+            copy_event: CUDA event recorded after a D2H snapshot, or ``None``
+                on CPU.
+            shape_center_graph: the graph of move to shape center
+            dump_queue: Queue consumed by :meth:`_do_async_dump`.
+            log_queue: Queue consumed by :meth:`_do_async_print`.
+            func: Energy model used to evaluate proposed coordinates.
+            func_args: Positional arguments forwarded to ``func``.
+            func_kwargs: Keyword arguments forwarded to ``func``.
+            batch_indices: Normalized irregular atom counts, or ``None`` for a
+                regular batch. Passed to the array logger for splitting.
+            fix_shape_center: Whether geometric-center restoration is enabled.
+            move_to_center_freq: Number of iterations between center
+                restorations.
+            shape_center: Initial per-atom expanded geometric center used as
+                the restoration target.
+
+        Returns:
+            None. ``s`` is updated in place. At output iterations, snapshots
+            represent the state at the beginning of that iteration, matching
+            the historical MC trajectory timing.
+
+        Notes:
+            Before reusing ``s_cpu``, the producer waits for both consumers to
+            signal completion. On CUDA, the consumers additionally synchronize
+            with ``copy_event`` before accessing NumPy views of pinned memory.
+        """
+        for numit in range(self.maxiter):
+            if (
+                    numit % self.output_structures_per_step == 0 and
+                    len(total_names) > 0
+            ):
+                # The two CPU buffers are shared with consumer threads. Wait
+                # until both consumers release the previous snapshot before
+                # overwriting any registered field.
+                self._dump_done.wait()
+                self._print_done.wait()
+
+                self._transfer_buffers_D2H(
+                    s, s_buf, s_cpu, total_names,
+                    copy_stream, self.device,
+                )
+                copy_event.record(copy_stream)
+                sync_event = copy_event
+
+                if len(dump_names) > 0:
+                    self._dump_done.clear()
+                    dump_queue.put((
+                        self.dumper,
+                        sync_event,
+                        *(getattr(s_cpu, _name) for _name in dump_names),
+                    ))
+                if self.verbose > 0 and len(log_names) > 0:
+                    self._print_done.clear()
+                    log_queue.put((
+                        sync_event,
+                        numit,
+                        batch_indices,
+                        *(getattr(s_cpu, _name) for _name in log_names),
+                    ))
+
+            # Proposal/update work overlaps with disk I/O and log formatting.
+            X_old = s.X
+            energies_old = s.Energy
+            _energies, _delta_E, _X = self._update_X(
+                func, func_args, func_kwargs, energies_old, X_old
+            )
+            _X_diff = _X - X_old
+            s.Energy = _energies
+            s.delta_E = _delta_E
+            s.X.copy_(_X)  # keep the memory for graph replaying
+            s.is_accept = self.is_accept
+
+            self._update_algo_param(numit, _X_diff)
+            if 'temperature' in total_names:
+                _temperature = 0. if self.T_now is None else float(self.T_now)
+                s.temperature.fill_(_temperature)
+            # move to the origin shape center
+            if fix_shape_center and numit % move_to_center_freq == 0:
+                shape_center_graph.replay()
 
     def initialize_algo_param(self):
         """Initialize algorithm-specific state before model evaluation.

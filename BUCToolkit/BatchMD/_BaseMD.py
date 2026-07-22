@@ -48,6 +48,7 @@ class _BaseMD(BaseMotion):
         'Ekt_vir',
         'Ek',
         'p_iota',
+        'require_Ek_update',
         #'__dict__'
     ]
 
@@ -103,6 +104,9 @@ class _BaseMD(BaseMotion):
         self.Ekt_vir = None    # virtual kinetic energy for _CSVR_ thermostat.
         self.Ek = None         # kinetic energy at each timestep.
         self.p_iota = None       # thermostat var. for Nose-Hoover.
+        # An ensemble-specific initializer enables this when the shared loop
+        # must refresh kinetic energy every integration step.
+        self.require_Ek_update = False
 
         self.batch_tensor = None  # tensor form of `batch_indices` if it was given.
         self.batch_scatter = None # tensor indices form of `batch_indices` if it was given
@@ -372,6 +376,7 @@ class _BaseMD(BaseMotion):
             # __init__ or initialize() via register_extra_dump_vars /
             # register_extra_print_vars.
             self.reset_register_vars()
+            self.require_Ek_update = False
             if self.device.type == "cuda":
                 self.__run_on_cuda(
                     func,
@@ -646,16 +651,26 @@ class _BaseMD(BaseMotion):
             # dynamic dump buffers
             dump_names = self.get_dump_vars()  # self._dump_vars
             log_names = self.get_log_vars()
-            total_names = self.get_transfer_vars()
+            # At verbose=0, registered log-only fields have no consumer and
+            # therefore do not need host buffers or device-to-host transfers.
+            total_names = (
+                self.get_transfer_vars()
+                if self.verbose > 0 else set(dump_names)
+            )
+            # Whether one requires Ek or temperature to output
+            has_Ek_T_output = ('Ek' in total_names or 'temperature' in total_names)
+            # buffers
             s_cpu, s_buf = self._allocate_cpu_buffers(s, total_names, self.device)
             _num_dump = math.ceil(self.max_step / self.output_structures_per_step)
-            dumper.start_from_arrays(
-                _num_dump,
-                *(getattr(s_cpu, name).numpy() for name in dump_names),
-                names=dump_names,
-            )
+            if len(dump_names) > 0:
+                dumper.start_from_arrays(
+                    _num_dump,
+                    *(getattr(s_cpu, name).numpy() for name in dump_names),
+                    names=dump_names,
+                )
 
-            # preload a graph of Ek, T
+            # Keep this generic graph available to subclasses such as CSVR,
+            # which may replay it inside their own update implementation.
             Ek_T_graph = th.cuda.CUDAGraph()
             with th.cuda.graph(Ek_T_graph):
                 _e_tmp, _t_tmp = self._reduce_Ek_T(batch_indices, masses, s.V)
@@ -693,9 +708,9 @@ class _BaseMD(BaseMotion):
                 logout_thread.start()
                 #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                 if self.is_compile:
-                    _main_loop = th.compile(self._main_for_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
+                    _main_loop = th.compile(self._main_loop_cuda, **self.compile_kwargs, disable=(not self.is_compile))
                 else:
-                    _main_loop = self._main_for_loop_cuda
+                    _main_loop = self._main_loop_cuda
                 _main_loop(
                     s,
                     s_cpu,
@@ -704,6 +719,7 @@ class _BaseMD(BaseMotion):
                     log_names,
                     total_names,
                     Ek_T_graph,
+                    has_Ek_T_output,
                     compute_event,
                     copy_stream,
                     copy_event,
@@ -728,7 +744,7 @@ class _BaseMD(BaseMotion):
         del self.Ekt_vir
         #return ptlist  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-    def _main_for_loop_cuda(
+    def _main_loop_cuda(
             self,
             s,
             s_cpu,
@@ -737,6 +753,7 @@ class _BaseMD(BaseMotion):
             log_names,
             total_names,
             Ek_T_graph,
+            has_Ek_T_output,
             compute_event,
             copy_stream,
             copy_event,
@@ -750,9 +767,12 @@ class _BaseMD(BaseMotion):
             mass_center_graph
     ):
         for i in range(self.max_step):
-            Ek_T_graph.replay()
-            self.Ek = s.Ek
-            if i % self.output_structures_per_step == 0:
+            is_output_step = (i % self.output_structures_per_step == 0)
+            # either algorithm require Ek each step or log requires, update Ek.
+            if (is_output_step and has_Ek_T_output) or self.require_Ek_update:
+                Ek_T_graph.replay()
+                self.Ek = s.Ek
+            if is_output_step and len(total_names) > 0:
                 # gate: wait for consumers from previous dump cycle
                 self._dump_done.wait()
                 self._print_done.wait()
@@ -762,11 +782,13 @@ class _BaseMD(BaseMotion):
                 self._transfer_buffers_D2H(s, s_buf, s_cpu, total_names, copy_stream, self.device)
                 copy_event.record(copy_stream)
                 # dump
-                self._dump_done.clear()
-                dump_queue.put((dumper, copy_event, *(getattr(s_cpu, _n) for _n in dump_names)))
+                if len(dump_names) > 0:
+                    self._dump_done.clear()
+                    dump_queue.put((dumper, copy_event, *(getattr(s_cpu, _n) for _n in dump_names)))
                 # print logs
-                self._print_done.clear()
-                logout_queue.put((i, copy_event, batch_indices, *(getattr(s_cpu, _n) for _n in log_names)))
+                if self.verbose > 0 and len(log_names) > 0:
+                    self._print_done.clear()
+                    logout_queue.put((i, copy_event, batch_indices, *(getattr(s_cpu, _n) for _n in log_names)))
 
             self._updateXV(
                 s,
@@ -1018,17 +1040,24 @@ class _BaseMD(BaseMotion):
             # dynamic dump buffers
             dump_names = self.get_dump_vars()
             log_names = self.get_log_vars()
-            total_names = self.get_transfer_vars()
+            # At verbose=0, registered log-only fields have no consumer and
+            # therefore do not need CPU snapshot buffers or copies.
+            total_names = (
+                self.get_transfer_vars()
+                if self.verbose > 0 else set(dump_names)
+            )
+            has_Ek_T_output = ('Ek' in total_names or 'temperature' in total_names)
             _num_dump = math.ceil(self.max_step / self.output_structures_per_step)
-            if dump_names:
+            if len(total_names) > 0:
                 s_cpu, s_buf = self._allocate_cpu_buffers(s, total_names, self.device)
+            else:
+                s_cpu, s_buf = None, None
+            if len(dump_names) > 0:
                 dumper.start_from_arrays(
                     _num_dump,
                     *(getattr(s_cpu, name).numpy() for name in dump_names),
                     names=dump_names,
                 )
-            else:
-                s_cpu, s_buf = None, None
 
             #ptlist = list()  # test <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
             # --- async threading (same pattern as CUDA, GIL released during I/O) ---
@@ -1045,25 +1074,29 @@ class _BaseMD(BaseMotion):
                 logout_thread.start()
                 t_main_loop = time.perf_counter()
                 for i in range(self.max_step):
-                    Ek, temperature = self._reduce_Ek_T(batch_indices, masses, s.V)
-                    self.Ek = Ek
-                    s.Ek.copy_(Ek)
-                    s.temperature.copy_(temperature)
+                    is_output_step = i % self.output_structures_per_step == 0
+                    if (is_output_step and has_Ek_T_output) or self.require_Ek_update:
+                        Ek, temperature = self._reduce_Ek_T(batch_indices, masses, s.V)
+                        self.Ek = Ek
+                        s.Ek.copy_(Ek)
+                        s.temperature.copy_(temperature)
 
-                    if i % self.output_structures_per_step == 0:
+                    if is_output_step and len(total_names) > 0:
                         # Gate: wait for consumers from previous dump cycle
                         self._dump_done.wait()
                         self._print_done.wait()
 
-                        # Snapshot s → s_cpu (CPU memcpy — synchronous, fast)
+                        # Snapshot s -> s_cpu (CPU memcpy - synchronous, fast)
                         for _n in total_names:
                             getattr(s_cpu, _n).copy_(getattr(s, _n))
 
                         # Dispatch consumers (event=None: no GPU D2H to sync)
-                        self._dump_done.clear()
-                        dump_queue.put((dumper, None, *(getattr(s_cpu, _n) for _n in dump_names)))
-                        self._print_done.clear()
-                        logout_queue.put((i, None, batch_indices, *(getattr(s_cpu, _n) for _n in log_names)))
+                        if len(dump_names) > 0:
+                            self._dump_done.clear()
+                            dump_queue.put((dumper, None, *(getattr(s_cpu, _n) for _n in dump_names)))
+                        if self.verbose > 0 and len(log_names) > 0:
+                            self._print_done.clear()
+                            logout_queue.put((i, None, batch_indices, *(getattr(s_cpu, _n) for _n in log_names)))
 
                     self._updateXV(
                         s, func, grad_func_, func_args, func_kwargs,

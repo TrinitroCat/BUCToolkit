@@ -16,9 +16,10 @@ from BUCToolkit.BatchMC import MMC
 from BUCToolkit.BatchMD.ConstrNVE import ConstrNVE
 from BUCToolkit.BatchMD.ConstrNVT import ConstrNVT
 from BUCToolkit.BatchMD.NVE import NVE
+from BUCToolkit.BatchMD.NVT import NVT
 from BUCToolkit.BatchOptim.minimize.FIRE import FIRE
 from BUCToolkit.BatchStructures import read_dump_arrays, read_mc_traj
-from BUCToolkit.BatchStructures.StructuresIO import ArrayDumper
+from BUCToolkit.BatchStructures.StructuresIO import ArrayDumper, ArrayDumpReader
 from BUCToolkit.Bases.BaseMotion import BaseMotion
 from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.Postprocessing import MDTrajectory
@@ -136,6 +137,125 @@ class MotionIORegressionTest(unittest.TestCase):
             [' X:\n', ' Fc:\n', ' other:\n'],
         )
 
+    def test_md_silent_run_transfers_only_dump_quantities(self):
+        """Silent MD runs do not allocate buffers for log-only quantities."""
+        runner = NVE(
+            0.1, 1, output_file=None, device='cpu', verbose=0
+        )
+        coordinates = th.zeros((1, 2, 3), dtype=th.float32)
+
+        with mock.patch(
+                'BUCToolkit.BatchMD._BaseMD._BaseMD._allocate_cpu_buffers',
+                wraps=BaseMotion._allocate_cpu_buffers,
+        ) as allocate_buffers:
+            runner.run(
+                lambda value: th.sum(value ** 2, dim=(-2, -1)),
+                coordinates,
+                [['H', 'H']],
+                V_init=th.zeros_like(coordinates),
+                grad_func=lambda value, energy: 2 * value,
+                is_grad_func_contain_y=True,
+            )
+
+        transferred_names = allocate_buffers.call_args.args[1]
+        self.assertEqual(
+            set(transferred_names), {'Energy', 'X', 'V', 'Force'}
+        )
+
+    def test_md_ensembles_request_only_required_kinetic_updates(self):
+        """Each ensemble controls its own shared kinetic-energy dependency."""
+        coordinates = th.tensor(
+            [[[0., 0., 0.], [1., 0., 0.]]], dtype=th.float32
+        )
+        velocities = th.tensor(
+            [[[0.1, 0., 0.], [-0.1, 0., 0.]]], dtype=th.float32
+        )
+        energy_func = lambda value: th.sum(value ** 2, dim=(-2, -1))
+        grad_func = lambda value, energy: 2 * value
+
+        runners = (
+            (
+                'NVE',
+                NVE(
+                    0.01, 2, output_file=None,
+                    device='cpu', verbose=0,
+                ),
+                0,
+                False,
+            ),
+            (
+                'Langevin',
+                NVT(
+                    0.01, 2, 'Langevin', {'damping_coeff': 0.01},
+                    output_file=None, device='cpu', verbose=0,
+                ),
+                0,
+                False,
+            ),
+            (
+                'VR',
+                NVT(
+                    0.01, 2, 'VR', output_file=None,
+                    device='cpu', verbose=0,
+                ),
+                2,
+                True,
+            ),
+            (
+                'CSVR',
+                NVT(
+                    0.01, 2, 'CSVR', {'time_const': 0.1},
+                    output_file=None, device='cpu', verbose=0,
+                ),
+                2,
+                False,
+            ),
+        )
+        for name, runner, expected_reductions, expected_requirement in runners:
+            with self.subTest(ensemble=name):
+                with mock.patch.object(
+                        runner,
+                        '_reduce_Ek_T',
+                        wraps=runner._reduce_Ek_T,
+                ) as reduce_Ek_T:
+                    runner.run(
+                        energy_func,
+                        coordinates,
+                        [['H', 'H']],
+                        V_init=velocities,
+                        grad_func=grad_func,
+                        is_grad_func_contain_y=True,
+                    )
+
+                self.assertEqual(reduce_Ek_T.call_count, expected_reductions)
+                self.assertIs(
+                    runner.require_Ek_update, expected_requirement
+                )
+
+        periodic_runner = NVE(
+            0.01,
+            5,
+            output_file=None,
+            output_structures_per_step=2,
+            device='cpu',
+            verbose=1,
+        )
+        with mock.patch.object(
+                periodic_runner,
+                '_reduce_Ek_T',
+                wraps=periodic_runner._reduce_Ek_T,
+        ) as reduce_Ek_T:
+            periodic_runner.run(
+                energy_func,
+                coordinates,
+                [['H', 'H']],
+                V_init=velocities,
+                grad_func=grad_func,
+                is_grad_func_contain_y=True,
+            )
+        self.assertEqual(reduce_Ek_T.call_count, 3)
+        self.assertFalse(periodic_runner.require_Ek_update)
+
     def test_mc_configurable_named_quantities_cpu(self):
         """MC uses named state fields and preserves boolean dump dtypes."""
         output_file = self._path('mc.bin')
@@ -158,6 +278,15 @@ class MotionIORegressionTest(unittest.TestCase):
             [['H'] * 3, ['H'] * 3],
         )
 
+        reader = ArrayDumpReader(output_file)
+        reader.read()
+        self.assertEqual(
+            reader.names,
+            {
+                0: ['cell_vec', 'atomic_numbers', 'fixed_mask'],
+                1: ['Energy', 'X', 'delta_E', 'is_accept', 'temperature'],
+            },
+        )
         raw = read_dump_arrays(output_file)
         self.assertEqual(
             {'Energy', 'X', 'delta_E', 'is_accept', 'temperature'},
@@ -240,6 +369,91 @@ class MotionIORegressionTest(unittest.TestCase):
             [value.shape for value in split['X']],
             [(2, 3), (3, 3), (2, 3), (3, 3)],
         )
+
+    def test_mc_silent_run_transfers_only_dump_quantities(self):
+        """Silent MC runs do not allocate buffers for log-only quantities."""
+        runner = MMC(
+            maxiter=1,
+            temperature_init=300.,
+            coordinate_update_param=0.01,
+            output_file=None,
+            device='cpu',
+            verbose=0,
+        )
+        coordinates = th.zeros((1, 2, 3), dtype=th.float32)
+
+        with mock.patch(
+                'BUCToolkit.BatchMC._BaseMC._BaseMC._allocate_cpu_buffers',
+                wraps=BaseMotion._allocate_cpu_buffers,
+        ) as allocate_buffers:
+            runner.run(
+                lambda value: th.sum(value ** 2, dim=(-2, -1)),
+                coordinates,
+                [['H', 'H']],
+            )
+
+        transferred_names = allocate_buffers.call_args.args[1]
+        self.assertEqual(set(transferred_names), {'Energy', 'X'})
+
+    def test_mc_proposal_validation_is_moved_outside_the_loop(self):
+        """Validated MC state uses lightweight per-step distributions."""
+        runner = MMC(
+            maxiter=2,
+            temperature_init=300.,
+            coordinate_update_param=0.01,
+            output_file=None,
+            device='cpu',
+            verbose=0,
+        )
+        coordinates = th.zeros((1, 2, 3), dtype=th.float32)
+
+        with mock.patch(
+                'BUCToolkit.BatchMC.MetropolisMC.th.distributions.Normal',
+                wraps=th.distributions.Normal,
+        ) as normal_distribution:
+            runner.run(
+                lambda value: th.sum(value ** 2, dim=(-2, -1)),
+                coordinates,
+                [['H', 'H']],
+            )
+
+        self.assertEqual(normal_distribution.call_count, 2)
+        for call in normal_distribution.call_args_list:
+            self.assertIs(call.kwargs['validate_args'], False)
+        self.assertEqual(runner._proposal_scale.shape, (1, 1, 1))
+
+    def test_mc_proposal_initialization_rejects_invalid_state(self):
+        """Initialization safeguards replace repeated distribution checks."""
+        invalid_parameters = (
+            {'temperature_init': 0.},
+            {'temperature_update_freq': 0},
+            {'coordinate_update_param': 0.},
+            {
+                'temperature_scheme': 'exponential',
+                'temperature_scheme_param': 0.,
+            },
+        )
+        for parameters in invalid_parameters:
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(ValueError):
+                    MMC(maxiter=1, output_file=None, **parameters)
+
+        runner = MMC(maxiter=1, output_file=None, device='cpu', verbose=0)
+        coordinates = th.zeros((1, 1, 3), dtype=th.float32)
+        with self.assertRaisesRegex(ValueError, 'movable degree'):
+            runner.run(
+                lambda value: th.sum(value ** 2, dim=(-2, -1)),
+                coordinates,
+                [['H']],
+                fixed_atom_tensor=th.zeros_like(coordinates),
+            )
+
+        with self.assertRaisesRegex(ValueError, 'finite coordinates'):
+            runner.run(
+                lambda value: th.sum(value ** 2, dim=(-2, -1)),
+                th.full_like(coordinates, float('nan')),
+                [['H']],
+            )
 
     def test_cpu_optimizer_final_dump_matches_returned_state(self):
         """The max-iteration frame contains the post-update CPU state."""

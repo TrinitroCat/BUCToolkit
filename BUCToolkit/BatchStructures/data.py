@@ -33,7 +33,7 @@ def size_repr(key, item, indent=0):
     return f"{indent_str}{key}={out}"
 
 
-class Data(object):
+class _Data(object):
     r"""A plain old python object modeling a single graph with various
     (optional) attributes:
 
@@ -438,3 +438,11 @@ class Data(object):
         else:
             info = [size_repr(key, item, indent=2) for key, item in self]
             return "{}(\n{}\n)".format(cls, ",\n".join(info))
+
+
+# Use one graph-data implementation throughout the public API. The fallback
+# remains available for environments where torch-geometric is not installed.
+try:
+    from torch_geometric.data import Data
+except ImportError:
+    Data = _Data

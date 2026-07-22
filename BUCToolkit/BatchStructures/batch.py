@@ -5,10 +5,10 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .data import Data
+from .data import Data, _Data
 
 
-class Batch(Data):
+class _Batch(_Data):
     r"""A plain old python object modeling a batch of graphs as one big
     (disconnected) graph. With :class:`torch_geometric.data.Data` being the
     base class, all its methods can also be used here.
@@ -17,7 +17,7 @@ class Batch(Data):
     """
 
     def __init__(self, batch=None, ptr=None, **kwargs):
-        super(Batch, self).__init__(**kwargs)
+        super(_Batch, self).__init__(**kwargs)
 
         for key, item in kwargs.items():
             if key == "num_nodes":
@@ -27,7 +27,7 @@ class Batch(Data):
 
         self.batch = batch
         self.ptr = ptr
-        self.__data_class__ = Data
+        self.__data_class__ = _Data
         self.__slices__ = None
         self.__cumsum__ = None
         self.__cat_dims__ = None
@@ -149,7 +149,7 @@ class Batch(Data):
 
         return batch.contiguous()
 
-    def get_example(self, idx: int) -> Data:
+    def get_example(self, idx: int) -> _Data:
         r"""Reconstructs the :class:`torch_geometric.data.Data` object at index
         :obj:`idx` from the batch object.
         The batch object must have been created via :meth:`from_data_list` in
@@ -200,7 +200,7 @@ class Batch(Data):
 
         return data
 
-    def index_select(self, idx: List) -> List[Data]:
+    def index_select(self, idx: List) -> List[_Data]:
         if isinstance(idx, slice):
             idx = list(range(self.num_graphs)[idx])
 
@@ -230,13 +230,13 @@ class Batch(Data):
 
     def __getitem__(self, idx):
         if isinstance(idx, str):
-            return super(Batch, self).__getitem__(idx)
+            return super(_Batch, self).__getitem__(idx)
         elif isinstance(idx, (int, np.integer)):
             return self.get_example(idx)
         else:
             return self.index_select(idx)
 
-    def to_data_list(self) -> List[Data]:
+    def to_data_list(self) -> List[_Data]:
         r"""Reconstructs the list of :class:`torch_geometric.data.Data` objects
         from the batch object.
         The batch object must have been created via :meth:`from_data_list` in
@@ -262,3 +262,11 @@ class Batch(Data):
 
     def __len__(self) -> int:
         return self.num_graphs
+
+
+# Match the public Batch class to the public Data implementation selected in
+# data.py. The fallback pair remains internally consistent as _Batch/_Data.
+try:
+    from torch_geometric.data import Batch
+except ImportError:
+    Batch = _Batch

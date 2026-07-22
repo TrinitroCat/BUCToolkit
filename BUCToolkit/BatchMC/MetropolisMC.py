@@ -3,7 +3,6 @@
 #  Version: 0.9a
 #  File: MetropolisMC.py
 #  Environment: Python 3.12
-import copy
 import math
 
 import torch as th
@@ -64,7 +63,36 @@ class MMC(_BaseMC):
             dump_quantities: names of MC state tensors written to the binary
                 trajectory. Defaults preserve the legacy Energy/X layout.
             log_quantities: names included in the name-driven per-step log.
+
+        Raises:
+            ValueError: If the initial temperature, temperature-update
+                frequency, coordinate scale, or temperature-scheme parameter
+                is invalid.
         """
+        temperature_init = float(temperature_init)
+        if not math.isfinite(temperature_init) or temperature_init <= 0.:
+            raise ValueError(
+                '`temperature_init` must be a finite positive value, but got '
+                f'{temperature_init}.'
+            )
+        if (
+                not isinstance(temperature_update_freq, int) or
+                temperature_update_freq <= 0
+        ):
+            raise ValueError(
+                '`temperature_update_freq` must be a positive integer, but '
+                f'got {temperature_update_freq}.'
+            )
+        coordinate_update_param = float(coordinate_update_param)
+        if (
+                not math.isfinite(coordinate_update_param) or
+                coordinate_update_param <= 0.
+        ):
+            raise ValueError(
+                '`coordinate_update_param` must be a finite positive value, '
+                f'but got {coordinate_update_param}.'
+            )
+
         super().__init__(
             iter_scheme=iter_scheme,
             maxiter=maxiter,
@@ -77,8 +105,8 @@ class MMC(_BaseMC):
             dump_quantities=dump_quantities,
             log_quantities=log_quantities,
         )
-        self.T_begin = float(temperature_init)
-        self.T_now = copy.deepcopy(self.T_begin)
+        self.T_begin = temperature_init
+        self.T_now = self.T_begin
         self.temperature_update_freq = temperature_update_freq
         __T_alpha_default = {
             'constant': 0.,
@@ -87,7 +115,32 @@ class MMC(_BaseMC):
             'log': 1.,
             'fast': 0.2
         }
-        self.T_alpha = float(temperature_scheme_param) if temperature_scheme_param is not None else __T_alpha_default[temperature_scheme]
+        self.T_alpha = (
+            float(temperature_scheme_param)
+            if temperature_scheme_param is not None
+            else __T_alpha_default[temperature_scheme]
+        )
+        if not math.isfinite(self.T_alpha):
+            raise ValueError(
+                '`temperature_scheme_param` must be finite, but got '
+                f'{self.T_alpha}.'
+            )
+        if (
+                temperature_scheme in ('linear', 'exponential') and
+                self.T_alpha <= 0.
+        ):
+            raise ValueError(
+                f'`temperature_scheme_param` must be positive for '
+                f'{temperature_scheme!r}, but got {self.T_alpha}.'
+            )
+        if (
+                temperature_scheme in ('log', 'fast') and
+                self.T_alpha < 0.
+        ):
+            raise ValueError(
+                f'`temperature_scheme_param` must be non-negative for '
+                f'{temperature_scheme!r}, but got {self.T_alpha}.'
+            )
         __T_scheme_dict = {
             'constant': self.__t_constant,
             'linear': self.__t_linear,
@@ -98,6 +151,7 @@ class MMC(_BaseMC):
         self.T_update_func = __T_scheme_dict[temperature_scheme]
 
         self.coordinate_update_param = coordinate_update_param
+        self._proposal_scale: th.Tensor | None = None
         __X_scheme_dict = {
             'Gaussian': self.__x_Gaussian,
             'Cauchy': self.__x_Cauchy,
@@ -117,41 +171,37 @@ class MMC(_BaseMC):
         self.T_now *= self.T_alpha
 
     def __t_log(self, i):
-        self.T_now =  self.T_begin/(1. + th.log(1. + self.T_alpha * i))
+        self.T_now = self.T_begin / (
+            1. + math.log(1. + self.T_alpha * i)
+        )
 
     def __t_fast(self, i):
-        self.T_now = self.T_begin/(1. + self.T_alpha * i)
+        self.T_now = self.T_begin / (1. + self.T_alpha * i)
 
     def __x_Gaussian(self, X: th.Tensor):
-        T_tmp = max(10., self.T_now)
-        _sigma_short = self.coordinate_update_param * math.sqrt(T_tmp/298.15) / th.sqrt(self.free_degree)
-        if self.is_concat_X:
-            _std = _sigma_short.reshape(1, -1, 1).index_select(1, self.batch_scatter)
-        else:
-            _std = _sigma_short.reshape(-1, 1, 1)
-        g = th.distributions.Normal(X, _std)
+        temperature_scale = math.sqrt(max(10., self.T_now))
+        proposal_std = self._proposal_scale * temperature_scale
+        # Initialization guarantees a finite positive scale. Avoid repeating
+        # Distribution's CUDA-wide argument reductions at every MC step.
+        g = th.distributions.Normal(X, proposal_std, validate_args=False)
         X_new = g.sample()
         return X_new
 
     def __x_Cauchy(self, X: th.Tensor):
-        T_tmp = max(10., self.T_now)
-        _sigma_short = self.coordinate_update_param * math.sqrt(T_tmp / 298.15) / th.sqrt(self.free_degree)
-        if self.is_concat_X:
-            _std = _sigma_short.reshape(1, -1, 1).index_select(1, self.batch_scatter)
-        else:
-            _std = _sigma_short.reshape(-1, 1, 1)
-        g = th.distributions.Cauchy(X, _std)
+        temperature_scale = math.sqrt(max(10., self.T_now))
+        proposal_std = self._proposal_scale * temperature_scale
+        g = th.distributions.Cauchy(X, proposal_std, validate_args=False)
         X_new = g.sample()
         return X_new
 
     def __x_Uniform(self, X: th.Tensor):
-        T_tmp = max(10., self.T_now)
-        _sigma_short = self.coordinate_update_param * math.sqrt(T_tmp / 298.15) / th.sqrt(self.free_degree)
-        if self.is_concat_X:
-            _std = _sigma_short.reshape(1, -1, 1).index_select(1, self.batch_scatter)
-        else:
-            _std = _sigma_short.reshape(-1, 1, 1)
-        g = th.distributions.Uniform(X - _std, X + _std)
+        temperature_scale = math.sqrt(max(10., self.T_now))
+        proposal_std = self._proposal_scale * temperature_scale
+        g = th.distributions.Uniform(
+            X - proposal_std,
+            X + proposal_std,
+            validate_args=False,
+        )
         X_new = g.sample()
         return X_new
 
@@ -169,7 +219,7 @@ class MMC(_BaseMC):
             p: th.Tensor, the new update direction of X.
         """
         _X = self.X_update_func(X)  # atom_mask will be handled within update_func
-        _energy = th.compiler.disable(func)(_X, *func_args, **func_kwargs)
+        _energy = func(_X, *func_args, **func_kwargs)
         delta_E = _energy - energies_old  # (n_batch, )
         metropolis_mask = th.exp(- delta_E / (8.617333262145e-5 * self.T_now))  # (n_batch, ); Boltzmann constant kB = 8.617333262145e-5 eV/K
         # metropolis_mask.clamp_max_(1.)  # no need to cut-off because rand_like always < 1.
@@ -216,4 +266,23 @@ class MMC(_BaseMC):
         pass
 
     def initialize_algo_param(self):
-        pass
+        """Cache the temperature-independent proposal scale on the run device.
+
+        The coordinate scale and per-structure degrees of freedom are constant
+        during one run. Irregular batches expand them into atom order once;
+        each MC step then applies only the current scalar temperature factor.
+
+        Returns:
+            None. The device tensor is retained in ``self._proposal_scale``.
+        """
+        proposal_scale = (
+                self.coordinate_update_param / math.sqrt(298.15) /
+                th.sqrt(self.free_degree.to(dtype=self.atom_masks.dtype))
+        )
+        if self.is_concat_X:
+            proposal_scale = proposal_scale.reshape(1, -1, 1).index_select(
+                1, self.batch_scatter
+            )
+        else:
+            proposal_scale = proposal_scale.reshape(-1, 1, 1)
+        self._proposal_scale = proposal_scale

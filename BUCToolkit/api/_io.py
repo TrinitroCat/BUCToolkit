@@ -989,11 +989,7 @@ class PygBatchUpdater:
 
     def __init__(self):
         self.__check_old = None
-        _pyg = check_module('torch_geometric.data.batch')
-        if _pyg is None:
-            self.pygData = Batch
-        else:
-            self.pygData = _pyg.Batch
+        self.pygData = Batch
 
     def initialize(self):
         self.__check_old = None
