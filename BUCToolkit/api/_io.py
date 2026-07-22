@@ -871,7 +871,13 @@ class DumpStructures:
             energies,
             forces,
         )
-        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.start_from_arrays(
+            1, batch_indices, idx, cells, elements, pos, fixations, energies, forces,
+            names=(
+                'batch_indices', 'structure_ids', 'cell_vec', 'atomic_numbers',
+                'X', 'fixed_mask', 'Energy', 'Force',
+            ),
+        )
         self.dumper.step(
             batch_indices, idx, cells, elements, pos, fixations, energies, forces
         )
@@ -898,7 +904,13 @@ class DumpStructures:
             energies,
             forces,
         )
-        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.start_from_arrays(
+            1, batch_indices, idx, cells, elements, pos, fixations, energies, forces,
+            names=(
+                'batch_indices', 'structure_ids', 'cell_vec', 'atomic_numbers',
+                'X', 'fixed_mask', 'Energy', 'Force',
+            ),
+        )
         self.dumper.step(
             batch_indices, idx, cells, elements, pos, fixations, energies, forces
         )

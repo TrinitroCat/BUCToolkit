@@ -14,7 +14,7 @@ from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Seque
 import torch as th
 from torch import nn
 
-from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER
+from BUCToolkit.utils._Element_info import MASS, N_MASS
 from .._BaseOpt import _BaseOpt
 from BUCToolkit.Bases.BaseConstraints import BaseConstr
 from BUCToolkit.utils.index_ops import index_inner_product
@@ -323,10 +323,7 @@ class FIRE(_BaseOpt):
 
         # pass system info to _BaseOpt for dump header
         if elements is not None:
-            _atm = []
-            for _Elem in elements:
-                _atm.extend([MASS[__e] if isinstance(__e, str) else __e for __e in _Elem])
-            self.atomic_numbers = _atm
+            self.set_system_info(atomic_numbers=elements)
 
         _results = super().run(
             func,
@@ -529,6 +526,9 @@ class ConstrFIRE(FIRE):
             raise TypeError(f'Expected masses is a Sequence[Sequence[...]], but occurred {type(elements)}.')
         self.v = th.zeros_like(X, device=self.device)
         self._zero_placeholder = self._zero_placeholder.broadcast_to(X.shape)
+
+        if elements is not None:
+            self.set_system_info(atomic_numbers=elements)
 
         self.initialize(
             func,

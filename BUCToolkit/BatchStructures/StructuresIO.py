@@ -17,7 +17,7 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit._version import __version__
+from BUCToolkit._version import __db_version__
 from BUCToolkit.BatchStructures.BatchStructuresBase import BatchStructures
 from BUCToolkit.utils.ElemListReduce import elem_list_reduce
 
@@ -150,6 +150,43 @@ class ArrayDumper:
                 parts.append(b'\x00' * (8 - remainder))
         return b''.join(parts)
 
+    def _prepare_names_section(
+            self,
+            names: Sequence[str] | None,
+            n_arrays: int,
+    ) -> bytes:
+        """Validate and encode the array names of one DB 2.0 group.
+
+        Canonical DB 2.0 groups are self-describing: every stored array has
+        one non-empty, unique name.  This method performs the group-level
+        validation shared by :meth:`start` and :meth:`start_from_arrays`, then
+        delegates the binary UTF-16 encoding to :meth:`_encode_names_section`.
+
+        Args:
+            names: Array names in exactly the same order as the arrays passed
+                to the group-start method. ``None`` is not valid in DB 2.0.
+            n_arrays: Number of arrays contained in each cycle of the group.
+
+        Returns:
+            Encoded names-section bytes, including the number of names, each
+            UTF-16 name and its 64-bit alignment padding.
+        """
+        if names is None:
+            raise ValueError(
+                'DB 2.0 requires one unique name for every dumped array.'
+            )
+        normalized_names = [str(name) for name in names]
+        if len(normalized_names) != n_arrays:
+            raise ValueError(
+                f'Number of names ({len(normalized_names)}) must match number '
+                f'of arrays ({n_arrays}).'
+            )
+        if any(not name for name in normalized_names):
+            raise ValueError('Array names must be non-empty strings.')
+        if len(set(normalized_names)) != len(normalized_names):
+            raise ValueError(f'Array names must be unique, got {normalized_names}.')
+        return self._encode_names_section(normalized_names)
+
     def initialize(self, ):
         r"""
         do initialization before saving arrays, writing the head information.
@@ -165,7 +202,7 @@ class ArrayDumper:
                 `char``n_cycle``n_array``n_names``name1` ... `name_n``dtype1``shape1[]`0`dtype2``shape2[]`0...`dtype_n``shape_n[]`0`byte_data`...
                  HEAD  uint8    uint8    uint8    [uint8, utf16, padding] ...
                   where `char` is the character number indicate the array head information, which is hard coded as "HEAD",
-                  `n_names` is the number of array names (0 if unnamed). Each name is stored as:
+                  `n_names` equals `n_array` in canonical DB 2.0. Each name is stored as:
                     name_len   (8 bytes, uint64): number of UTF-16 code units,
                     name_data  (name_len × 2 bytes): UTF-16 encoded string,
                     padding    (0–6 bytes): zero-padding to 64-bit boundary.
@@ -205,7 +242,7 @@ class ArrayDumper:
                 else:  # simply reference the normal IOWrapper
                     self._mmp_f = self._dump_file
                 self._mmp_f.write(f'{self.head_order}BM'.encode(self._str_fmt))
-                _v = __version__.split('.', 2)
+                _v = __db_version__.split('.', 2)
                 v1 = int(_v[0])
                 v2 = int(_v[1])
                 if v1 >= 255 or v2 >= 255:
@@ -253,16 +290,15 @@ class ArrayDumper:
             # check version
             v1 = int.from_bytes(file_head[6:7], self._num_fmt, signed=False)
             v2 = int.from_bytes(file_head[7:8], self._num_fmt, signed=False)
-            _version_now = __version__.split('.', 2)
+            _version_now = __db_version__.split('.', 2)
             v1_now = int(_version_now[0])
             v2_now = int(_version_now[1])
             if v1_now >= 255 or v2_now >= 255:
                 raise NotImplementedError(f'The version numbers have been reached {_version_now}. How frightful!')
             if (v1, v2) != (v1_now, v2_now):
-                warnings.warn(
-                    f"The file {self.path} (ver \"{'.'.join((str(v1), str(v2)))}\") is incompatible with "
-                    f"the current version \"{__version__}\".",
-                    RuntimeWarning,
+                raise ValueError(
+                    f'Database version {v1}.{v2} cannot be appended by the '
+                    f'canonical {__db_version__} dumper. Convert the file first.'
                 )
             # read the group number
             self._n_groups = int.from_bytes(file_head[8:16], self._num_fmt, signed=False)
@@ -310,8 +346,8 @@ class ArrayDumper:
             steps: the iteration number of arrays, which will be dumped. If `steps` = -1, a dynamic steps will be used.
             *arrays: sequence of arrays as the prototype.
             force: whether to force starting a new dumping series even if there are still blanks at the end of the mmap file.
-            names: optional list of human-readable names for each array, stored as UTF-16 in the data header.
-                   Must have the same length as `*arrays`. Pass None or an empty list for unnamed arrays.
+            names: unique human-readable names for each array. DB 2.0 requires
+                exactly one non-empty name per array.
 
         Returns: None
         """
@@ -345,16 +381,7 @@ class ArrayDumper:
             # count head length
             self._nbytes_list_to_check = list()
             self._n_arrays = len(arrays)
-            # validate and encode names section
-            if names:
-                if len(names) != self._n_arrays:
-                    raise ValueError(
-                        f'Number of names ({len(names)}) must match number of arrays '
-                        f'({self._n_arrays}).'
-                    )
-                names_section_bytes = self._encode_names_section(names)
-            else:
-                names_section_bytes = (0).to_bytes(8, self._num_fmt, signed=False)  # n_names = 0
+            names_section_bytes = self._prepare_names_section(names, self._n_arrays)
             _head_nbytes = 24 + len(names_section_bytes)  # `char``n_cycle``n_array``names_section`, 3*8 + names
             head_len_list = list()
             arr_type_list: List[Tuple[str, str, int]] = list()
@@ -433,8 +460,8 @@ class ArrayDumper:
             dtype_list: list of the arrays' dtypes.
             shape_list: list of the arrays' shapes.
             force: whether to force starting a new dumping series even if there are still blanks at the end of the mmap file.
-            names: optional list of human-readable names for each array, stored as UTF-16 in the data header.
-                   Must have the same length as `dtype_list`. Pass None or an empty list for unnamed arrays.
+            names: unique human-readable names for each array. DB 2.0 requires
+                exactly one non-empty name per array.
 
         Returns: None
         """
@@ -471,16 +498,7 @@ class ArrayDumper:
             self._n_arrays = len(dtype_list)
             if self._n_arrays != len(shape_list):
                 raise ValueError(f'The length of `dtype_list` and `shape_list` must match, but got {self._n_arrays} and {len(shape_list)}.')
-            # validate and encode names section
-            if names:
-                if len(names) != self._n_arrays:
-                    raise ValueError(
-                        f'Number of names ({len(names)}) must match number of arrays '
-                        f'({self._n_arrays}).'
-                    )
-                names_section_bytes = self._encode_names_section(names)
-            else:
-                names_section_bytes = (0).to_bytes(8, self._num_fmt, signed=False)  # n_names = 0
+            names_section_bytes = self._prepare_names_section(names, self._n_arrays)
             _head_nbytes = 24 + len(names_section_bytes)  # `char``n_cycle``n_array``names_section`, 3*8 + names
             head_len_list = list()
             arr_type_list: List[Tuple[str, str, int]] = list()
@@ -755,21 +773,37 @@ class _ArrayDumperPlaceHolder:
         pass
 
 
-class ArrayDumpReader:
-    """
-    Reading the mmap file dumped by class `ArrayDumper`.
-    The file will be lazily opened and read at the first time calling `read`.
+class ArrayDumpReaderOld:
+    """Read legacy DB 1.0 array dumps.
 
+    DB 1.0 originally stored only array dtype and shape information.  Some
+    beta files also contain the later names section while retaining version
+    1.0.  This reader accepts both layouts so retained files can be inspected
+    through ``read_*_old`` or converted to canonical DB 2.0.
+
+    The reader exposes raw groups and does not assign semantic names to an
+    unnamed legacy group.  Specialized legacy trajectory readers provide the
+    historical positional mapping for MD, MC, and optimizer files.
+
+    Args:
+        path: Path to an existing DB 1.0 binary dump.
+
+    Attributes:
+        db_version: Two-integer database version parsed from the file header.
+        n_groups: Number of array groups recorded in the file header.
     """
 
     _MAX_NAMES: int = 256       # sanity cap for n_names discriminator
     _MAX_NAME_LENGTH: int = 256  # max UTF-16 code units per array name
+    _SUPPORTED_DB_VERSION: Tuple[int, int] = (1, 0)
+    _REQUIRE_NAMES: bool = False
 
     def __init__(self, path: str):
-        """
+        """Open and validate the fixed DB 1.0 file header.
 
         Args:
-            path: the path to the mmap file.
+            path: Path to the legacy binary dump. The data region is mapped
+                lazily when :meth:`read` is called.
         """
         self._path = path
         # init vars
@@ -805,19 +839,15 @@ class ArrayDumpReader:
         magik = file_head[2:6].decode(self._str_fmt)
         if magik != "BM":
             raise ValueError(f'Unknown file format: {magik}.')
-        # check version
+        # DB 1.0 is intentionally isolated behind the explicit legacy reader.
         v1 = int.from_bytes(file_head[6:7], self._num_fmt, signed=False)
         v2 = int.from_bytes(file_head[7:8], self._num_fmt, signed=False)
-        _version_now = __version__.split('.', 2)
-        v1_now = int(_version_now[0])
-        v2_now = int(_version_now[1])
-        if v1_now >= 255 or v2_now >= 255:
-            raise NotImplementedError(f'The version numbers have been reached {_version_now}. How frightful!')
-        if (v1, v2) != (v1_now, v2_now):
-            warnings.warn(
-                f"The file {self._path} (ver \"{'.'.join((str(v1), str(v2)))}\") is incompatible with "
-                f"the current version \"{__version__}\".",
-                RuntimeWarning,
+        self.db_version = (v1, v2)
+        if self.db_version != self._SUPPORTED_DB_VERSION:
+            expected = '.'.join(str(value) for value in self._SUPPORTED_DB_VERSION)
+            raise ValueError(
+                f'Database version {v1}.{v2} is not supported by '
+                f'{type(self).__name__}; expected {expected}.'
             )
         # read the group number
         self.n_groups = int.from_bytes(file_head[8:16], self._num_fmt, signed=False)
@@ -1173,12 +1203,21 @@ class ArrayDumpReader:
             if n_arrays == 0:
                 raise RuntimeError(f'Corrupt file: n_arrays is zero in `{self._path}`.')
 
-            # --- Detect old vs new format via n_names discriminator ---
+            # DB 2.0 always stores exactly one name per array. The legacy
+            # reader retains the discriminator only for DB 1.0 files created
+            # during the transition to named groups.
             names_pos = self._mmp_f.tell()
             n_names_raw = self._mmp_f.read(8)
             n_names = int.from_bytes(n_names_raw, self._num_fmt, signed=False)
             names_list: List[str] = []
 
+            if self._REQUIRE_NAMES and (
+                    n_names != n_arrays or n_names > self._MAX_NAMES
+            ):
+                raise RuntimeError(
+                    f'Canonical DB {__db_version__} group contains {n_arrays} '
+                    f'arrays but {n_names} names.'
+                )
             if n_names == 0:
                 # No names (either old format or new format with n_names=0).
                 # Fall through to read dtype descriptors.
@@ -1199,6 +1238,13 @@ class ArrayDumpReader:
                     remainder = (name_len * 2) % 8
                     if remainder:
                         self._mmp_f.read(8 - remainder)
+                if self._REQUIRE_NAMES:
+                    if any(not name for name in names_list):
+                        raise RuntimeError('Canonical array names must be non-empty.')
+                    if len(set(names_list)) != len(names_list):
+                        raise RuntimeError(
+                            f'Canonical array names must be unique, got {names_list}.'
+                        )
             else:
                 # Old format: the bytes read as n_names are actually the start of
                 # the first dtype field (UTF-16 order+type + int32 itemsize), which
@@ -1290,6 +1336,28 @@ class ArrayDumpReader:
             )
 
 
+class ArrayDumpReader(ArrayDumpReaderOld):
+    """Read strict, fully named canonical array dumps from DB 2.0 files.
+
+    The binary traversal and array-selection operations are shared with
+    :class:`ArrayDumpReaderOld`, but this class accepts only the independent
+    database version declared by ``__db_version__`` and requires one stored
+    name for every array in every group.
+
+    Args:
+        path: Path to an existing canonical DB 2.0 binary dump.
+
+    Legacy DB 1.0 files must be opened explicitly with
+    :class:`ArrayDumpReaderOld` or a public ``read_*_old`` helper. They can
+    then be rewritten with :func:`BUCToolkit.BatchStructures.convert_dump`.
+    """
+
+    _SUPPORTED_DB_VERSION = tuple(
+        int(value) for value in __db_version__.split('.', 2)[:2]
+    )
+    _REQUIRE_NAMES = True
+
+
 def structures_io_dumper(path: str|None, mode: Literal['w', 'x', 'a'] = 'x', disable: bool = False):
     """
     Auxiliary function for structure IO. It will be added into Batch* methods as a general dumper.
@@ -1303,32 +1371,189 @@ def structures_io_dumper(path: str|None, mode: Literal['w', 'x', 'a'] = 'x', dis
 
     return dumper
 
-def _resolve_array_index(names_map: dict, group_idx: int, name: str, fallback: int) -> int | None:
-    """Look up an array column index by name, with a positional fallback.
+def _read_dump_segments(
+        path: str,
+        reader_type,
+        indices: List[int] | slice | int,
+        is_copy: bool,
+        legacy_data_names: Tuple[str, ...] | None = None,
+) -> List[dict]:
+    """Read alternating header/data groups as independent dump segments.
 
-    Used by the specialised readers (``read_md_traj``, ``read_mc_traj``,
-    ``read_opt_structures``) so they work transparently with both named
-    (new-format) and unnamed (old-format) files.
+    Motion trajectories store one static, single-cycle header group followed
+    by one dynamic, multi-cycle data group. Appended runs repeat that pair and
+    may contain different metadata. Canonical names are read directly from the
+    file. Only unnamed DB 1.0 groups use the legacy positional mapping supplied
+    by ``legacy_data_names``.
 
     Args:
-        names_map: ``{group_idx: [name, ...]}`` from ``ArrayDumpReader.names``,
-            or ``None`` for old-format files.
-        group_idx: which group to look up.
-        name: the array name to search for (e.g. ``'Energy'``).
-        fallback: positional index used only when *names_map* is ``None``
-            (old format).  Ignored in the named format.
+        path: Path to the binary dump file.
+        reader_type: Reader class used to enforce either canonical DB 2.0 or
+            legacy DB 1.0 parsing.
+        indices: Cycle selection applied to every dynamic data group. Header
+            groups are always read at their single stored cycle.
+        is_copy: Whether returned arrays are copied from the memory map.
+        legacy_data_names: Positional names assigned to unnamed DB 1.0 data
+            columns. If omitted, positional string keys such as ``'0'`` and
+            ``'1'`` are used.
 
     Returns:
-        Column index, or ``None`` when *names_map* is present but *name*
-        is absent — the quantity was not dumped and callers should skip it.
+        List of ``{'header': header, 'data': data}`` dictionaries in file
+        order. ``header`` maps stored metadata names to arrays. ``data`` maps
+        each dynamic name to its list of selected cycle arrays.
+
+    Raises:
+        EOFError: If groups cannot be paired or a header has multiple cycles.
+        ValueError: If an unnamed legacy group has an unsupported number of
+            columns.
     """
-    group_names = names_map.get(group_idx) if names_map else None
-    if group_names is not None:
-        try:
-            return group_names.index(name)
-        except ValueError:
-            return None
-    return fallback
+    reader = reader_type(path)
+    if reader.n_groups % 2 != 0:
+        raise EOFError(
+            f'Expected paired header/data groups, got {reader.n_groups} groups.'
+        )
+
+    # ``reader.names`` describes only the most recent read, so preserve the
+    # header and data name maps immediately after their respective reads.
+    raw_headers = reader.read(groups=slice(0, None, 2), is_copy=is_copy)
+    header_names = reader.names or {}
+    raw_data = reader.read(
+        groups=slice(1, None, 2), indices=indices, is_copy=is_copy
+    )
+    data_names = reader.names or {}
+
+    segments = []
+    for segment_index in range(reader.n_groups // 2):
+        header_group_index = 2 * segment_index
+        data_group_index = header_group_index + 1
+        header_cycles = raw_headers[f'group{header_group_index}']
+        data_cycles = raw_data[f'group{data_group_index}']
+        if len(header_cycles) != 1:
+            raise EOFError(
+                f'Header group {header_group_index} must contain one cycle, '
+                f'got {len(header_cycles)}.'
+            )
+
+        header_arrays = header_cycles[0]
+        current_header_names = header_names.get(header_group_index)
+        if current_header_names is None:
+            if reader_type is not ArrayDumpReaderOld:
+                raise ValueError(
+                    f'Canonical header group {header_group_index} has no names.'
+                )
+            # DB 1.0 headers were positional. Keep that fixed schema confined
+            # to the legacy path; canonical headers are entirely name-driven.
+            current_header_names = ['cell_vec', 'atomic_numbers', 'fixed_mask']
+            if len(header_arrays) == 3:
+                pass
+            elif len(header_arrays) == 4:
+                current_header_names.insert(0, 'batch_indices')
+            else:
+                raise ValueError(
+                    f'Legacy header group {header_group_index} has '
+                    f'{len(header_arrays)} arrays; expected 3 or 4.'
+                )
+
+        current_data_names = data_names.get(data_group_index)
+        if current_data_names is None:
+            if legacy_data_names is None:
+                current_data_names = [
+                    str(index) for index in range(len(data_cycles[0]))
+                ]
+            else:
+                if data_cycles and len(data_cycles[0]) != len(legacy_data_names):
+                    raise ValueError(
+                        f'Legacy data group {data_group_index} has '
+                        f'{len(data_cycles[0])} arrays; expected '
+                        f'{len(legacy_data_names)} for {legacy_data_names}.'
+                    )
+                current_data_names = list(legacy_data_names)
+
+        # Canonical metadata stays separate from dynamic columns. Therefore
+        # adding an optional header field requires no reader-side name list.
+        header = dict(zip(current_header_names, header_arrays))
+        data = {
+            name: [cycle[column_index] for cycle in data_cycles]
+            for column_index, name in enumerate(current_data_names)
+        }
+        segments.append({'header': header, 'data': data})
+    return segments
+
+
+def read_dump_segments(
+        path: str,
+        indices: List[int] | slice | int = -1,
+        is_copy: bool = True,
+) -> List[dict]:
+    """Return lossless DB 2.0 trajectory segments with their own metadata.
+
+    This is the lowest-level public trajectory reader. Unlike
+    :func:`read_dump_arrays`, it never merges appended runs, so a changed batch
+    size, atom count, or optional header field remains associated with the
+    dynamic group that was written under that metadata.
+
+    Args:
+        path: Path to a canonical DB 2.0 MD, MC, or optimizer dump.
+        indices: Cycle selection applied independently to each dynamic group.
+            A negative integer reads all cycles.
+        is_copy: Whether arrays are copied out of the underlying memory map.
+
+    Returns:
+        List of segment dictionaries in file order. Each segment contains a
+        ``header`` dictionary of named static arrays and a ``data`` dictionary
+        whose values are lists of selected cycle arrays. No arrays are stacked
+        or split by structure.
+    """
+    return _read_dump_segments(
+        path, ArrayDumpReader, indices=indices, is_copy=is_copy
+    )
+
+
+def _merge_uniform_dump_segments(segments: List[dict]) -> dict:
+    """Merge segments that share identical metadata and dynamic schemas.
+
+    Static metadata is copied once from the first segment. Dynamic cycle lists
+    are then concatenated in segment order. The merge is intentionally refused
+    if a later segment changes either its header or its ordered column names,
+    because flattening such segments would discard their association.
+
+    Args:
+        segments: Segment dictionaries returned by
+            :func:`read_dump_segments` or :func:`_read_dump_segments`.
+
+    Returns:
+        One dictionary containing the shared static arrays and concatenated
+        dynamic cycle lists. An empty input returns an empty dictionary.
+
+    Raises:
+        ValueError: If static metadata or ordered dynamic names differ between
+            segments.
+    """
+    if not segments:
+        return {}
+    reference_header = segments[0]['header']
+    reference_names = tuple(segments[0]['data'])
+    output = dict(reference_header)
+    output.update({name: [] for name in reference_names})
+
+    for segment_index, segment in enumerate(segments):
+        header = segment['header']
+        if tuple(header) != tuple(reference_header) or any(
+                not np.array_equal(header[name], reference_header[name])
+                for name in reference_header
+        ):
+            raise ValueError(
+                f'Segment {segment_index} has different static metadata. Use '
+                f'read_dump_segments() to retain per-segment headers.'
+            )
+        if tuple(segment['data']) != reference_names:
+            raise ValueError(
+                f'Segment {segment_index} has different dynamic columns. Use '
+                f'read_dump_segments() to retain the individual schemas.'
+            )
+        for name in reference_names:
+            output[name].extend(segment['data'][name])
+    return output
 
 
 def read_dump_arrays(
@@ -1340,9 +1565,10 @@ def read_dump_arrays(
 
     BUCToolkit motion dumps contain alternating groups. A one-cycle static
     header group stores system metadata, followed by a multi-cycle data group
-    containing the registered state quantities. This function loads all such
-    group pairs, merges columns with the same name across data groups, and
-    leaves every dynamic array in its on-disk batch layout.
+    containing the registered state quantities. This convenience function
+    merges segments only when their metadata and dynamic schemas are equal.
+    Use :func:`read_dump_segments` for lossless access to heterogeneous
+    appended runs. Dynamic arrays remain in their on-disk batch layout.
 
     Args:
         path: Path to a binary dump written by :class:`ArrayDumper` through an
@@ -1355,9 +1581,8 @@ def read_dump_arrays(
             must be released before the underlying mapping can be closed.
 
     Returns:
-        Dictionary containing the raw static header entries ``cell_vec``,
-        ``atomic_numbers``, ``fixed_mask``, and, for irregular batches,
-        ``batch_indices``. Every dynamic registered quantity is returned as
+        Dictionary containing every named static header entry as stored,
+        followed by every dynamic registered quantity as
         ``{name: [cycle_array, ...]}``. Dynamic arrays are neither stacked nor
         split: for example, irregular atom-wise values remain shaped
         ``[1, sum(n_atoms), ...]``.
@@ -1365,45 +1590,46 @@ def read_dump_arrays(
     Raises:
         EOFError: If the number of static header groups and dynamic data groups
             differs, indicating a truncated or corrupt dump.
+        ValueError: If appended segments have different metadata or columns.
         RuntimeError: If the file cannot be opened or an array group cannot be
             parsed by :class:`ArrayDumpReader`.
     """
-    reader = ArrayDumpReader(path)
-    raw_headers = reader.read(groups=slice(0, None, 2), is_copy=is_copy)
-    raw_results = reader.read(groups=slice(1, None, 2), indices=indices, is_copy=is_copy)
-    _names = reader.names
-    if len(raw_headers) != len(raw_results):
-        raise EOFError('Header / data group count mismatch.')
-
-    out: dict = {}
-    # -- header arrays --
-    _h0 = raw_headers['group0'][0]
-    if len(_h0) == 3:
-        out['cell_vec'], out['atomic_numbers'], out['fixed_mask'] = _h0
-    else:
-        out['batch_indices'], out['cell_vec'], out['atomic_numbers'], out['fixed_mask'] = _h0
-
-    # -- data columns --
-    for i in range(len(raw_results)):
-        cycles = raw_results[f'group{2*i + 1}']
-        _grp_names = _names.get(2*i + 1) if _names else None
-        if _grp_names is None:
-            _grp_names = [str(j) for j in range(len(cycles[0]))]
-        for j, _n in enumerate(_grp_names):
-            _col = [c[j] for c in cycles]
-            if _n in out:
-                out[_n].extend(_col)
-            else:
-                out[_n] = _col
-    return out
+    return _merge_uniform_dump_segments(
+        read_dump_segments(path, indices=indices, is_copy=is_copy)
+    )
 
 
-_DUMP_HEADER_NAMES = frozenset({
-    'cell_vec', 'atomic_numbers', 'fixed_mask', 'batch_indices'
-})
+def read_dump_arrays_old(
+        path: str,
+        indices: List[int] | slice | int = -1,
+        is_copy: bool = True,
+) -> dict:
+    """Read a uniform legacy DB 1.0 header/data dump.
+
+    The function preserves the stored array layout and merges appended
+    segments only when their static metadata and ordered columns match.
+    Unnamed dynamic arrays are exposed under positional string keys. Use
+    :func:`read_md_traj_old` or :func:`read_mc_traj_old` when the producing
+    framework is known and semantic column names are required.
+
+    Args:
+        path: Path to a legacy DB 1.0 motion dump containing alternating
+            header/data groups.
+        indices: Cycle selection applied independently to every data group. A
+            negative integer reads all cycles.
+        is_copy: Whether arrays are copied out of the underlying memory map.
+
+    Returns:
+        Dictionary containing the shared named or positionally reconstructed
+        header arrays and every dynamic column as a list of cycle arrays.
+    """
+    segments = _read_dump_segments(
+        path, ArrayDumpReaderOld, indices=indices, is_copy=is_copy
+    )
+    return _merge_uniform_dump_segments(segments)
 
 
-def _split_dump_columns(data: dict) -> Tuple[dict, int]:
+def _split_dump_columns(header: dict, data: dict) -> Tuple[dict, int]:
     """Split raw trajectory columns into cycle-major per-sample values.
 
     The irregular-batch file layout uses ``(1, sum(n_atoms), ...)`` for
@@ -1422,10 +1648,10 @@ def _split_dump_columns(data: dict) -> Tuple[dict, int]:
       returned column remains aligned with the cycle-major sample order.
 
     Args:
-        data: Raw dictionary returned by :func:`read_dump_arrays`. It must
-            contain ``atomic_numbers`` and ``fixed_mask`` and may contain
-            ``batch_indices`` for an irregular batch. All dynamic column lists
-            must have the same number of cycles.
+        header: Arbitrary named metadata for this segment. ``batch_indices``
+            alone selects the irregular layout; other entries are optional.
+        data: Dynamic named columns for this segment. All columns must have the
+            same number of cycles.
 
     Returns:
         ``(_columns, n_cycles)`` where every value in ``_columns`` is a flat
@@ -1436,7 +1662,7 @@ def _split_dump_columns(data: dict) -> Tuple[dict, int]:
     Raises:
         EOFError: If dynamic columns contain inconsistent cycle counts.
     """
-    _batch = data.get('batch_indices')
+    _batch = header.get('batch_indices')
     _is_irr = _batch is not None
     if _is_irr:
         _batch = np.asarray(_batch).reshape(-1)
@@ -1444,12 +1670,20 @@ def _split_dump_columns(data: dict) -> Tuple[dict, int]:
         _n_batch = len(_batch)
         _n_atoms = int(np.sum(_batch))
     else:
-        _atomic_numbers = np.asarray(data['atomic_numbers'])
-        _n_batch = 1 if _atomic_numbers.ndim == 1 else len(_atomic_numbers)
+        if data.get('X'):
+            _n_batch = np.asarray(data['X'][0]).shape[0]
+        elif 'atomic_numbers' in header:
+            _atomic_numbers = np.asarray(header['atomic_numbers'])
+            _n_batch = 1 if _atomic_numbers.ndim == 1 else len(_atomic_numbers)
+        else:
+            _first_column = next((values for values in data.values() if values), None)
+            if _first_column is None or np.asarray(_first_column[0]).ndim == 0:
+                raise ValueError('Cannot infer the regular batch size.')
+            _n_batch = np.asarray(_first_column[0]).shape[0]
         _batch_ptr = None
         _n_atoms = None
 
-    _data_names = [_n for _n in data if _n not in _DUMP_HEADER_NAMES]
+    _data_names = list(data)
     if not _data_names:
         return {}, 0
 
@@ -1500,6 +1734,197 @@ def _split_dump_columns(data: dict) -> Tuple[dict, int]:
     return _columns, _n_cycles
 
 
+def _select_final_dump_cycle(segments: List[dict]) -> List[dict]:
+    """Select the last available cycle from the final dump segment.
+
+    This implements ``read_opt_structures(..., only_opt=True)``. Appended
+    optimization runs are ordered chronologically, so the optimized structure
+    is represented by the final selected cycle of the final segment. Header
+    arrays are retained unchanged and the input list is not modified.
+
+    Args:
+        segments: Ordered segment dictionaries with named ``header`` and
+            ``data`` mappings.
+
+    Returns:
+        A one-segment list whose dynamic columns each contain at most their
+        final cycle. An empty input returns an empty list.
+    """
+    if not segments:
+        return []
+    final_segment = segments[-1]
+    final_data = {
+        name: values[-1:] if values else []
+        for name, values in final_segment['data'].items()
+    }
+    return [{'header': final_segment['header'], 'data': final_data}]
+
+
+def _combine_split_segment_columns(segments: List[dict]) -> dict:
+    """Split dynamic columns per structure and combine compatible segments.
+
+    Each segment is split using its own ``batch_indices`` and other metadata,
+    which preserves appended runs whose batch shapes differ. Dynamic schemas
+    must still have the same ordered names so the resulting per-sample lists
+    remain aligned across the returned dictionary.
+
+    Args:
+        segments: Ordered segment dictionaries returned by a canonical or
+            legacy segment reader.
+
+    Returns:
+        Dictionary mapping each dynamic name to a flat list ordered by
+        ``segment/cycle/structure``. An empty input returns an empty dictionary.
+
+    Raises:
+        ValueError: If the ordered dynamic column names differ between
+            segments.
+    """
+    if not segments:
+        return {}
+    reference_names = tuple(segments[0]['data'])
+    combined_columns = {name: [] for name in reference_names}
+    for segment_index, segment in enumerate(segments):
+        if tuple(segment['data']) != reference_names:
+            raise ValueError(
+                f'Segment {segment_index} has different dynamic columns. Use '
+                f'read_dump_segments() for heterogeneous schemas.'
+            )
+        split_columns, _ = _split_dump_columns(
+            segment['header'], segment['data']
+        )
+        for name in reference_names:
+            combined_columns[name].extend(split_columns[name])
+    return combined_columns
+
+
+def _append_segment_structures(
+        segments: List[dict],
+        required_names: Tuple[str, ...],
+        include_force: bool,
+        include_velocity: bool,
+) -> BatchStructures:
+    """Build ``BatchStructures`` from independently interpreted segments.
+
+    The method reconstructs element rows and fixed masks from each segment's
+    static metadata, splits its dynamic columns into cycle-major samples, and
+    appends all samples to one structure collection. ``batch_indices`` alone
+    selects irregular reconstruction; other header fields do not participate
+    in that branch decision.
+
+    Args:
+        segments: Ordered segment dictionaries containing static ``cell_vec``,
+            ``atomic_numbers``, and ``fixed_mask`` entries plus dynamic data.
+        required_names: Dynamic columns required by the calling MD, MC, or
+            optimizer reader.
+        include_force: Whether the ``Force`` column is appended to the output.
+        include_velocity: Whether the ``V`` column is appended to the output.
+
+    Returns:
+        A validated :class:`BatchStructures` containing one sample for every
+        selected ``segment/cycle/structure`` combination.
+
+    Raises:
+        ValueError: If a segment lacks one of ``required_names``.
+    """
+    sample_ids = []
+    cell_list = []
+    element_list = []
+    number_list = []
+    coordinate_type_list = []
+    coordinate_list = []
+    fixed_mask_list = []
+    energy_list = []
+    force_list = []
+    velocity_list = []
+
+    for segment_index, segment in enumerate(segments):
+        missing_names = [
+            name for name in required_names if name not in segment['data']
+        ]
+        if missing_names:
+            raise ValueError(
+                f'Columns {missing_names} are absent from segment '
+                f'{segment_index}. Add them to dump_quantities.'
+            )
+
+        header = segment['header']
+        batch_counts = header.get('batch_indices')
+        atomic_numbers = np.asarray(header['atomic_numbers'])
+        fixed_mask = np.asarray(header['fixed_mask'])
+        # Irregular headers store atom-wise metadata on one concatenated atom
+        # axis. Regular headers already store one rectangular row per image.
+        if batch_counts is not None:
+            batch_counts = np.asarray(batch_counts).reshape(-1)
+            split_points = np.cumsum(batch_counts)[:-1]
+            atoms_per_structure = np.split(
+                atomic_numbers.reshape(-1), split_points, axis=0
+            )
+            fixed_per_structure = np.split(
+                fixed_mask[0], split_points, axis=0
+            )
+        else:
+            atoms_per_structure = (
+                [atomic_numbers] if atomic_numbers.ndim == 1
+                else [row for row in atomic_numbers]
+            )
+            fixed_per_structure = (
+                [fixed_mask] if fixed_mask.ndim == 2
+                else [row for row in fixed_mask]
+            )
+
+        elements_per_structure = []
+        numbers_per_structure = []
+        for numbers in atoms_per_structure:
+            elements, _, reduced_numbers = elem_list_reduce(numbers)
+            elements_per_structure.append(elements)
+            numbers_per_structure.append(reduced_numbers)
+
+        # Split dynamic values with the same segment-local metadata before
+        # extending the common cycle-major output lists.
+        columns, n_cycles = _split_dump_columns(header, segment['data'])
+        n_structures = len(atoms_per_structure)
+        segment_prefix = (
+            f'segment{segment_index}_' if len(segments) > 1 else ''
+        )
+        sample_ids.extend(
+            f'{segment_prefix}samp{structure_index}_step{cycle_index}'
+            for cycle_index in range(n_cycles)
+            for structure_index in range(n_structures)
+        )
+        cell_list.extend([cell for cell in header['cell_vec']] * n_cycles)
+        element_list.extend(elements_per_structure * n_cycles)
+        number_list.extend(numbers_per_structure * n_cycles)
+        coordinate_type_list.extend(['C'] * (n_structures * n_cycles))
+        coordinate_list.extend(columns['X'])
+        fixed_mask_list.extend(fixed_per_structure * n_cycles)
+        energy_list.extend(columns['Energy'])
+        if include_force:
+            force_list.extend(columns['Force'])
+        if include_velocity:
+            velocity_list.extend(columns['V'])
+
+    structures = BatchStructures()
+    append_args = [
+        sample_ids,
+        cell_list,
+        element_list,
+        number_list,
+        coordinate_type_list,
+        coordinate_list,
+        fixed_mask_list,
+        energy_list,
+    ]
+    if include_force:
+        append_args.append(force_list)
+    if include_velocity:
+        append_args.append(velocity_list)
+    structures.append_from_lists(*append_args)
+    structures._check_id()
+    structures._check_len()
+    return structures
+
+
 def read_md_traj(
         path,
         indices: List[int]|slice|int = -1,
@@ -1545,59 +1970,15 @@ def read_md_traj(
             missing. Pass ``out_arrays=True`` to read a partial/custom dump.
         EOFError: If header/data groups or dynamic cycle counts are inconsistent.
     """
-    data = read_dump_arrays(path, indices=indices, is_copy=is_copy)
-
-    _REQUIRED = ('Energy', 'X', 'V', 'Force')
-    _missing = [_r for _r in _REQUIRED if _r not in data]
-    if _missing and not out_arrays:
-        raise ValueError(
-            f"Columns {_missing} not found in dump. "
-            f"Add them to dump_quantities or pass out_arrays=True."
-        )
-
-    _batch = data.get('batch_indices')
-    _is_irr = _batch is not None
-    _atm = data['atomic_numbers']
-    if _is_irr:
-        _batch_ptr = np.cumsum(_batch)[:-1]
-        _atm_per = np.split(_atm.ravel(), _batch_ptr, axis=0)
-        _fix_per = np.split(data['fixed_mask'][0], _batch_ptr, axis=0)
-    else:
-        _atm_per = [_atm] if _atm.ndim == 1 else [_ for _ in _atm]
-        _fix = data['fixed_mask']
-        _fix_per = [_fix] if _fix.ndim == 2 else [_ for _ in _fix]
-    n_batch = len(_batch) if _is_irr else len(_atm_per)
-
-    _elements, _numbers, _id_per_frame = [], [], []
-    for ii, _a in enumerate(_atm_per):
-        el, _, nums = elem_list_reduce(_a)
-        _elements.append(el); _numbers.append(nums); _id_per_frame.append(ii)
-
-    _columns, _n_cycles = _split_dump_columns(data)
-
+    segments = read_dump_segments(path, indices=indices, is_copy=is_copy)
     if out_arrays:
-        return _columns
-
-    # Assemble BatchStructures
-    smp_ids = [f'samp{ii}_step{k}' for k in range(_n_cycles) for ii in _id_per_frame]
-    cell_list = [_ for _ in data['cell_vec']] * _n_cycles
-    coo_t_list = ['C'] * (n_batch * _n_cycles)
-
-    bs = BatchStructures()
-    bs.append_from_lists(
-        smp_ids,
-        cell_list,
-        _elements * _n_cycles,
-        _numbers * _n_cycles,
-        coo_t_list,
-        _columns['X'],
-        [_ for _ in _fix_per] * _n_cycles,
-        _columns['Energy'],
-        _columns['Force'],
-        _columns['V'],
+        return _combine_split_segment_columns(segments)
+    return _append_segment_structures(
+        segments,
+        required_names=('Energy', 'X', 'V', 'Force'),
+        include_force=True,
+        include_velocity=True,
     )
-    bs._check_id(); bs._check_len()
-    return bs
 
 def read_mc_traj(
         path,
@@ -1641,52 +2022,15 @@ def read_mc_traj(
             ``False``.
         EOFError: If header/data groups or dynamic cycle counts are inconsistent.
     """
-    data = read_dump_arrays(path, indices=indices, is_copy=is_copy)
-
-    _REQUIRED = ('Energy', 'X')
-    _missing = [_r for _r in _REQUIRED if _r not in data]
-    if _missing and not out_arrays:
-        raise ValueError(
-            f"Columns {_missing} not found in dump. "
-            f"Add them to dump_quantities or pass out_arrays=True."
-        )
-
-    _batch = data.get('batch_indices')
-    _is_irr = _batch is not None
-    _atm = data['atomic_numbers']
-    if _is_irr:
-        _batch_ptr = np.cumsum(_batch)[:-1]
-        _atm_per = np.split(_atm.ravel(), _batch_ptr, axis=0)
-        _fix_per = np.split(data['fixed_mask'][0], _batch_ptr, axis=0)
-    else:
-        _atm_per = [_atm] if _atm.ndim == 1 else [_ for _ in _atm]
-        _fix = data['fixed_mask']
-        _fix_per = [_fix] if _fix.ndim == 2 else [_ for _ in _fix]
-    n_batch = len(_batch) if _is_irr else len(_atm_per)
-
-    _elements, _numbers, _id_per_frame = [], [], []
-    for ii, _a in enumerate(_atm_per):
-        el, _, nums = elem_list_reduce(_a)
-        _elements.append(el); _numbers.append(nums); _id_per_frame.append(ii)
-
-    _columns, _n_cycles = _split_dump_columns(data)
-
+    segments = read_dump_segments(path, indices=indices, is_copy=is_copy)
     if out_arrays:
-        return _columns
-
-    bs = BatchStructures()
-    bs.append_from_lists(
-        [f'samp{ii}_step{k}' for k in range(_n_cycles) for ii in _id_per_frame],
-        [_ for _ in data['cell_vec']] * _n_cycles,
-        _elements * _n_cycles,
-        _numbers * _n_cycles,
-        ['C'] * (n_batch * _n_cycles),
-        _columns['X'],
-        [_ for _ in _fix_per] * _n_cycles,
-        _columns['Energy'],
+        return _combine_split_segment_columns(segments)
+    return _append_segment_structures(
+        segments,
+        required_names=('Energy', 'X'),
+        include_force=False,
+        include_velocity=False,
     )
-    bs._check_id(); bs._check_len()
-    return bs
 
 def read_opt_structures(
         path,
@@ -1728,61 +2072,109 @@ def read_opt_structures(
             missing while ``out_arrays`` is ``False``.
         EOFError: If header/data groups or dynamic cycle counts are inconsistent.
     """
-    data = read_dump_arrays(path, indices=indices, is_copy=is_copy)
-
-    # Apply only_opt: keep only the last cycle of each column
+    segments = read_dump_segments(path, indices=indices, is_copy=is_copy)
     if only_opt:
-        for _n in data:
-            if _n not in ('cell_vec', 'atomic_numbers', 'fixed_mask', 'batch_indices'):
-                _col = data[_n]
-                if _col:
-                    data[_n] = [_col[-1]]
-
-    _REQUIRED = ('Energy', 'X', 'Force')
-    _missing = [_r for _r in _REQUIRED if _r not in data]
-    if _missing and not out_arrays:
-        raise ValueError(
-            f"Columns {_missing} not found in dump. "
-            f"Add them to dump_quantities or pass out_arrays=True."
-        )
-
-    _batch = data.get('batch_indices')
-    _is_irr = _batch is not None
-    _atm = data['atomic_numbers']
-    if _is_irr:
-        _batch_ptr = np.cumsum(_batch)[:-1]
-        _atm_per = np.split(_atm.ravel(), _batch_ptr, axis=0)
-        _fix_per = np.split(data['fixed_mask'][0], _batch_ptr, axis=0)
-    else:
-        _atm_per = [_atm] if _atm.ndim == 1 else [_ for _ in _atm]
-        _fix = data['fixed_mask']
-        _fix_per = [_fix] if _fix.ndim == 2 else [_ for _ in _fix]
-    n_batch = len(_batch) if _is_irr else len(_atm_per)
-
-    _elements, _numbers, _id_per_frame = [], [], []
-    for ii, _a in enumerate(_atm_per):
-        el, _, nums = elem_list_reduce(_a)
-        _elements.append(el); _numbers.append(nums); _id_per_frame.append(ii)
-
-    _columns, _n_cycles = _split_dump_columns(data)
-
+        segments = _select_final_dump_cycle(segments)
     if out_arrays:
-        return _columns
-
-    bs = BatchStructures()
-    bs.append_from_lists(
-        [f'samp{ii}_step{k}' for k in range(_n_cycles) for ii in _id_per_frame],
-        [_ for _ in data['cell_vec']] * _n_cycles,
-        _elements * _n_cycles,
-        _numbers * _n_cycles,
-        ['C'] * (n_batch * _n_cycles),
-        _columns['X'],
-        [_ for _ in _fix_per] * _n_cycles,
-        _columns['Energy'],
-        _columns['Force'],
+        return _combine_split_segment_columns(segments)
+    return _append_segment_structures(
+        segments,
+        required_names=('Energy', 'X', 'Force'),
+        include_force=True,
+        include_velocity=False,
     )
-    bs._check_id(); bs._check_len()
-    return bs
+
+
+def read_md_traj_old(
+        path,
+        indices: List[int] | slice | int = -1,
+        is_copy: bool = True,
+        out_arrays: bool = False,
+):
+    """Read a legacy DB 1.0 MD trajectory.
+
+    DB 1.0 MD files use alternating static header and dynamic data groups. An
+    unnamed data group is interpreted in the historical order ``Energy``,
+    ``X``, ``V``, and ``Force``; transitional named DB 1.0 groups retain their
+    stored names. Every appended segment is split with its own header metadata.
+
+    Args:
+        path: Path to a legacy DB 1.0 MD trajectory.
+        indices: Cycle selection applied independently to every dynamic group.
+            A negative integer reads all cycles.
+        is_copy: Whether arrays are copied out of the underlying memory map.
+        out_arrays: If ``False``, construct :class:`BatchStructures` and require
+            the four historical MD columns. If ``True``, return all available
+            dynamic columns after per-structure splitting.
+
+    Returns:
+        A :class:`BatchStructures` object when ``out_arrays`` is ``False``;
+        otherwise a dictionary of cycle-major per-structure column lists.
+
+    Retained files should be converted to DB 2.0 before they are passed to the
+    canonical :func:`read_md_traj` reader.
+    """
+    segments = _read_dump_segments(
+        path,
+        ArrayDumpReaderOld,
+        indices=indices,
+        is_copy=is_copy,
+        legacy_data_names=('Energy', 'X', 'V', 'Force'),
+    )
+    if out_arrays:
+        return _combine_split_segment_columns(segments)
+    return _append_segment_structures(
+        segments,
+        required_names=('Energy', 'X', 'V', 'Force'),
+        include_force=True,
+        include_velocity=True,
+    )
+
+
+def read_mc_traj_old(
+        path,
+        indices: List[int] | slice | int = -1,
+        is_copy: bool = True,
+        out_arrays: bool = False,
+):
+    """Read a legacy DB 1.0 MC trajectory.
+
+    DB 1.0 MC files use alternating static header and dynamic data groups. An
+    unnamed data group is interpreted in the historical order ``Energy`` and
+    ``X``; transitional named DB 1.0 groups retain their stored names. Every
+    appended segment is split with its own header metadata.
+
+    Args:
+        path: Path to a legacy DB 1.0 MC trajectory.
+        indices: Cycle selection applied independently to every dynamic group.
+            A negative integer reads all cycles.
+        is_copy: Whether arrays are copied out of the underlying memory map.
+        out_arrays: If ``False``, construct :class:`BatchStructures` and require
+            ``Energy`` and ``X``. If ``True``, return all available dynamic
+            columns after per-structure splitting.
+
+    Returns:
+        A :class:`BatchStructures` object when ``out_arrays`` is ``False``;
+        otherwise a dictionary of cycle-major per-structure column lists.
+
+    Retained files should be converted to DB 2.0 before they are passed to the
+    canonical :func:`read_mc_traj` reader.
+    """
+    segments = _read_dump_segments(
+        path,
+        ArrayDumpReaderOld,
+        indices=indices,
+        is_copy=is_copy,
+        legacy_data_names=('Energy', 'X'),
+    )
+    if out_arrays:
+        return _combine_split_segment_columns(segments)
+    return _append_segment_structures(
+        segments,
+        required_names=('Energy', 'X'),
+        include_force=False,
+        include_velocity=False,
+    )
 
 
 def read_opt_structures_old(
@@ -1817,7 +2209,7 @@ def read_opt_structures_old(
         BatchStructures
 
     """
-    reader = ArrayDumpReader(path)
+    reader = ArrayDumpReaderOld(path)
     raw_results = reader.read(groups=-1, indices=indices, is_copy=is_copy)
     n_grp = len(raw_results)
 

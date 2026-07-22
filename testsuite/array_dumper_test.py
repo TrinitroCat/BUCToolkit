@@ -1,9 +1,8 @@
 """
 Unit tests for ArrayDumper / ArrayDumpReader engine in StructuresIO.py.
 
-Covers: basic round-trip (no names), named arrays, old-format backward
-compatibility, UTF-16 non-ASCII names, multiple groups, name validation,
-and dynamic-step mode.
+Covers canonical named arrays, explicit legacy reading, UTF-16 non-ASCII
+names, multiple groups, name validation, and dynamic-step mode.
 """
 import os
 import struct
@@ -15,6 +14,7 @@ import numpy as np
 from BUCToolkit.BatchStructures.StructuresIO import (
     ArrayDumper,
     ArrayDumpReader,
+    ArrayDumpReaderOld,
 )
 
 
@@ -55,39 +55,22 @@ class ArrayDumperTest(unittest.TestCase):
         return p
 
     # ------------------------------------------------------------------
-    # 1. Round-trip without names (backward compatibility)
+    # 1. Canonical names are mandatory
     # ------------------------------------------------------------------
-    def test_roundtrip_no_names(self):
-        """Write arrays without names, read back — data must match exactly."""
-        rng = np.random.RandomState(42)
-        n_cycles = 5
+    def test_names_are_required(self):
+        """DB 2.0 refuses unnamed array groups."""
         arrays_tpl = [
             np.zeros((1,), dtype=np.float64),
             np.zeros((10, 3), dtype=np.float64),
             np.zeros((10, 3), dtype=np.float64),
         ]
-        written = []
         path = self._path()
 
         d = ArrayDumper(path, mode='w')
         d.initialize()
-        d.start_from_arrays(n_cycles, *arrays_tpl)  # no names
-        for _ in range(n_cycles):
-            cycle = [rng.randn(*a.shape).astype(a.dtype) for a in arrays_tpl]
-            written.append([c.copy() for c in cycle])
-            d.step(*cycle)
+        with self.assertRaises(RuntimeError):
+            d.start_from_arrays(5, *arrays_tpl)
         d.close()
-
-        r = ArrayDumpReader(path)
-        self.assertEqual(r.n_groups, 1)
-        result = r.read(groups=0, indices=-1, is_copy=True)
-        self.assertIn('group0', result)
-        py_data = result['group0']
-        self.assertEqual(len(py_data), n_cycles)
-        for i, (w_cycle, r_cycle) in enumerate(zip(written, py_data)):
-            for j, (w_arr, r_arr) in enumerate(zip(w_cycle, r_cycle)):
-                self.assertTrue(_arrays_close(r_arr, w_arr),
-                                f"cycle {i} array {j}: mismatch")
 
     # ------------------------------------------------------------------
     # 2. Round-trip with names
@@ -181,8 +164,11 @@ class ArrayDumperTest(unittest.TestCase):
         with open(path, 'wb') as f:
             f.write(fh + dh + data_bytes)
 
-        # -- Read back with new reader --
-        r = ArrayDumpReader(path)
+        with self.assertRaises(ValueError):
+            ArrayDumpReader(path)
+
+        # DB 1.0 compatibility is explicit rather than automatic.
+        r = ArrayDumpReaderOld(path)
         self.assertEqual(r.n_groups, 1)
         result = r.read(groups=0, indices=-1, is_copy=True)
         py_data = result['group0']
@@ -380,7 +366,7 @@ class ArrayDumperTest(unittest.TestCase):
 
         d = ArrayDumper(path, mode='w')
         d.initialize()
-        d.start_from_arrays(3, *arrays_tpl)
+        d.start_from_arrays(3, *arrays_tpl, names=('a', 'b', 'c'))
         for _ in range(3):
             d.step(rng.randn(1), rng.randn(3), rng.randn(2, 2))
         d.close()
@@ -407,7 +393,7 @@ class ArrayDumperTest(unittest.TestCase):
         path = self._path()
         d = ArrayDumper(path, mode='w')
         d.initialize()
-        d.start_from_arrays(5, *arrays_tpl)
+        d.start_from_arrays(5, *arrays_tpl, names=('a', 'b'))
         written = []
         for k in range(5):
             a = np.array([float(k)])
@@ -453,7 +439,9 @@ class ArrayDumperTest(unittest.TestCase):
         path = self._path()
         d = ArrayDumper(path, mode='w')
         d.initialize()
-        d.start_from_arrays(4, np.zeros((1,), dtype=np.float64))
+        d.start_from_arrays(
+            4, np.zeros((1,), dtype=np.float64), names=('value',)
+        )
         for _ in range(4):
             d.step(rng.randn(1))
         d.close()
@@ -463,21 +451,21 @@ class ArrayDumperTest(unittest.TestCase):
         self.assertEqual(len(result['group0']), 2)
 
     # ------------------------------------------------------------------
-    # 13. ``read(names=...)`` on old-format file raises RuntimeError
+    # 13. Duplicate names are rejected
     # ------------------------------------------------------------------
-    def test_read_names_on_old_format_raises(self):
-        """Using ``names`` on a file without name metadata raises."""
+    def test_duplicate_names_raise(self):
+        """Canonical group names must be unique."""
         path = self._path()
         d = ArrayDumper(path, mode='w')
         d.initialize()
-        d.start_from_arrays(2, np.zeros((1,), dtype=np.float64))  # no names
-        d.step(np.array([1.0]))
-        d.step(np.array([2.0]))
-        d.close()
-
-        r = ArrayDumpReader(path)
         with self.assertRaises(RuntimeError):
-            r.read(groups=0, names=["energy"])
+            d.start_from_arrays(
+                2,
+                np.zeros((1,), dtype=np.float64),
+                np.zeros((1,), dtype=np.float64),
+                names=('energy', 'energy'),
+            )
+        d.close()
 
 
 if __name__ == '__main__':

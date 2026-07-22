@@ -69,12 +69,17 @@ class Predictor(_CONFIGS):
             copy_stream = _[1]
             copy_stream.synchronize()
             data = _[2]
-            data = [data[_k].numpy() for _k in sorted(data) if isinstance(data[_k], th.Tensor)]
+            tensor_names = [
+                name for name in sorted(data)
+                if isinstance(data[name], th.Tensor)
+            ]
+            arrays = [data[name].numpy() for name in tensor_names]
             dumper.start_from_arrays(
                 1,
-                *data,
+                *arrays,
+                names=tensor_names,
             )
-            dumper.step(*data)
+            dumper.step(*arrays)
 
     def _async_print(self, q: Queue):
         """
@@ -293,5 +298,4 @@ class EmptyContextManager:
 
     def wait_stream(self, *args, **kwargs):
         pass
-
 
