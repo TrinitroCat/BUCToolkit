@@ -16,8 +16,6 @@ import numpy as np
 
 from ._BaseMD import _BaseMD
 from BUCToolkit.Bases.BaseConstraints import BaseConstr
-from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.grad_functions import bjvp, bhvp
 from BUCToolkit.utils._Element_info import DTYPE
 
 FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
@@ -38,7 +36,15 @@ class _BaseConstrMD(_BaseMD):
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
         output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: str|torch.device, device that program rum on.
-        verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+        verbose: print level. 0 is silent, 1 prints selected scalars only, and
+            2 or greater also prints selected arrays.
+        dump_quantities: names written to the binary trajectory. By default,
+            constrained trajectories include ``Fc`` and, when Fixman terms
+            are enabled, ``G`` and the Blue-Moon reweighting factor ``w``.
+        log_quantities: names printed in the text log. Constraint diagnostics
+            follow the dump defaults and are included unless an explicit
+            selection is provided. Array selection does not override the
+            ``verbose >= 2`` requirement.
 
     Examples for constrains:
         def constr_func(X):
@@ -79,8 +85,27 @@ class _BaseConstrMD(_BaseMD):
             output_file: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
-            verbose: int = 2
+            verbose: int = 2,
+            dump_quantities: Tuple[str, ...] | List[str] | None = None,
+            log_quantities: Tuple[str, ...] | List[str] | None = None,
     ):
+        if dump_quantities is None:
+            dump_quantities = ('Energy', 'X', 'V', 'Force', 'Fc')
+            if require_fixman:
+                dump_quantities += ('G', 'w')
+        if log_quantities is None:
+            log_quantities = ('Energy', 'Ek', 'temperature', 'X', 'V', 'Force', 'Fc')
+            if require_fixman:
+                log_quantities += ('G', 'w')
+
+        if not require_fixman:
+            unavailable = {'G', 'w'} & (set(dump_quantities) | set(log_quantities))
+            if unavailable:
+                raise ValueError(
+                    f'Fixman quantities {sorted(unavailable)} require '
+                    f'require_fixman=True.'
+                )
+
         self._constr = BaseConstr(
             constr_func,
             constr_val,
@@ -99,6 +124,8 @@ class _BaseConstrMD(_BaseMD):
             device,
             verbose,
             is_compile=False,  # compiler does not support the proxy scheme `__getattr__`, so that must turn it off.
+            dump_quantities=dump_quantities,
+            log_quantities=log_quantities,
         )
 
     def __getattr__(self, name):
@@ -149,26 +176,29 @@ class _BaseConstrMD(_BaseMD):
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
     ):
-        self._constr.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
-        self._constr.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
-        _y_check = th.vmap(self.constr_func)(X)
-        if self._lazy_calc_constr_val:
-            self._constr.constr_val_now = _y_check
-        # check constr_val shape
-        if _y_check.shape != self.constr_val_now.shape:
-            raise RuntimeError(
-                f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
-            )
-        jac, y = self._jacobian(X)
-        if self.verbose:
-            self.logger.info(
-                f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
-            )
-        if y.ndim != 2:
-            raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
-        self._do_qr(jac)
-        # Register constraint diagnostics so they appear in StdContainer
-        # s / s_cpu and are automatically dumped and logged.
+        # BaseConstr owns mass factors, lazy targets, eager validation,
+        # Jacobian compilation, QR initialization, and X_cache.
+        # Keeping that lifecycle in one public method prevents proxy users from
+        # silently missing new constraint initialization steps.
+        self._constr.initialize(
+            func=func,
+            X=X,
+            Element_list=Element_list,
+            masses=masses,
+            V_init=V_init,
+            grad_func=grad_func,
+            func_args=func_args,
+            func_kwargs=func_kwargs,
+            grad_func_args=grad_func_args,
+            grad_func_kwargs=grad_func_kwargs,
+            is_grad_func_contain_y=is_grad_func_contain_y,
+            require_grad=require_grad,
+            batch_indices=batch_indices,
+            fixed_atom_tensor=fixed_atom_tensor,
+            is_fix_mass_center=is_fix_mass_center,
+        )
+        # Register selected constraint fields with correctly shaped prototypes.
+        # Ordered dictionaries update repeated names without duplicating them.
         _n_batch = X.shape[0]
         _n_constr = self.R.shape[-1]
         _Fc = th.zeros(_n_batch, _n_constr, device=self.device, dtype=FLOAT_TYPE)
@@ -179,25 +209,18 @@ class _BaseConstrMD(_BaseMD):
         else:
             _constraint_vars = {'Fc': _Fc}
 
-        # ``initialize()`` runs for every invocation of ``run()``. Keep the
-        # registration persistent, but refresh the placeholder tensors because
-        # a later run may use a different batch size or number of constraints.
-        # Registering the same names twice would otherwise raise on the second
-        # run even though ``reset_register_vars()`` intentionally preserves
-        # late-bound extension quantities.
-        self._extra_vars.update(_constraint_vars)
-        _new_print_vars = {
+        _dump_constraint_vars = {
             _name: _value for _name, _value in _constraint_vars.items()
-            if _name not in self._extra_print_names
+            if _name in self.get_dump_vars()
         }
-        _new_dump_vars = {
+        _log_constraint_vars = {
             _name: _value for _name, _value in _constraint_vars.items()
-            if _name not in self._extra_dump_names
+            if _name in self.get_log_vars()
         }
-        if _new_print_vars:
-            self.register_extra_print_vars(**_new_print_vars)
-        if _new_dump_vars:
-            self.register_extra_dump_vars(**_new_dump_vars)
+        if _dump_constraint_vars:
+            self.register_extra_dump_vars(**_dump_constraint_vars)
+        if _log_constraint_vars:
+            self.register_extra_print_vars(**_log_constraint_vars)
 
         ProjV = self._project1(V_init)
         Ek = th.sum(
@@ -211,7 +234,7 @@ class _BaseConstrMD(_BaseMD):
             keepdim=True
         )
         V_init.copy_(th.where(Ek_p < 1e-5, 0., th.sqrt(Ek/Ek_p) * ProjV))
-        self.free_degree -= jac.shape[1]  # reduce the constr. free deg.
+        self.free_degree -= _n_constr  # reduce the constr. free deg.
         # recalculate target Ek under constraints
         _, n_atom, n_dim = X.shape
         # target kinetic energy for NVT|NPT ensembles
@@ -223,6 +246,3 @@ class _BaseConstrMD(_BaseMD):
             )
         else:
             self.EK_TARGET = (self.free_degree / 2.) * 8.617333262145e-5 * self.T_init
-        # calc. constr. intensity
-        n_batch, n_constr, _ = self.R.shape
-        self._constr.X_cache = th.empty_like(X)

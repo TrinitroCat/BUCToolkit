@@ -498,6 +498,7 @@ class _BaseMC(BaseMotion):
             self.dumper.start_from_arrays(
                 1, _batch_array, Cell_vector,
                 _atomic_numbers_array, _atom_masks_array,
+                names=('batch_indices', 'cell_vec', 'atomic_numbers', 'fixed_mask'),
             )
             self.dumper.step(
                 _batch_array, Cell_vector,
@@ -506,6 +507,7 @@ class _BaseMC(BaseMotion):
         else:
             self.dumper.start_from_arrays(
                 1, Cell_vector, _atomic_numbers_array, _atom_masks_array,
+                names=('cell_vec', 'atomic_numbers', 'fixed_mask'),
             )
             self.dumper.step(
                 Cell_vector, _atomic_numbers_array, _atom_masks_array,
@@ -537,8 +539,8 @@ class _BaseMC(BaseMotion):
                 delta_E=th.zeros_like(energies),
                 is_accept=self.is_accept,
                 temperature=th.full_like(energies, _temperature),
-                **self._extra_vars,
             )
+            self.set_registered_var_values(s)
 
             dump_names = self.get_dump_vars()
             log_names = self.get_log_vars()
@@ -625,16 +627,6 @@ class _BaseMC(BaseMotion):
                 '-' * 100 + '\nMAIN LOOP Done. Total Time: '
                 f'{time.perf_counter() - _t_main:<.4f} s\n'
             )
-            if self.verbose < 2:
-                self.handle_arrays_print(
-                    self.logger,
-                    batch_indices,
-                    self.batch_slice_indx,
-                    [[s.X]],
-                    [['Final Coordinates']],
-                    verbose=self.verbose + 1,
-                    force=True,
-                )
 
     def _main_for_loop(
             self,

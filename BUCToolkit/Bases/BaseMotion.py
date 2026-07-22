@@ -36,17 +36,13 @@ class BaseIO:
             mode='x',
         )  # as the default. One can use `reset
 
-        self._dump_vars = None          # active dump names (tuple, rebuilt by reset)
-        self._log_vars = None           # active log names  (tuple, rebuilt by reset)
-        self._init_dump_vars: Tuple[str, ...] = ()  # immutable base set from __init__
-        self._init_log_vars: Tuple[str, ...] = ()   # immutable base set from __init__
+        self._dump_vars: Dict[str, th.Tensor | None] = {}
+        self._log_vars: Dict[str, th.Tensor | None] = {}
+        self._init_dump_vars: Dict[str, th.Tensor | None] = {}
+        self._init_log_vars: Dict[str, th.Tensor | None] = {}
         self._transfer_vars: Set[str] = set()
         self._assigned_vars = None
         self._is_assigned = False
-        # Late-binding extra vars (subclasses populate via register_extra_*)
-        self._extra_vars: dict = dict()            # {name: initial Tensor}
-        self._extra_print_names: Set[str] = set()  # subset of _extra_vars for log
-        self._extra_dump_names: Set[str] = set()   # subset of _extra_vars for dump
 
     def init_logger(self, logger_name: str):
         # logging
@@ -132,7 +128,7 @@ class BaseIO:
                 output step.
 
         Returns:
-            None. The active ordered tuple is available through
+            None. The active ordered mapping is available through
             :meth:`get_dump_vars`; the union needed for CPU/CUDA transfers is
             rebuilt in ``self._transfer_vars``.
 
@@ -142,19 +138,16 @@ class BaseIO:
                 allocation and iteration start.
         """
         if self._is_assigned: raise RuntimeError("Cannot register any variable after assignment.")
-        if self._dump_vars is None:
-            self._dump_vars = tuple(str(_) for _ in args)
-        elif isinstance(self._dump_vars, tuple):
-            self._dump_vars = self._dump_vars + tuple(str(_) for _ in args)
+        for _name in args:
+            self._dump_vars.setdefault(str(_name), None)
+        self._transfer_vars = set(self._dump_vars) | set(self._log_vars)
 
-        self._transfer_vars = set(self._dump_vars + (tuple() if self._log_vars is None else self._log_vars))
-
-    def get_dump_vars(self) -> Tuple[str, ...]:
-        """Return active dump names in binary-column order.
+    def get_dump_vars(self) -> Dict[str, th.Tensor | None]:
+        """Return the ordered active dump-variable mapping.
 
         Returns:
-            Tuple of attribute names. The tuple may be empty but is never
-            reordered implicitly.
+            Mapping from names to late-bound tensors or ``None``. Key
+            iteration gives the binary-column order.
         """
         return self._dump_vars
 
@@ -167,7 +160,7 @@ class BaseIO:
                 consumer in the same order.
 
         Returns:
-            None. The active ordered tuple is available through
+            None. The active ordered mapping is available through
             :meth:`get_log_vars`; the union needed for CPU/CUDA transfers is
             rebuilt in ``self._transfer_vars``.
 
@@ -176,15 +169,21 @@ class BaseIO:
                 the active run.
         """
         if self._is_assigned: raise RuntimeError("Cannot register any variable after assignment.")
-        if self._log_vars is None:
-            self._log_vars = tuple(str(_) for _ in args)
-        elif isinstance(self._log_vars, tuple):
-            self._log_vars = self._log_vars + tuple(str(_) for _ in args)
+        for _name in args:
+            self._log_vars.setdefault(str(_name), None)
+        self._transfer_vars = set(self._dump_vars) | set(self._log_vars)
 
-        self._transfer_vars = set((tuple() if self._dump_vars is None else self._dump_vars) + self._log_vars)
+    def get_log_vars(self) -> Dict[str, th.Tensor | None]:
+        """Return the active variables selected for per-step logging.
 
-    def get_log_vars(self) -> Tuple[str, ...]:
-        """Return active log names in consumer-queue order."""
+        Dictionary insertion order is the queue and display order used by the
+        asynchronous log consumer. Values remain ``None`` until late-bound
+        quantities are registered or assigned for the current run.
+
+        Returns:
+            Ordered mapping from log names to their registered tensors or
+            ``None`` placeholders.
+        """
         return self._log_vars
 
     def get_transfer_vars(self) -> Set[str]:
@@ -228,8 +227,8 @@ class BaseIO:
         Returns:
             None.
         """
-        self._dump_vars = None
-        self._log_vars = None
+        self._dump_vars = {}
+        self._log_vars = {}
         self._transfer_vars = set()
         self._assigned_vars = None
         self._is_assigned = False
@@ -251,8 +250,8 @@ class BaseIO:
             log_quantities: Ordered names requested as per-step log fields.
 
         Returns:
-            None. Immutable base tuples are stored in ``_init_dump_vars`` and
-            ``_init_log_vars``, then active registrations are built by
+            None. Ordered base dictionaries are stored in ``_init_dump_vars``
+            and ``_init_log_vars``, then active registrations are built by
             :meth:`reset_register_vars`.
 
         Raises:
@@ -269,41 +268,35 @@ class BaseIO:
                         f'{_name} contains unknown names {_unknown!r}. '
                         f'Allowed: {sorted(_allowed)}'
                     )
-        # Immutable base sets
-        self._init_dump_vars = tuple(dump_quantities)
-        self._init_log_vars  = tuple(log_quantities)
-        # Build active tuples
+        self._init_dump_vars = dict.fromkeys(
+            (str(_name) for _name in dump_quantities), None
+        )
+        self._init_log_vars = dict.fromkeys(
+            (str(_name) for _name in log_quantities), None
+        )
         self.reset_register_vars()
 
     def reset_register_vars(self):
-        """Re-apply registrations from the immutable init sets plus any
-        extra vars registered via ``register_extra_print_vars`` /
-        ``register_extra_dump_vars``.
+        """Restore active registrations from the persistent dictionaries.
 
         Safe to call at the start of each ``run()`` — only the active
-        tuples are purged; init- and extra-vars survive.
+        registries are purged; registered names and values survive.
 
         Returns:
-            None. Extra names are sorted before registration so dump-column and
-            log-field ordering is deterministic across processes and repeated
-            runs.
+            None. Dictionary insertion order preserves the requested column and
+            log-field order while repeated keys update without duplication.
         """
         self.purge_register_vars()
-        self.register_dump_vars(*self._init_dump_vars)
-        self.register_log_vars(*self._init_log_vars)
-        # Extra names are stored in sets for fast duplicate checks. Sort them
-        # when rebuilding the active tuples so the binary column order and log
-        # order remain deterministic across processes and repeated ``run()``
-        # calls.
-        self.register_dump_vars(*sorted(self._extra_dump_names))
-        self.register_log_vars(*sorted(self._extra_print_names))
+        self._dump_vars = self._init_dump_vars.copy()
+        self._log_vars = self._init_log_vars.copy()
+        self._transfer_vars = set(self._dump_vars) | set(self._log_vars)
 
     def register_extra_print_vars(self, **kwargs: th.Tensor):
         """Register extra per-step log quantities with their initial Tensors.
 
-        Values are stored in ``_extra_vars`` for injection into
-        ``StdContainer``.  Names are added to ``_extra_print_names`` so
-        they survive ``reset_register_vars()``.
+        Values are stored directly in the persistent and active ordered log
+        registries. Re-registering a name replaces its value without changing
+        its original position.
 
         Args:
             **kwargs: Mapping from each extra quantity name to a prototype/live
@@ -314,8 +307,11 @@ class BaseIO:
 
         Raises:
             TypeError: If an extra value is not a :class:`torch.Tensor`.
-            ValueError: If the name is already registered for printing.
+            RuntimeError: If transfer variables have already been assigned for
+                the active run.
         """
+        if self._is_assigned:
+            raise RuntimeError("Cannot register any variable after assignment.")
         for _k, _v in kwargs.items():
             _k = str(_k)
             if not isinstance(_v, th.Tensor):
@@ -323,11 +319,12 @@ class BaseIO:
                     f'register_extra_print_vars: {_k!r} must be a Tensor, '
                     f'got {type(_v).__name__}'
                 )
-            if _k in self._extra_print_names:
-                raise ValueError(f'Extra print var {_k!r} already registered.')
-            self._extra_vars[_k] = _v
-            self._extra_print_names.add(_k)
-        self.register_log_vars(*kwargs.keys())
+            self._init_log_vars[_k] = _v
+            self._log_vars[_k] = _v
+            if _k in self._init_dump_vars:
+                self._init_dump_vars[_k] = _v
+                self._dump_vars[_k] = _v
+        self._transfer_vars = set(self._dump_vars) | set(self._log_vars)
 
     def register_extra_dump_vars(self, **kwargs: th.Tensor):
         """Register extra per-step dump quantities with their initial Tensors.
@@ -344,8 +341,11 @@ class BaseIO:
 
         Raises:
             TypeError: If an extra value is not a :class:`torch.Tensor`.
-            ValueError: If the name is already registered for dumping.
+            RuntimeError: If transfer variables have already been assigned for
+                the active run.
         """
+        if self._is_assigned:
+            raise RuntimeError("Cannot register any variable after assignment.")
         for _k, _v in kwargs.items():
             _k = str(_k)
             if not isinstance(_v, th.Tensor):
@@ -353,12 +353,33 @@ class BaseIO:
                     f'register_extra_dump_vars: {_k!r} must be a Tensor, '
                     f'got {type(_v).__name__}'
                 )
-            if _k in self._extra_dump_names:
-                raise ValueError(f'Extra dump var {_k!r} already registered.')
-            if _k not in self._extra_vars:
-                self._extra_vars[_k] = _v
-            self._extra_dump_names.add(_k)
-        self.register_dump_vars(*kwargs.keys())
+            self._init_dump_vars[_k] = _v
+            self._dump_vars[_k] = _v
+            if _k in self._init_log_vars:
+                self._init_log_vars[_k] = _v
+                self._log_vars[_k] = _v
+        self._transfer_vars = set(self._dump_vars) | set(self._log_vars)
+
+    def set_registered_var_values(self, container: StdContainer) -> None:
+        """Copy late-bound registered tensors into one motion-state container.
+
+        Constructor-selected quantities initially use ``None`` placeholders,
+        while constraint and other extension quantities may already carry a
+        tensor prototype. Only concrete registered values are assigned; normal
+        state fields created by the caller remain unchanged.
+
+        Args:
+            container: Active :class:`StdContainer` that will be snapshotted by
+                the dump and log consumers.
+
+        Returns:
+            None. Concrete values from the dump and log registries are assigned
+            to same-named attributes of ``container``.
+        """
+        for _variables in (self._dump_vars, self._log_vars):
+            for _name, _value in _variables.items():
+                if _value is not None:
+                    setattr(container, _name, _value)
 
     # ------------------------------------------------------------------
 
@@ -395,7 +416,15 @@ class BaseIO:
             # FLOAT_TYPE coercion happened to work for coordinates/energies,
             # but corrupted boolean or integer extension quantities such as
             # Monte-Carlo acceptance masks.
-            setattr(s_cpu, name, th.empty_like(ref, device='cpu', pin_memory=True))
+            setattr(
+                s_cpu,
+                name,
+                th.empty_like(
+                    ref,
+                    device='cpu',
+                    pin_memory=(device.type == 'cuda'),
+                ),
+            )
             if require_buffer:
                 setattr(s_buf, name, th.empty_like(ref, device=device))
         return s_cpu, s_buf
@@ -582,7 +611,9 @@ class BaseMotion(BaseIO):
             batch_slice_indx: the batch_indices in ptr slice format
             arrays: input arrays. Format: [[tensors11, tensors12, ...], [tensors21, ...], ...],
                 the i-th List in the outer list corresponds to the i-th verbosity level to log,
-                and the tensors in the inner list will be all logged.
+                and the tensors in the inner list will be all logged. With an
+                irregular batch, only arrays whose second dimension spans all
+                atoms are split; batch-leading and other arrays remain intact.
             array_names: input arrays names. Format: [[name11, name12, ...], [name21, ...], ...],
             verbose: verbosity level
             force: whether to use Tensor.numpy(force=True) when printing. If True, data will be copied once.
@@ -594,10 +625,21 @@ class BaseMotion(BaseIO):
             raise ValueError(f'arrays and array_names must have the same length, but got {len(arrays)} and {len(array_names)}.')
         if batch_indices is not None:
             for v_lev in range(len(arrays)):
-                if verbose > v_lev + 1:  # "+ 1" is a fixed offset to make that `verbose < 2` does not log large arrays.
+                if verbose > v_lev + 1:
                     for na, arr in enumerate(arrays[v_lev]):
                         X_np = arr.numpy(force=force)
-                        X_tup = np.split(X_np, batch_slice_indx[1:-1], axis=1)
+                        # Check whether the arr satisfy the alignment of batch_indices.
+                        #   only the 2nd dim that has the same length of `batch_scatter` would be split.
+                        if (
+                                arr.ndim > 1
+                                and arr.shape[0] != len(batch_indices)
+                                and arr.shape[1] == batch_slice_indx[-1]
+                        ):
+                            X_tup = np.split(
+                                X_np, batch_slice_indx[1:-1], axis=1
+                            )
+                        else:
+                            X_tup = (X_np,)
                         logger.info(f" {array_names[v_lev][na]}:\n")
                         X_str = [
                             np.array2string(xi, **FLOAT_ARRAY_FORMAT).translate(str.maketrans('[]', '  '))
@@ -605,10 +647,10 @@ class BaseMotion(BaseIO):
                         ]
                         for x_str in X_str: logger.info(f'{x_str}\n')
                 else:
-                    break  # logging verbosity level higher than input verbose, thus directly break to avoid useless loop
+                    break
         else:
             for v_lev in range(len(arrays)):
-                if verbose > v_lev + 1:  # "+ 1" is a fixed offset
+                if verbose > v_lev + 1:
                     for na, arr in enumerate(arrays[v_lev]):
                         X_tup = (arr.numpy(force=force),)
                         logger.info(f" {array_names[v_lev][na]}:\n")
@@ -652,7 +694,7 @@ class BaseMotion(BaseIO):
 
         return y, g.neg_()
 
-    @th.compiler.disable
+    #@th.compiler.disable
     def _calc_y_grad(
             self,
             X: th.Tensor,

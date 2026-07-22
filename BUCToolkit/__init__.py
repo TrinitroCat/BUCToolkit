@@ -32,7 +32,7 @@ from BUCToolkit.Preprocessing import preprocessing
 from BUCToolkit import io
 from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit import api
-from BUCToolkit import BatchMC, BatchMD, BatchOptim, BatchStructures
+from BUCToolkit import BatchMC, BatchMD, BatchOptim, BatchStructures, Postprocessing
 
 __all__ = [
     'Structures',
@@ -50,5 +50,6 @@ __all__ = [
     'BatchMC',
     'BatchMD',
     'BatchOptim',
-    'BatchStructures'
+    'BatchStructures',
+    'Postprocessing'
 ]

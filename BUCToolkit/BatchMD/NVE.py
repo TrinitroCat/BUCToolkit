@@ -24,7 +24,8 @@ class NVE(_BaseMD):
         T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: str|torch.device, device that program rum on.
-        verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+        verbose: print level. 0 is silent, 1 prints selected scalars only, and
+            2 or greater also prints selected arrays.
         is_compile: whether to use jit to compile integrator or not.
         compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
 

@@ -1,19 +1,27 @@
 """Focused regressions for shared MD/MC/optimization trajectory handling."""
 
+import io
+import logging
 import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 import warnings
 
 import numpy as np
 import torch as th
 
 from BUCToolkit.BatchMC import MMC
+from BUCToolkit.BatchMD.ConstrNVE import ConstrNVE
 from BUCToolkit.BatchMD.ConstrNVT import ConstrNVT
+from BUCToolkit.BatchMD.NVE import NVE
 from BUCToolkit.BatchOptim.minimize.FIRE import FIRE
 from BUCToolkit.BatchStructures import read_dump_arrays, read_mc_traj
 from BUCToolkit.BatchStructures.StructuresIO import ArrayDumper
+from BUCToolkit.Bases.BaseMotion import BaseMotion
+from BUCToolkit.Bases.StdContainer import StdContainer
+from BUCToolkit.Postprocessing import MDTrajectory
 
 
 def _harmonic_energy(X: th.Tensor, X0: th.Tensor) -> th.Tensor:
@@ -33,6 +41,100 @@ class MotionIORegressionTest(unittest.TestCase):
 
     def _path(self, name: str) -> str:
         return os.path.join(self._tmpdir, name)
+
+    def test_md_array_log_uses_registered_names_for_irregular_batch(self):
+        """Array logs have field headings and never stringify tensors as names."""
+        runner = NVE(0.1, 1, output_file=None, device='cpu', verbose=2)
+        stream = io.StringIO()
+        logger = logging.getLogger(f'{__name__}.md_array_log.{id(runner)}')
+        logger.handlers.clear()
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        logger.addHandler(handler)
+        runner.logger = logger
+
+        X = th.tensor([[[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]]])
+        runner.run(
+            lambda coo: th.stack((
+                th.sum(coo[:, :1] ** 2),
+                th.sum(coo[:, 1:] ** 2),
+            )),
+            X,
+            [['H', 'H', 'H']],
+            V_init=th.zeros_like(X),
+            grad_func=lambda coo, energy: 2 * coo,
+            is_grad_func_contain_y=True,
+            batch_indices=(1, 2),
+        )
+        handler.flush()
+        output = stream.getvalue()
+
+        self.assertEqual(runner.batch_slice_indx, [0, 1, 3])
+        self.assertNotIn('Failed to logout', output)
+        self.assertIn('Step:            0', output)
+        self.assertIn(' X:\n', output)
+        self.assertIn(' V:\n', output)
+        self.assertNotIn('tensor(', output)
+
+        stream.seek(0)
+        stream.truncate(0)
+        runner.verbose = 1
+        runner.run(
+            lambda coo: th.stack((
+                th.sum(coo[:, :1] ** 2),
+                th.sum(coo[:, 1:] ** 2),
+            )),
+            X,
+            [['H', 'H', 'H']],
+            V_init=th.zeros_like(X),
+            grad_func=lambda coo, energy: 2 * coo,
+            is_grad_func_contain_y=True,
+            batch_indices=(1, 2),
+        )
+        handler.flush()
+        scalar_output = stream.getvalue()
+        logger.removeHandler(handler)
+        handler.close()
+
+        self.assertIn('Energy', runner.get_log_vars())
+        self.assertIn('X', runner.get_log_vars())
+        self.assertIn('V', runner.get_log_vars())
+        self.assertIn('Step:            0', scalar_output)
+        self.assertIn('\tEnergy       = ', scalar_output)
+        self.assertNotIn(' X:\n', scalar_output)
+        self.assertNotIn(' V:\n', scalar_output)
+
+    def test_array_log_splits_only_flattened_irregular_atom_data(self):
+        """Batch-leading and unrelated arrays bypass irregular atom slicing."""
+        logger = mock.Mock()
+        atomwise = th.arange(9.).reshape(1, 3, 3)
+        batch_leading = th.arange(6.).reshape(2, 3)
+        other = th.arange(8.).reshape(4, 2)
+
+        with mock.patch(
+                'BUCToolkit.Bases.BaseMotion.np.split', wraps=np.split
+        ) as split:
+            NVE.handle_arrays_print(
+                logger,
+                batch_indices=[1, 2],
+                batch_slice_indx=[0, 1, 3],
+                arrays=[[atomwise, batch_leading, other]],
+                array_names=[['X', 'Fc', 'other']],
+                verbose=2,
+            )
+
+        self.assertEqual(split.call_count, 1)
+        self.assertEqual(split.call_args.args[1], [1])
+        self.assertEqual(split.call_args.kwargs, {'axis': 1})
+        self.assertEqual(
+            [
+                call.args[0] for call in logger.info.call_args_list
+                if call.args[0].endswith(':\n')
+            ],
+            [' X:\n', ' Fc:\n', ' other:\n'],
+        )
 
     def test_mc_configurable_named_quantities_cpu(self):
         """MC uses named state fields and preserves boolean dump dtypes."""
@@ -78,7 +180,8 @@ class MotionIORegressionTest(unittest.TestCase):
         atomic_numbers = np.array([1, 1, 8, 1, 1], dtype=np.int64)
         fixed_mask = np.ones((1, 5, 3), dtype=np.float32)
         dumper.start_from_arrays(
-            1, batch_indices, cells, atomic_numbers, fixed_mask
+            1, batch_indices, cells, atomic_numbers, fixed_mask,
+            names=('batch_indices', 'cell_vec', 'atomic_numbers', 'fixed_mask'),
         )
         dumper.step(batch_indices, cells, atomic_numbers, fixed_mask)
 
@@ -170,8 +273,189 @@ class MotionIORegressionTest(unittest.TestCase):
         self.assertTrue(np.allclose(raw['X'][-1], coordinates.numpy()))
         self.assertTrue(np.allclose(raw['Force'][-1], (-gradients).numpy()))
 
+    def test_optimizer_system_info_validates_and_normalizes_metadata(self):
+        """Optimizer metadata is validated before replacing retained values."""
+        runner = FIRE(maxiter=1, output_file=None, device='cpu', verbose=0)
+        cells = np.zeros((2, 3, 3), dtype=np.float64)
+        runner.set_system_info(
+            cell_vec=cells,
+            atomic_numbers=[['C'], ['O']],
+        )
+
+        self.assertEqual(runner.atomic_numbers, [[6], [8]])
+        self.assertEqual(runner.cell_vec.dtype, np.float32)
+        cells[0, 0, 0] = 1.
+        self.assertEqual(runner.cell_vec[0, 0, 0], 0.)
+
+        # Numeric Python containers use NumPy's normal conversion rules.
+        runner.set_system_info(cell_vec=np.zeros((2, 3, 3)).tolist())
+        self.assertEqual(runner.cell_vec.dtype, np.float32)
+        runner.set_system_info(atomic_numbers=[[np.int64(6)], [8.0]])
+        self.assertEqual(runner.atomic_numbers, [[6], [8]])
+
+        invalid_values = (
+            ({'atomic_numbers': ['H']}, TypeError),
+            ({'atomic_numbers': [('H',)]}, TypeError),
+            ({'atomic_numbers': [[]]}, ValueError),
+            ({'atomic_numbers': [['Unknown']]}, ValueError),
+            ({'atomic_numbers': [[87]]}, ValueError),
+            ({'cell_vec': np.zeros((3, 3))}, ValueError),
+            ({'cell_vec': np.full((1, 3, 3), np.nan)}, ValueError),
+            ({
+                'cell_vec': np.zeros((2, 3, 3)),
+                'atomic_numbers': [['H']],
+            }, ValueError),
+        )
+        for kwargs, error_type in invalid_values:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(error_type):
+                    runner.set_system_info(**kwargs)
+
+        # A failed update must not partially replace previously valid metadata.
+        self.assertEqual(runner.atomic_numbers, [[6], [8]])
+        self.assertEqual(runner.cell_vec.shape, (2, 3, 3))
+
+    def test_optimizer_system_info_must_match_run_layout(self):
+        """Stored element rows must match the coordinates of the next run."""
+        runner = FIRE(maxiter=1, output_file=None, device='cpu', verbose=0)
+        runner.set_system_info(atomic_numbers=[['H', 'H']])
+        coordinates = th.zeros((1, 1, 3), dtype=th.float32)
+
+        with self.assertRaisesRegex(ValueError, 'run layout'):
+            runner.run(
+                lambda value: th.sum(value ** 2, dim=(-2, -1)),
+                coordinates,
+                grad_func=lambda value, energy: 2 * value,
+                is_grad_func_contain_y=True,
+            )
+
+    def test_optimizer_system_info_accepts_irregular_layout(self):
+        """Nested element rows are flattened according to batch_indices."""
+        output_file = self._path('opt_irregular_metadata.bin')
+        runner = FIRE(
+            E_threshold=0., F_threshold=0., maxiter=1, steplength=0.1,
+            output_file=output_file, device='cpu', verbose=0,
+        )
+        runner.set_system_info(
+            cell_vec=th.zeros((2, 3, 3), dtype=th.bfloat16),
+            atomic_numbers=[['H'], ['O', 'H']],
+        )
+        coordinates = th.zeros((1, 3, 3), dtype=th.float32)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            runner.run(
+                lambda value: th.stack((
+                    th.sum(value[:, :1] ** 2),
+                    th.sum(value[:, 1:] ** 2),
+                )),
+                coordinates,
+                grad_func=lambda value, energy: 2 * value,
+                is_grad_func_contain_y=True,
+                batch_indices=(1, 2),
+            )
+
+        raw = read_dump_arrays(output_file)
+        self.assertEqual(raw['batch_indices'].tolist(), [1, 2])
+        self.assertEqual(raw['atomic_numbers'].tolist(), [1, 8, 1])
+        self.assertEqual(raw['cell_vec'].shape, (2, 3, 3))
+
+    def test_fire_preserves_atomic_numbers_and_regular_batch_shape(self):
+        """FIRE headers store atomic numbers rather than rounded masses."""
+        output_file = self._path('fire_elements.bin')
+        coordinates = th.tensor(
+            [[[0.2, 0., 0.]], [[0.3, 0., 0.]]], dtype=th.float32
+        )
+        runner = FIRE(
+            E_threshold=0., F_threshold=0., maxiter=1, steplength=0.1,
+            output_file=output_file, device='cpu', verbose=0,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            runner.run(
+                lambda value: th.sum(value ** 2, dim=(-2, -1)),
+                coordinates,
+                grad_func=lambda value, energy: 2 * value,
+                is_grad_func_contain_y=True,
+                elements=[['C'], ['O']],
+            )
+
+        raw = read_dump_arrays(output_file)
+        self.assertEqual(raw['atomic_numbers'].tolist(), [[6], [8]])
+
+    def test_numeric_cpu_md_header_supports_postprocessing_masses(self):
+        """Numeric Element_list entries remain integer atomic numbers."""
+        output_file = self._path('numeric_md.bin')
+        runner = NVE(0.1, 1, output_file=output_file, device='cpu', verbose=0)
+        coordinates = th.zeros((1, 2, 3), dtype=th.float32)
+        runner.run(
+            lambda value: th.sum(value ** 2, dim=(-2, -1)),
+            coordinates,
+            [[1, 8]],
+            V_init=th.zeros_like(coordinates),
+            grad_func=lambda value, energy: 2 * value,
+            is_grad_func_contain_y=True,
+        )
+
+        trajectory = MDTrajectory(output_file)
+        self.assertEqual(trajectory.atomic_numbers[0].tolist(), [1, 8])
+        self.assertTrue(np.allclose(trajectory.masses[0], [1.008, 15.999]))
+
+    def test_cpu_buffers_do_not_request_pinned_memory(self):
+        """CPU-only installations never enter the pinned-allocation path."""
+        original_empty_like = th.empty_like
+
+        def reject_pinned_memory(*args, **kwargs):
+            if kwargs.get('pin_memory'):
+                raise RuntimeError('No pinned-memory allocator is available.')
+            return original_empty_like(*args, **kwargs)
+
+        state = StdContainer(Energy=th.zeros(1))
+        with mock.patch(
+                'BUCToolkit.Bases.BaseMotion.th.empty_like',
+                side_effect=reject_pinned_memory,
+        ):
+            cpu_state, staging_state = BaseMotion._allocate_cpu_buffers(
+                state,
+                ('Energy',),
+                th.device('cpu'),
+                require_buffer=False,
+            )
+        self.assertEqual(cpu_state.Energy.device.type, 'cpu')
+        self.assertIsNone(staging_state)
+
+    def test_segment_reader_preserves_changed_batch_metadata(self):
+        """Each appended segment is split with its own static header."""
+        output_file = self._path('changed_batch.bin')
+        dumper = ArrayDumper(output_file, mode='x')
+        for n_batch in (1, 2):
+            cells = np.zeros((n_batch, 3, 3), dtype=np.float32)
+            atomic_numbers = np.ones((n_batch, 1), dtype=np.int64)
+            fixed_mask = np.ones((n_batch, 1, 3), dtype=np.float32)
+            run_id = np.asarray([n_batch], dtype=np.int64)
+            dumper.start_from_arrays(
+                1, cells, atomic_numbers, fixed_mask, run_id,
+                names=('cell_vec', 'atomic_numbers', 'fixed_mask', 'run_id'),
+            )
+            dumper.step(cells, atomic_numbers, fixed_mask, run_id)
+            energies = np.arange(n_batch, dtype=np.float32)
+            coordinates = np.zeros((n_batch, 1, 3), dtype=np.float32)
+            dumper.start_from_arrays(
+                1, energies, coordinates,
+                names=('Energy', 'X'),
+            )
+            dumper.step(energies, coordinates)
+        dumper.close()
+
+        with self.assertRaises(ValueError):
+            read_dump_arrays(output_file)
+        columns = read_mc_traj(output_file, out_arrays=True)
+        self.assertEqual(len(columns['Energy']), 3)
+        self.assertEqual(len(columns['X']), 3)
+        self.assertNotIn('run_id', columns)
+
     def test_constrained_nvt_updates_state_and_allows_repeated_runs(self):
-        """Langevin/Nose-Hoover publish Fc and registration is idempotent."""
+        """Constraint fields honor dump/log selections across repeated runs."""
         constr_func = lambda coo: th.linalg.norm(
             coo[1] - coo[0]
         ).reshape(1)
@@ -186,6 +470,7 @@ class MotionIORegressionTest(unittest.TestCase):
         ):
             with self.subTest(scheme=scheme):
                 output_file = self._path(f'{scheme}.bin')
+                check_log = scheme == 'Langevin'
                 runner = ConstrNVT(
                     0.1,
                     3,
@@ -199,8 +484,23 @@ class MotionIORegressionTest(unittest.TestCase):
                     output_file,
                     1,
                     'cpu',
-                    0,
+                    2 if check_log else 0,
+                    log_quantities=(
+                        'Energy', 'Ek', 'temperature', 'X', 'V', 'Fc'
+                    ) if check_log else None,
                 )
+                if check_log:
+                    stream = io.StringIO()
+                    logger = logging.getLogger(
+                        f'{__name__}.constrained_nvt_log.{id(runner)}'
+                    )
+                    logger.handlers.clear()
+                    logger.propagate = False
+                    logger.setLevel(logging.INFO)
+                    handler = logging.StreamHandler(stream)
+                    handler.setFormatter(logging.Formatter('%(message)s'))
+                    logger.addHandler(handler)
+                    runner.logger = logger
                 runner.run(
                     energy_func,
                     X,
@@ -209,6 +509,25 @@ class MotionIORegressionTest(unittest.TestCase):
                     grad_func=grad_func,
                     is_grad_func_contain_y=True,
                 )
+                if check_log:
+                    handler.flush()
+                    log_output = stream.getvalue()
+                    logger.removeHandler(handler)
+                    handler.close()
+
+                    self.assertEqual(log_output.count('Step:'), 3)
+                    for name in ('Energy', 'Ek', 'temperature'):
+                        self.assertEqual(
+                            log_output.count(f'\t{name:<12s} = '), 3
+                        )
+                    for name in ('X', 'V', 'Fc'):
+                        self.assertEqual(log_output.count(f' {name}:\n'), 3)
+                    self.assertNotIn('tensor(', log_output)
+                    self.assertNotIn('Failed to logout', log_output)
+                    self.assertNotIn('\tw           = ', log_output)
+                    self.assertNotIn('\tG           = ', log_output)
+                    self.assertNotIn(' w:\n', log_output)
+                    self.assertNotIn(' G:\n', log_output)
                 raw = read_dump_arrays(output_file)
                 self.assertIn('Fc', raw)
                 self.assertTrue(any(np.any(value != 0.) for value in raw['Fc'][1:]))
@@ -218,6 +537,7 @@ class MotionIORegressionTest(unittest.TestCase):
         runner = ConstrNVT(
             0.01, 1, 'Langevin', {'damping_coeff': 0.01},
             constr_func, None, 1e-5, False, 300., None, 1, 'cpu', 0,
+            log_quantities=('Fc',),
         )
         for _ in range(2):
             runner.run(
@@ -228,8 +548,41 @@ class MotionIORegressionTest(unittest.TestCase):
                 grad_func=grad_func,
                 is_grad_func_contain_y=True,
             )
-        self.assertEqual(runner.get_dump_vars().count('Fc'), 1)
-        self.assertEqual(runner.get_log_vars().count('Fc'), 1)
+        self.assertEqual(list(runner.get_dump_vars()).count('Fc'), 1)
+        self.assertEqual(list(runner.get_log_vars()).count('Fc'), 1)
+
+        default_fixman = ConstrNVT(
+            0.01, 1, 'Langevin', {'damping_coeff': 0.01},
+            constr_func, None, 1e-5, True, 300., None, 1, 'cpu', 0,
+        )
+        self.assertEqual(
+            list(default_fixman.get_dump_vars()),
+            ['Energy', 'X', 'V', 'Force', 'Fc', 'G', 'w'],
+        )
+        self.assertEqual(
+            list(default_fixman.get_log_vars()),
+            ['Energy', 'Ek', 'temperature', 'X', 'V', 'Force', 'Fc', 'G', 'w'],
+        )
+
+        configurable = ConstrNVT(
+            0.01, 1, 'Langevin', {'damping_coeff': 0.01},
+            constr_func, None, 1e-5, True, 300., None, 1, 'cpu', 0,
+            dump_quantities=('Energy', 'Fc', 'G', 'w'),
+            log_quantities=('Energy', 'w'),
+        )
+        self.assertEqual(
+            list(configurable.get_dump_vars()), ['Energy', 'Fc', 'G', 'w']
+        )
+        self.assertEqual(list(configurable.get_log_vars()), ['Energy', 'w'])
+
+        configurable_nve = ConstrNVE(
+            0.01, 1, constr_func, None, 1e-5, False, 300., None, 1,
+            'cpu', 0,
+            dump_quantities=('Fc',),
+            log_quantities=(),
+        )
+        self.assertEqual(list(configurable_nve.get_dump_vars()), ['Fc'])
+        self.assertEqual(list(configurable_nve.get_log_vars()), [])
 
 
 if __name__ == '__main__':

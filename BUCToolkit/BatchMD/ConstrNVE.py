@@ -36,7 +36,12 @@ class ConstrNVE(_BaseConstrMD):
         T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: str|torch.device, device that program rum on.
-        verbose: int, control the detailed degree of output information. 0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+        verbose: print level. 0 is silent, 1 prints selected scalars only, and
+            2 or greater also prints selected arrays.
+        dump_quantities: names written to the binary trajectory. ``Fc`` and
+            enabled Fixman fields are included by default.
+        log_quantities: names printed in the text log. Constraint diagnostics
+            are included by default and may be changed explicitly.
 
     Methods:
         run: run BatchMD.
@@ -55,7 +60,9 @@ class ConstrNVE(_BaseConstrMD):
             output_file: str | None = None,
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
-            verbose: int = 2
+            verbose: int = 2,
+            dump_quantities: Tuple[str, ...] | List[str] | None = None,
+            log_quantities: Tuple[str, ...] | List[str] | None = None,
     ):
         super().__init__(
             time_step,
@@ -68,7 +75,9 @@ class ConstrNVE(_BaseConstrMD):
             output_file,
             output_structures_per_step,
             device,
-            verbose
+            verbose,
+            dump_quantities,
+            log_quantities,
         )
 
     def initialize(

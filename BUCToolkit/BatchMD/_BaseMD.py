@@ -75,7 +75,8 @@ class _BaseMD(BaseMotion):
             output_structures_per_step: int, output structures per output_structures_per_step steps.
             device: device that program run on.
             verbose: control the detailed degree of output text information.
-                0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+                0 for silence, 1 for registered scalars only, and 2 or greater
+                for registered scalars and arrays.
                 Note: verbose > 0 will be very slow, especially for computation on GPU.
             is_compile: whether to use jit to compile integrator or not.
             compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
@@ -83,7 +84,9 @@ class _BaseMD(BaseMotion):
                 binary trajectory file.  Must be a subset of :attr:`ALLOWED_QUANTITIES`.
             log_quantities: names of StdContainer attributes to include in the
                 per-step log queue / inline print.  Must be a subset of
-                :attr:`ALLOWED_QUANTITIES`.
+                :attr:`ALLOWED_QUANTITIES`. Selection is independent of
+                ``verbose``; selected arrays are emitted only at level 2 or
+                greater.
         """
         self.time_step = time_step
         self.time_now = th.scalar_tensor(0., device=device)  # the accumulated time
@@ -252,7 +255,7 @@ class _BaseMD(BaseMotion):
                     self.handle_arrays_print(
                         self.logger, batch_indices, self.batch_slice_indx,
                         [[_v for _, _v in _arrays]],
-                        [[_n for _, _n in _arrays]],
+                        [[_n for _n, _ in _arrays]],
                         verbose=self.verbose, force=False,
                     )
             except Exception as e:
@@ -560,6 +563,7 @@ class _BaseMD(BaseMotion):
                 Cell_vector, # cell
                 np.asarray(atomic_numbers),  # element type / atomic number
                 atom_masks_arr,  # fixation mask
+                names=('batch_indices', 'cell_vec', 'atomic_numbers', 'fixed_mask'),
             )
             dumper.step(
                 self.batch_tensor.numpy(force=True),
@@ -573,6 +577,7 @@ class _BaseMD(BaseMotion):
                 Cell_vector,
                 np.asarray(atomic_numbers),  # element type / atomic number
                 atom_masks_arr,  # fixation mask
+                names=('cell_vec', 'atomic_numbers', 'fixed_mask'),
             )
             dumper.step(
                 Cell_vector,
@@ -635,8 +640,8 @@ class _BaseMD(BaseMotion):
                 Energy=Energy,
                 Ek=th.zeros_like(Energy),
                 temperature=th.zeros_like(Energy),
-                **self._extra_vars
             )
+            self.set_registered_var_values(s)
 
             # dynamic dump buffers
             dump_names = self.get_dump_vars()  # self._dump_vars
@@ -809,7 +814,7 @@ class _BaseMD(BaseMotion):
         if func_kwargs is None: func_kwargs = dict()
         if grad_func_kwargs is None: grad_func_kwargs = dict()
         # Check batch indices
-        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
+        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, self.batch_slice_indx = self.handle_batch_indices(
             batch_indices, n_batch, device=self.device
         )
         self.scatter_dim_out_size = self.batch_scatter.max().item() + 1 if self.batch_scatter is not None else None
@@ -819,7 +824,10 @@ class _BaseMD(BaseMotion):
         atomic_numbers = list()
         for _Elem in Element_list:
             if not isinstance(_Elem, list): raise TypeError(f'Expected `Element_list` of List[List[int|str]], but got List[{type(_Elem)}].')
-            atomic_numbers.append([ATOMIC_SYMBOL[__elem] if isinstance(__elem, str) else ATOMIC_NUMBER[__elem] for __elem in _Elem])
+            atomic_numbers.append([
+                ATOMIC_SYMBOL[element] if isinstance(element, str) else int(element)
+                for element in _Elem
+            ])
             masses.append([MASS[__elem] if isinstance(__elem, str) else N_MASS[__elem] for __elem in _Elem])
         masses_short = th.tensor(masses, dtype=FLOAT_TYPE, device=self.device)  # (n_batch, n_atom)
         masses = masses_short.unsqueeze(-1).expand_as(X).contiguous()  # (n_batch, n_atom, n_dim)
@@ -928,6 +936,7 @@ class _BaseMD(BaseMotion):
                 Cell_vector,
                 np.asarray(atomic_numbers),  # element type / atomic number
                 atom_masks_arr,  # fixation mask
+                names=('batch_indices', 'cell_vec', 'atomic_numbers', 'fixed_mask'),
             )
             dumper.step(
                 self.batch_tensor.numpy(force=True),
@@ -941,6 +950,7 @@ class _BaseMD(BaseMotion):
                 Cell_vector,
                 np.asarray(atomic_numbers),  # element type / atomic number
                 atom_masks_arr,  # fixation mask
+                names=('cell_vec', 'atomic_numbers', 'fixed_mask'),
             )
             dumper.step(
                 Cell_vector,
@@ -1002,8 +1012,8 @@ class _BaseMD(BaseMotion):
                 Energy=Energy,
                 Ek=th.zeros_like(Energy),
                 temperature=th.zeros_like(Energy),
-                **self._extra_vars,
             )
+            self.set_registered_var_values(s)
 
             # dynamic dump buffers
             dump_names = self.get_dump_vars()

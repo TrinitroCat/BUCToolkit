@@ -659,6 +659,184 @@ class MainTest(unittest.TestCase):
                               f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
 
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
+
+        # ============================================================
+        # Analytic manifold-thermodynamics validation
+        # ============================================================
+        # Use one particle in a three-dimensional harmonic potential,
+        # constrained by xi(X) = |X|^2 = rho. Its configurational manifold is
+        # a two-sphere, for which the constrained canonical distribution and
+        # the Blue-Moon/Fixman quantities are available analytically:
+        #
+        #   G                 = 1 / (2 rho)
+        #   w                 = sqrt(m) / (2 sqrt(rho))
+        #   <K_tangent>       = kB T
+        #   <Fc>              = k/2 - <K_tangent>/rho
+        #   dA/d rho          = k/2 - kB T/(2 rho)
+        #
+        # With the sign convention used by BaseConstr, the last identity is
+        # recovered from <w (Fc + kB T G)> / <w>. This checks the sampled
+        # manifold measure and the existing constraint observables without
+        # making a free-energy postprocessor part of the MD algorithm.
+        MANIFOLD_BATCH = 32
+        MANIFOLD_STEP = 5000
+        MANIFOLD_OUTPUT_FREQ = 10
+        MANIFOLD_RHO = 4.0
+        MANIFOLD_K = 0.2
+        MANIFOLD_MASS = MASS['H']
+        MANIFOLD_FILE = f'{self.out_pt}results/CMD_MANIFOLD_CPU'
+
+        def sphere_constr(X):
+            return th.sum(X[0] ** 2).reshape(1)
+
+        def sphere_energy(X):
+            return 0.5 * MANIFOLD_K * th.sum(X ** 2, dim=(-2, -1))
+
+        def sphere_gradient(X, energy):
+            return MANIFOLD_K * X
+
+        # Keep this statistical regression reproducible without changing the
+        # random stream seen by other tests in this class.
+        cpu_rng_state = th.random.get_rng_state()
+        th.manual_seed(12345)
+        sphere_pos = th.randn(MANIFOLD_BATCH, 1, 3)
+        sphere_pos.mul_(
+            math.sqrt(MANIFOLD_RHO)
+            / th.linalg.norm(sphere_pos, dim=-1, keepdim=True)
+        )
+        sphere_target = th.full((MANIFOLD_BATCH, 1), MANIFOLD_RHO)
+
+        sphere_runner = ConstrNVT(
+            TIME_STEP, MANIFOLD_STEP,
+            'Langevin', {'damping_coeff': 0.05},
+            sphere_constr, sphere_target, 1e-6,
+            True, TEMPERATURE,
+            MANIFOLD_FILE, MANIFOLD_OUTPUT_FREQ,
+            device='cpu', verbose=0,
+        )
+        try:
+            sphere_runner.run(
+                sphere_energy,
+                sphere_pos,
+                [['H'] for _ in range(MANIFOLD_BATCH)],
+                None, None,
+                sphere_gradient,
+                tuple(), None,
+                tuple(), None,
+                True, False,
+                None,
+                move_to_center_freq=-1,
+            )
+            manifold_traj = read_md_traj(MANIFOLD_FILE, out_arrays=True)
+        finally:
+            th.random.set_rng_state(cpu_rng_state)
+
+        n_manifold_cycle = len(manifold_traj['Fc']) // MANIFOLD_BATCH
+        manifold_start = int(n_manifold_cycle * 0.3) * MANIFOLD_BATCH
+        manifold_X = np.asarray(manifold_traj['X'][manifold_start:])[:, 0, :]
+        manifold_V = np.asarray(manifold_traj['V'][manifold_start:])[:, 0, :]
+        manifold_Fc = np.asarray([
+            np.asarray(_v).reshape(-1)[0]
+            for _v in manifold_traj['Fc'][manifold_start:]
+        ])
+        manifold_G = np.asarray([
+            np.asarray(_v).reshape(-1)[0]
+            for _v in manifold_traj['G'][manifold_start:]
+        ])
+        manifold_w = np.asarray(manifold_traj['w'][manifold_start:]).reshape(-1)
+
+        # The trajectory must remain on the sphere and retain exactly two
+        # tangent degrees of freedom per independent structure.
+        manifold_rho = np.sum(manifold_X ** 2, axis=-1)
+        self.assertLessEqual(
+            np.max(np.abs(manifold_rho - MANIFOLD_RHO)),
+            5e-6,
+            msg='The analytic sphere trajectory left its constraint manifold.',
+        )
+        self.assertListEqual(
+            [2] * MANIFOLD_BATCH,
+            sphere_runner.free_degree.tolist(),
+        )
+
+        # A uniform canonical measure on the sphere has
+        # <X_i X_j> = rho delta_ij / 3. Multiple independent structures are
+        # used to reduce the rotational diffusion time required by this test.
+        manifold_second_moment = np.einsum(
+            'ni,nj->ij', manifold_X, manifold_X
+        ) / len(manifold_X)
+        self.assertTrue(np.allclose(
+            np.diag(manifold_second_moment),
+            MANIFOLD_RHO / 3.,
+            rtol=0.12,
+            atol=0.,
+        ), msg=(
+            'The sampled constrained position distribution is not isotropic: '
+            f'{manifold_second_moment}'
+        ))
+        off_diagonal = manifold_second_moment - np.diag(np.diag(manifold_second_moment))
+        self.assertLess(
+            np.max(np.abs(off_diagonal)), 0.15,
+            msg=f'Unexpected cross moments on the sphere: {manifold_second_moment}',
+        )
+
+        expected_G = 1. / (2. * MANIFOLD_RHO)
+        expected_w = math.sqrt(MANIFOLD_MASS) / (2. * math.sqrt(MANIFOLD_RHO))
+        self.assertTrue(np.allclose(manifold_G, expected_G, rtol=1e-5, atol=1e-6))
+        self.assertTrue(np.allclose(manifold_w, expected_w, rtol=1e-5, atol=1e-6))
+
+        # Two tangent quadratic velocity degrees of freedom give <K> = kB T.
+        manifold_kinetic = (
+            0.5 * MANIFOLD_MASS
+            * np.sum(manifold_V ** 2, axis=-1)
+            * 103.642696562621738
+        )
+        mean_manifold_kinetic = np.mean(manifold_kinetic)
+        self.assertStatisticalEqual(
+            mean_manifold_kinetic,
+            kB * TEMPERATURE,
+            rtol=0.05,
+            msg=(
+                'Constrained tangent-space equipartition failed: '
+                f'{mean_manifold_kinetic} != {kB * TEMPERATURE}'
+            ),
+        )
+
+        # The radial virial balance relates the raw RATTLE multiplier to the
+        # actually sampled tangent kinetic energy. Using measured kinetic
+        # energy separates the multiplier test from thermostat statistics.
+        expected_Fc = 0.5 * MANIFOLD_K - mean_manifold_kinetic / MANIFOLD_RHO
+        self.assertStatisticalEqual(
+            np.mean(manifold_Fc),
+            expected_Fc,
+            rtol=0.06,
+            msg=(
+                'Constraint multiplier does not satisfy the sphere virial identity: '
+                f'{np.mean(manifold_Fc)} != {expected_Fc}'
+            ),
+        )
+
+        # For xi=rho=r^2, the conditional configurational free energy is
+        # A(rho) = k rho/2 - kB T ln(rho)/2 + constant.
+        manifold_mean_force = np.sum(
+            manifold_w * (manifold_Fc + kB * TEMPERATURE * manifold_G)
+        ) / np.sum(manifold_w)
+        expected_mean_force = (
+            0.5 * MANIFOLD_K
+            - 0.5 * kB * TEMPERATURE / MANIFOLD_RHO
+        )
+        self.assertStatisticalEqual(
+            manifold_mean_force,
+            expected_mean_force,
+            rtol=0.06,
+            msg=(
+                'Blue-Moon/Fixman mean-force identity failed: '
+                f'{manifold_mean_force} != {expected_mean_force}'
+            ),
+        )
+        print('"Analytic Manifold Thermodynamics" Test passed. <<<<<')
+
+        if os.path.exists(MANIFOLD_FILE):
+            os.remove(MANIFOLD_FILE)
         pass
 
     def test_MC(self):

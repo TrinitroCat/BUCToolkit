@@ -14,7 +14,6 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARR
 from BUCToolkit.utils._Element_info import DTYPE
 from BUCToolkit.utils.grad_functions import bhvp
 from BUCToolkit.Bases.BaseMotion import BaseIO
-from torch._dynamo import export as dynamo_export
 
 FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
 FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
@@ -48,7 +47,8 @@ class BaseConstr(BaseIO):
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
         require_fixman: bool, whether to calculate fixman
         device: str|torch.device, device that program rum on.
-        verbose: int, control the detailed degree of output information.
+        verbose: print level. 0 is silent, 1 permits scalar diagnostics only,
+            and 2 or greater also permits array diagnostics.
             0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
 
     Examples for constrains:
@@ -145,15 +145,66 @@ class BaseConstr(BaseIO):
             require_grad: bool = False,
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
-            is_fix_mass_center: bool = False
+            is_fix_mass_center: bool = False,
+            compile_jacobian: bool = True,
     ):
+        """Initialize masses, targets, and the tangent-space basis.
+
+        This method owns all state required by constraint projection. Proxy
+        users such as constrained MD and constrained FIRE should call it rather
+        than reproducing the setup or invoking ``_build_compiled_jacobian``
+        directly.
+
+        Args:
+            func: Parent algorithm objective. Accepted for compatibility with
+                the common motion-initialization hook; constraints do not use it.
+            X: Initial coordinates with shape
+                ``(n_batch, n_atom, n_dim)``.
+            Element_list: Atomic symbols or numbers supplied by the parent
+                algorithm. Constraint initialization does not use them.
+            masses: Per-coordinate masses broadcast to the shape of ``X``. If
+                ``None``, unit masses are used.
+            V_init: Initial velocities accepted by the common initialization
+                hook. Constraint initialization does not use them.
+            grad_func: Parent objective-gradient callable. Not used here.
+            func_args: Positional objective arguments. Not used here.
+            func_kwargs: Keyword objective arguments. Not used here.
+            grad_func_args: Positional gradient arguments. Not used here.
+            grad_func_kwargs: Keyword gradient arguments. Not used here.
+            is_grad_func_contain_y: Parent gradient-call convention. Not used
+                by constraint initialization.
+            require_grad: Parent objective autograd flag. Not used here.
+            batch_indices: Irregular-batch atom counts. Not used here because
+                ``constr_func`` is vectorized over the leading dimension of X.
+            fixed_atom_tensor: Parent selective-dynamics mask. Not used here.
+            is_fix_mass_center: Parent center-of-mass setting. Not used here.
+            compile_jacobian: Whether to compile the batched constraint
+                Jacobian. Compilation is enabled by default on both CPU and
+                CUDA. Unsupported constraint graphs automatically fall back to
+                the eager implementation.
+
+        Returns:
+            None. The method updates mass factors, the current constraint
+            target, Jacobian/QR state, compilation state, and projection cache.
+
+        Raises:
+            TypeError: If ``compile_jacobian`` is not ``bool``.
+            RuntimeError: If ``constr_val`` and ``constr_func(X)`` have
+                different shapes.
+            ValueError: If the batched constraint residual is not two-dimensional.
+        """
+        if not isinstance(compile_jacobian, bool):
+            raise TypeError(
+                f'`compile_jacobian` must be bool, but got {type(compile_jacobian)}.'
+            )
         if masses is None: masses = th.ones_like(X)
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
+        self._update_constr(self.time_now)
         _y_check = th.vmap(self.constr_func)(X)
         if self._lazy_calc_constr_val:
             self.constr_val_now = _y_check
-        if self.verbose:
+        if self.verbose > 0:
             self.logger.info(
                 f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
             )
@@ -162,13 +213,16 @@ class BaseConstr(BaseIO):
             raise RuntimeError(
                 f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
             )
+        # A previous initialization may have compiled a different run shape or
+        # constraint callable.  Perform validation through the eager path, then
+        # build a fresh graph for the current inputs below.
+        self._compiled_jac = None
         jac, y = self._jacobian(X)
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
-        self._build_compiled_jacobian(X)
+        if compile_jacobian:
+            self._build_compiled_jacobian(X)
         self._do_qr(jac)
-        # calc. constr. intensity
-        n_batch, n_constr, _ = self.R.shape
         self.X_cache = th.empty_like(X)
 
     def _constr_func_wrapped(self, X, constr_val_now):
@@ -213,42 +267,100 @@ class BaseConstr(BaseIO):
 
             return y, y
 
-    def _update_constr(self):
-        """
-        Update constraint function value.
-        Returns:
+    def _update_constr(self, t: th.Tensor | float):
+        """Update a time-dependent constraint at an explicit evaluation time.
 
+        This method does not mutate ``self.time_now``. Integrators therefore
+        remain responsible for advancing the committed simulation clock and
+        may evaluate constraint stages such as ``time_now + time_step`` or a
+        half-step without changing the parent motion-loop state.
+
+        Args:
+            t: Scalar time at which ``constr_val_func_raw`` and its derivative
+                are evaluated. Python numeric values are converted to the same
+                device and dtype as ``self.time_now``.
+
+        Returns:
+            None. For a time-dependent constraint, ``self.constr_val_now`` and
+            ``self.d_constr`` are replaced by the value and time derivative at
+            ``t``. Constant constraints are unchanged.
+
+        Raises:
+            ValueError: If ``t`` is not scalar.
         """
         if not self.is_const_constr:
-            self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now)  #  d s_k(r)/dt
+            t = th.as_tensor(
+                t,
+                device=self.time_now.device,
+                dtype=self.time_now.dtype,
+            )
+            if t.numel() != 1:
+                raise ValueError(f'Constraint evaluation time must be scalar, but got shape {t.shape}.')
+            t = t.reshape(())
+            self.d_constr, self.constr_val_now = th.func.jacrev(
+                self._constr_val_wrapped,
+                has_aux=True,
+            )(t)  # d constr_val(t) / dt
 
     def _build_compiled_jacobian(self, X_sample: th.Tensor):
         """
-        Pre-compile the Jacobian computation by:
-            1) dynamo_export the constraint function to a static ATen graph (once)
-            2) wrap with vmap(jacrev(has_aux)) for batched Jacobian
-            3) torch.compile the result → replay for all subsequent steps
+        Pre-compile the batched constraint Jacobian for a fixed run shape.
 
-        Falls back to eager mode if export/compile fails.
+        Each structure and its corresponding constraint target are mapped as a
+        pair.  The resulting function returns the same tensors as the eager
+        ``vmap(jacrev(...))`` path: a Jacobian with shape
+        ``(n_batch, n_constr, n_atom, n_dim)`` and residual values with shape
+        ``(n_batch, n_constr)``.  Molecular-dynamics runs keep these dimensions
+        fixed, which permits a static full-graph compilation and avoids graph
+        breaks inside every projection iteration.
+
+        Falls back to eager mode if compilation fails.
+
+        Args:
+            X_sample: Representative coordinates with shape
+                ``(n_batch, n_atom, n_dim)``.  Its shape, device, and dtype are
+                used to compile and warm up the Jacobian graph.
+
+        Returns:
+            None.  On success, ``self._compiled_jac`` stores the compiled
+            callable.  On failure it is reset to ``None`` so ``_jacobian`` uses
+            the eager implementation.
         """
+        self._compiled_jac = None
         try:
-            with th.no_grad():
-                sample = X_sample[0:1].detach()  # single batch item
-                exported = dynamo_export(self.constr_func)(sample.squeeze(0))
-                traced_fn = exported.graph_module
-
             def _wrapped(X_single, constr_val):
-                y = traced_fn(X_single) - constr_val
+                y = self.constr_func(X_single) - constr_val
+                y = th.atleast_1d(y)
                 return y, y
 
             jac_fn = th.func.vmap(
                 th.func.jacrev(_wrapped, argnums=0, has_aux=True),
-                in_dims=(0, None)
+                # Pair X[i] with constr_val_now[i].  Broadcasting the complete
+                # target tensor here would introduce a second batch dimension.
+                in_dims=(0, 0)
             )
-            self._compiled_jac = th.compile(jac_fn, fullgraph=False, dynamic=True)
+            compiled_jac = th.compile(jac_fn, fullgraph=True, dynamic=False)
 
-            # Warmup to trigger actual compilation
-            _ = self._compiled_jac(X_sample, self.constr_val_now)
+            # Warm up now so compilation latency and unsupported operations are
+            # handled before entering the MD loop.  Shape validation prevents a
+            # malformed compiled graph from silently replacing the eager path.
+            # Match the gradient mode used by _project2. Without this, a normal
+            # non-Fixman MD run warms the graph with gradients enabled and then
+            # recompiles it on first use inside the no_grad main loop.
+            with th.set_grad_enabled(self.require_fixman):
+                jac, y = compiled_jac(X_sample, self.constr_val_now)
+            expected_jac_shape = (
+                X_sample.shape[0], self.constr_val_now.shape[-1],
+                *X_sample.shape[1:]
+            )
+            expected_y_shape = self.constr_val_now.shape
+            if jac.shape != expected_jac_shape or y.shape != expected_y_shape:
+                raise RuntimeError(
+                    'Compiled constraint Jacobian returned invalid shapes: '
+                    f'expected {expected_jac_shape} and {expected_y_shape}, '
+                    f'but got {jac.shape} and {y.shape}.'
+                )
+            self._compiled_jac = compiled_jac
 
             if self.verbose:
                 self.logger.info('Constraint Jacobian compiled successfully.')
@@ -259,14 +371,22 @@ class BaseConstr(BaseIO):
 
     def _jacobian(self, X: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """
-        Compute the Jacobian of all constrains.
-        Args:
-            X:
+        Compute the Jacobian for the current constraint target.
 
-        Returns: Jacobian (n_batch, n_constr, n_atoms, n_dim), and the constraint values.
+        ``constr_val_now`` and ``d_constr`` must already correspond to the
+        current simulation time. Projection entry points refresh that state
+        before calling this method, which avoids differentiating a
+        time-dependent target in every nonlinear projection subiteration.
+
+        Args:
+            X: Coordinates with shape ``(n_batch, n_atom, n_dim)``.
+
+        Returns:
+            The Jacobian with shape
+            ``(n_batch, n_constr, n_atom, n_dim)`` and residual values with
+            shape ``(n_batch, n_constr)``.
 
         """
-        self._update_constr()
         if self._compiled_jac is not None:
             jac, y = self._compiled_jac(X, self.constr_val_now)
         else:
@@ -307,7 +427,9 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = V.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
-        # check consistency
+        # Check consistency. For time-dependent constraints, callers must have
+        # explicitly selected the target stage through ``_update_constr(t)`` or
+        # a preceding ``_project2`` call.
         if X is not None:
             jac, y = self._jacobian(X)
             self._do_qr(jac)
@@ -340,7 +462,8 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = V.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
-        # check consistency
+        # The normal-space basis depends on the coordinate Jacobian, not on the
+        # target value. Do not alter the caller-selected constraint time here.
         if X is not None:
             jac, y = self._jacobian(X)
             self._do_qr(jac)
@@ -357,7 +480,8 @@ class BaseConstr(BaseIO):
             self,
             X: th.Tensor,
             X_orig: th.Tensor | None = None,
-            V: th.Tensor | None = None
+            V: th.Tensor | None = None,
+            constr_time: th.Tensor | float | None = None,
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
         Continuously project the Jacobian of all constrains to the exact manifold.
@@ -370,10 +494,19 @@ class BaseConstr(BaseIO):
             X_orig: reference coordinates for fixed Jacobian basis. Defaults to X.
             V: (n_batch, n_atom, n_dim) velocities. If given, updated in-place by
                dv = M^{-1/2} Q mu / time_step, where mu is the converged multiplier.
+            constr_time: Time at which the position constraint is enforced. If
+                ``None``, use ``self.time_now + self.time_step``, corresponding
+                to the end of the current outer MD step. Explicit values allow
+                integrators with other splitting schemes to select a half-step
+                or another stage without modifying the parent MD clock.
 
         Returns:
             Fc: constraint forces (eV/atom)
-            G, w: Fixman potential related terms (or None)
+            G: geometric Fixman force term, or ``None`` when
+                ``require_fixman=False``.
+            w: Fixman/Blue-Moon reweighting factor
+                ``1 / sqrt(det(J M^-1 J^T))`` for each batch sample, or
+                ``None`` when ``require_fixman=False``.
         """
         n_batch, n_atoms, n_dim = X.shape
         n_constr = self.R.shape[-1]
@@ -382,6 +515,15 @@ class BaseConstr(BaseIO):
         if X_orig is None: X_orig = X
         time_step = self.time_step
         constr_thres = self.constr_thres
+
+        # The target value and its time derivative are constant throughout one
+        # nonlinear position projection. Refresh them once at the end-of-step
+        # stage by default, before the fixed-basis Jacobian and all subsequent
+        # Newton subiterations. The following velocity projection reuses this
+        # same staged state.
+        if constr_time is None:
+            constr_time = self.time_now + time_step
+        self._update_constr(constr_time)
 
         with th.set_grad_enabled(self.require_fixman):
             X_orig.requires_grad_(self.require_fixman)
@@ -399,7 +541,24 @@ class BaseConstr(BaseIO):
             if self.require_fixman:
                 sqrt_det_Z = th.prod(th.diagonal(R, dim1=-2, dim2=-1), dim=-1).abs()
                 half_logdetZ = th.log(sqrt_det_Z).sum()
-                half_dlnz_dx = th.autograd.grad(half_logdetZ, X_orig)[0].reshape(n_batch, -1)
+                # A linear constraint has a coordinate-independent Jacobian,
+                # hence a constant Fixman determinant and an exactly zero
+                # derivative. In that case ``half_logdetZ`` contains no
+                # autograd graph and calling ``autograd.grad`` would raise even
+                # though the required result is well-defined. ``allow_unused``
+                # also covers CV implementations whose Jacobian graph is
+                # present but independent of some/all coordinate inputs.
+                if half_logdetZ.requires_grad:
+                    half_dlnz_dx = th.autograd.grad(
+                        half_logdetZ,
+                        X_orig,
+                        allow_unused=True,
+                    )[0]
+                    if half_dlnz_dx is None:
+                        half_dlnz_dx = th.zeros_like(X_orig)
+                else:
+                    half_dlnz_dx = th.zeros_like(X_orig)
+                half_dlnz_dx = half_dlnz_dx.reshape(n_batch, -1)
                 RG = th.einsum('bnc, bn -> bc', sqrtM_Q, half_dlnz_dx)
                 G = th.linalg.solve_triangular(R, RG.unsqueeze(-1), upper=True).squeeze(-1)
                 w = sqrt_det_Z.reciprocal_()

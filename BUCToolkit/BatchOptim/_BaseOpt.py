@@ -23,6 +23,7 @@ from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.Bases.BaseMotion import BaseMotion
 from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
+from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
 
 
@@ -74,7 +75,8 @@ class _BaseOpt(BaseMotion, ABC):
             use_bb: whether to use Barzilai-Borwein steplength (BB1 or long BB) as initial steplength instead of fixed one.
             output_file: the file to dump trajectory. if None, nothing will be dumped.
             device: The device that program runs on.
-            verbose: amount of print information.
+            verbose: Print level. ``0`` is silent, ``1`` prints selected
+                scalars only, and ``2`` or greater also prints selected arrays.
             _hold_samples: ONLY FOR SPECIAL USES (e.g., CI-NEB or DEBUG).
                 If True, optimizer will not remove any sample in a batch even if the sample has converged.
         
@@ -117,9 +119,8 @@ class _BaseOpt(BaseMotion, ABC):
         # dumping across multiple `run()` calls (used by `StructureOptimization`).
         self._HOLD_DUMPER = False
 
-        # Optional dump-header metadata — set before ``run()`` if needed.
-        # Format matches ``_BaseMD``: per-structure lists of atomic numbers.
-        self.cell_vec: th.Tensor | np.ndarray | None = None
+        # Validated dump-header metadata retained across runs.
+        self.cell_vec: np.ndarray | None = None
         self.atomic_numbers: List[List[int]] | None = None
 
         # logger
@@ -140,28 +141,95 @@ class _BaseOpt(BaseMotion, ABC):
 
     def set_system_info(
             self,
-            cell_vec: th.Tensor | np.ndarray | None = None,
-            atomic_numbers: List[int] | np.ndarray | th.Tensor | None = None,
-    ):
-        """Register static system information used by trajectory output.
+            cell_vec: th.Tensor | np.ndarray | Sequence | None = None,
+            atomic_numbers: List[List[str | int]] | None = None,
+    ) -> None:
+        """Validate and register static metadata for optimizer trajectories.
+
+        Element rows follow the same per-structure nested layout used by the
+        motion APIs. Symbols are converted to atomic numbers immediately, so
+        the retained metadata always has one canonical integer row per real
+        structure. Compatibility with the current coordinates and optional
+        irregular ``batch_indices`` is checked when :meth:`run` begins.
 
         Args:
-            cell_vec: Optional unit-cell vectors. A regular batch normally uses
-                shape ``[n_batch, 3, 3]``; an irregular batch still stores one
-                cell per real structure. The values are metadata and do not
-                alter the optimization calculation.
-            atomic_numbers: Optional atomic numbers corresponding to the active
-                coordinates. Regular data may be nested per structure;
-                irregular data may be flat or concatenated in atom order.
+            cell_vec: Optional numeric array-like object with shape
+                ``[n_structure, 3, 3]``. Values must be finite.
+            atomic_numbers: Optional nested element symbols or integer atomic
+                numbers. The outer list indexes structures and each inner list
+                contains the atoms of that structure.
 
         Returns:
             None. Non-``None`` inputs replace the corresponding values retained
             on the optimizer for subsequent :meth:`run` calls.
+
+        Raises:
+            TypeError: If a cell or element container has an unsupported type.
+            ValueError: If shapes, symbols, atomic numbers, or structure counts
+                are invalid.
         """
+        normalized_cell = self.cell_vec
         if cell_vec is not None:
-            self.cell_vec = cell_vec
+            if isinstance(cell_vec, th.Tensor):
+                cell_vec = cell_vec.detach().cpu().to(th.float32).numpy()
+            try:
+                cell_array = np.array(cell_vec, dtype=np.float32, copy=True)
+            except (TypeError, ValueError) as error:
+                raise TypeError('`cell_vec` must contain numeric values.') from error
+            if cell_array.ndim != 3 or cell_array.shape[1:] != (3, 3):
+                raise ValueError(
+                    '`cell_vec` must have shape [n_structure, 3, 3], but got '
+                    f'{cell_array.shape}.'
+                )
+            if not np.all(np.isfinite(cell_array)):
+                raise ValueError('`cell_vec` must contain only finite values.')
+            normalized_cell = cell_array
+
+        normalized_numbers = self.atomic_numbers
         if atomic_numbers is not None:
-            self.atomic_numbers = atomic_numbers
+            if not isinstance(atomic_numbers, list) or any(
+                    not isinstance(row, list) for row in atomic_numbers
+            ):
+                raise TypeError(
+                    '`atomic_numbers` must be List[List[str]] or List[List[int]].'
+                )
+            if (len(atomic_numbers) < 1) or any(not row for row in atomic_numbers):
+                raise ValueError('`atomic_numbers` must contain non-empty structure rows.')
+            try:
+                normalized_numbers = [
+                    [
+                        int(ATOMIC_SYMBOL.get(str(element), element))
+                        for element in structure_elements
+                    ]
+                    for structure_elements in atomic_numbers
+                ]
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    'Atomic entries must be symbols or integers.'
+                ) from error
+
+            if any(
+                    number not in ATOMIC_NUMBER
+                    for structure_numbers in normalized_numbers
+                    for number in structure_numbers
+            ):
+                raise ValueError(
+                    '`atomic_numbers` contains an unsupported atomic number.'
+                )
+
+        if (
+                normalized_cell is not None and
+                normalized_numbers is not None and
+                len(normalized_cell) != len(normalized_numbers)
+        ):
+            raise ValueError(
+                '`cell_vec` and `atomic_numbers` describe different numbers of '
+                f'structures: {len(normalized_cell)} and '
+                f'{len(normalized_numbers)}.'
+            )
+
+        self.cell_vec = normalized_cell
+        self.atomic_numbers = normalized_numbers
 
     def _do_async_dump(self, q: queue.Queue):
         """Consumer thread: drain queue and call ``dumper.step()``.
@@ -307,8 +375,8 @@ class _BaseOpt(BaseMotion, ABC):
         """
         Run the Optimization Algorithm.
 
-        Set ``self.cell_vec`` and ``self.atomic_numbers`` before calling
-        to include them in the dump header group.
+        Call :meth:`set_system_info` before this method to include validated
+        cell vectors and element metadata in the dump header group.
 
         Args:
             func: the main function of instantiated torch.nn.Module class.
@@ -388,6 +456,27 @@ class _BaseOpt(BaseMotion, ABC):
         maxiter = self.maxiter
         n_batch, n_atom, n_dim = X.shape
         self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
+
+        if self.cell_vec is not None and len(self.cell_vec) != n_true_batch:
+            raise ValueError(
+                f'`cell_vec` contains metadata for {len(self.cell_vec)} structures, but this run contains {n_true_batch}.'
+            )
+        if self.atomic_numbers is not None:
+            expected_atom_counts = (
+                list(batch_indices)
+                if batch_indices is not None
+                else [n_atom] * n_true_batch
+            )
+            actual_atom_counts = [len(row) for row in self.atomic_numbers]
+            if (
+                    len(self.atomic_numbers) != n_true_batch or
+                    actual_atom_counts != expected_atom_counts
+            ):
+                raise ValueError(
+                    '`atomic_numbers` must match the run layout: expected '
+                    f'{expected_atom_counts}, got {actual_atom_counts}.'
+                )
+
         p = th.zeros_like(X)  # like X, the previous direction
         self.converge_mask = None  # (n_true_batch, )
         X_grad_old = th.full_like(X, 1e-20, dtype=th.float32, device=self.device)  # like X, initial old grad.
@@ -477,42 +566,37 @@ class _BaseOpt(BaseMotion, ABC):
             # --- header group (static metadata, 1 cycle) ---
             if self.cell_vec is None:
                 _cell_np = np.zeros((n_true_batch, 3, 3), dtype=np.float32)
-            elif isinstance(self.cell_vec, th.Tensor):
-                _cell_np = self.cell_vec.numpy(force=True)
             else:
-                _cell_np = np.asarray(self.cell_vec, dtype=np.float32)
+                _cell_np = self.cell_vec
 
             # --- resolve atomic_numbers to numpy ---
-            #   Regular batch  → 2-D (n_batch, n_atom)
-            #   Irregular batch → 1-D (Σn_i,)
+            #   Regular batch  -> 2-D (n_batch, n_atom)
+            #   Irregular batch -> 1-D (\sum n_i,)
             _atm = self.atomic_numbers
             if _atm is None:
                 # No atomic numbers provided → zeros placeholder
-                _total = X.shape[1] if self.is_concat_X else n_batch * n_atom
-                _atm_np = np.zeros(_total, dtype=np.int64)
-            elif isinstance(_atm, th.Tensor):
-                # Flat or 2-D tensor → ravel for irregular, keep for regular
-                _atm_np = _atm.numpy(force=True).astype(np.int64)
-                if self.is_concat_X and _atm_np.ndim == 2:
-                    _atm_np = _atm_np.ravel()
-            elif isinstance(_atm, (list, tuple)) and len(_atm) > 0 and isinstance(_atm[0], (list, tuple)):
-                # Nested List[List[int]] (per-structure, matches _BaseMD format)
-                _parts = [np.asarray(sub, dtype=np.int64) for sub in _atm]
-                _atm_np = np.stack(_parts) if not self.is_concat_X else np.concatenate(_parts)
+                if self.is_concat_X:
+                    _atm_np = np.zeros(X.shape[1], dtype=np.int64)
+                else:
+                    _atm_np = np.zeros((n_batch, n_atom), dtype=np.int64)
             else:
-                # Flat list / 1-D array
-                _atm_np = np.asarray(_atm, dtype=np.int64)
-                if self.is_concat_X and _atm_np.ndim == 2:
-                    _atm_np = _atm_np.ravel()
+                _parts = [np.asarray(row, dtype=np.int64) for row in _atm]
+                _atm_np = np.concatenate(_parts) if self.is_concat_X else np.stack(_parts)
 
             _fix_np = atom_masks.numpy(force=True)
 
             if self.batch_tensor is not None:
                 _batch_np = self.batch_tensor.numpy(force=True)
-                dumper.start_from_arrays(1, _batch_np, _cell_np, _atm_np, _fix_np)
+                dumper.start_from_arrays(
+                    1, _batch_np, _cell_np, _atm_np, _fix_np,
+                    names=('batch_indices', 'cell_vec', 'atomic_numbers', 'fixed_mask'),
+                )
                 dumper.step(_batch_np, _cell_np, _atm_np, _fix_np)
             else:
-                dumper.start_from_arrays(1, _cell_np, _atm_np, _fix_np)
+                dumper.start_from_arrays(
+                    1, _cell_np, _atm_np, _fix_np,
+                    names=('cell_vec', 'atomic_numbers', 'fixed_mask'),
+                )
                 dumper.step(_cell_np, _atm_np, _fix_np)
 
             # --- data group (trajectory, dynamic steps) ---
@@ -874,26 +958,24 @@ class _BaseOpt(BaseMotion, ABC):
                         _dump_queue.put((dumper, None, *(getattr(_s_cpu, n) for n in dump_names)))
                     self._dump_done.wait()
 
-                if self.verbose < 2 or (not is_main_loop_converge and self.verbose > 0):
-                    # If verbose >= 2 and converged, the final coo and forces have already output
-                    #   and verbose == 0 is the strict silent mode that output nothing
-                    #   only verbose == 1 outputs only shortcut info during the loop and finally output the complete COO and forces.
-                    #   And, if not converged, the final step is not output yet, so it SHOULD be output here.
+                if not is_main_loop_converge and self.verbose > 0:
+                    # The unconverged final scalar state has not been printed by
+                    # the main-loop consumer yet.
                     E_diff = energies - energies_old
-                    if not is_main_loop_converge:
-                        self.logger.info(
-                            f"FINAL STEP\n "
-                            f"MAD_energies: {np.array2string(E_diff.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                            f"Energies:     {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                            f"Converged:    {np.array2string(converge_str, **STRING_ARRAY_FORMAT)}\n "
-                        )
+                    self.logger.info(
+                        f"FINAL STEP\n "
+                        f"MAD_energies: {np.array2string(E_diff.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                        f"Energies:     {np.array2string(energies.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
+                        f"Converged:    {np.array2string(converge_str, **STRING_ARRAY_FORMAT)}\n "
+                    )
+                if not is_main_loop_converge and self.verbose > 1:
                     self.handle_arrays_print(
                         self.logger,
                         batch_indices,
                         self.batch_slice_indx,
                         [[_X_print, _F_print]],
                         [['Final Coordinates', 'Final Forces']],
-                        verbose=(self.verbose + 1),  # when verbose=0 (silence mode), not printing. But for verbose=1, Only print the last results
+                        verbose=self.verbose,
                     )
             # release resources
             finally:
