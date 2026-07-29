@@ -12,6 +12,7 @@ import BUCToolkit.utils.batch_updaters
 import BUCToolkit.utils.index_ops
 from .ElemListReduce import elem_list_reduce
 from ._CheckModules import check_module
+from .exceptions import FatalError
 
 __all__ = [
     'IrregularTensorReformat',
@@ -24,5 +25,6 @@ __all__ = [
     'elem_list_reduce',
     'model_wrappers',
     'batch_updaters',
-    'index_ops'
+    'index_ops',
+    'FatalError',
 ]
