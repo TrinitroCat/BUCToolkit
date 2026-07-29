@@ -16,19 +16,26 @@ class Model_Wrapper_pyg_MultiDevice(_BaseWrapper):
     __slots__ = ('_model', 'forces', 'X', )
     grad_enabled = True  # caller grad mode shared with all persistent workers
 
-    def __init__(self, model, pos_attr_name='pos', devices_list: List[str] = None) -> None:
+    def __init__(self, model, pos_attr_name='pos', devices_list: List[str] = None,
+                 is_dynamic_workload: bool = False) -> None:
         """
         A format transformer for converting Tensor X into PygData.pos
         Wrap the model(graph, ...) into f(X)
 
         Args:
             model: An instantiate nn.Module
+            is_dynamic_workload: Whether to reduce the number of active devices
+                as the batch workload decreases. The first non-empty batch
+                calibrates the target workload per device. The default False
+                preserves fixed-device LPT scheduling.
 
         Methods:
             Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
             Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
 
         """
+        if type(is_dynamic_workload) is not bool:
+            raise TypeError(f'is_dynamic_workload must be a bool, but got {type(is_dynamic_workload)}.')
         if not th.cuda.is_available():
             raise RuntimeError('CUDA not available, please check your devices or torch version.')
         if not isinstance(model, th.nn.Module):
@@ -77,6 +84,11 @@ class Model_Wrapper_pyg_MultiDevice(_BaseWrapper):
         self._thread_ERROR = None  # original exception raised inside a worker
         self._closed = False  # terminal lifecycle state; a closed wrapper cannot reopen
         self._close_cause = None  # fatal cause retained for later exception chaining
+        self.is_dynamic_workload = is_dynamic_workload
+        # Dynamic scheduling calibrates this once from the first non-empty
+        # batch. It intentionally remains unchanged for the wrapper lifetime,
+        # including when a later batch is larger than the calibration batch.
+        self._target_workload_per_device = None
 
         # multi-threads
         self._all_queue = [queue.Queue(maxsize=1) for _, __ in enumerate(self.devices_list)]
@@ -121,6 +133,22 @@ class Model_Wrapper_pyg_MultiDevice(_BaseWrapper):
             finally:
                 event.set()
 
+    @staticmethod
+    def _lpt_assign(tasks, device_num):
+        """Run deterministic LPT for ``device_num`` candidate devices."""
+        loads = [0] * device_num
+        assignments = [[] for _ in range(device_num)]
+        indices = [[] for _ in range(device_num)]
+        for size, idx, grp in tasks:
+            # ``min`` returns the lowest device index for equal loads. Together
+            # with the task ordering below, this makes every candidate and its
+            # restored batch order deterministic.
+            dev = min(range(device_num), key=lambda _: loads[_])
+            loads[dev] += size
+            assignments[dev].append(grp)
+            indices[dev].append(idx)
+        return loads, assignments, indices
+
     def _balance_work_load_assign(self, X, graph) -> Tuple[Tuple[Batch, ...], th.Tensor, List[int], List[List[int]]] | Tuple[None, None, None, None]:
         """
         Balance structures by LPT and record how to restore batch order.
@@ -135,25 +163,45 @@ class Model_Wrapper_pyg_MultiDevice(_BaseWrapper):
         batch_sizes = [getattr(_, self.pos_attr_name).numel() for _ in graph_list]
         N = len(graph_list)
         if N == 0: return None, None, None, None
-        # Never create an empty local batch when structures are fewer than GPUs.
-        K = min(len(self.devices_list), N)  # device number
+        # K is the number of leading devices/workers that will participate in
+        # this call. Capping it by N prevents empty local batches.
+        max_device_num = min(len(self.devices_list), N)
 
         # (sizes, index, graph_data)
         tasks = [(batch_sizes[i], i, grp) for i, grp in enumerate(graph_list)]
 
-        # main LPT
+        # LPT sorts larger structures first. Original index is the stable
+        # secondary key for equal-size structures.
         tasks.sort(key=lambda x: (-x[0], x[1]))
-        #   initialise
-        loads = [0] * K  # current loads
-        assignments = [[] for _ in range(K)]  # data for each device
-        indices = [[] for _ in range(K)]  # resume indices
-        #   greedy assignment
-        for size, idx, grp in tasks:
-            # choose the device with the smallest workloads
-            dev = min(range(K), key=lambda _: loads[_])  # arg min
-            loads[dev] += size
-            assignments[dev].append(grp)
-            indices[dev].append(idx)
+
+        if not self.is_dynamic_workload:
+            # Fixed mode preserves the original behavior: every available
+            # device participates, subject only to the structure-count cap.
+            K = max_device_num
+            _, assignments, indices = self._lpt_assign(tasks, K)
+        elif self._target_workload_per_device is None:
+            # The first complete, non-empty batch establishes one persistent
+            # per-device target and must use all currently available devices.
+            # Workload remains pos.numel(), matching the original LPT metric.
+            K = max_device_num
+            self._target_workload_per_device = sum(batch_sizes) / K
+            _, assignments, indices = self._lpt_assign(tasks, K)
+        else:
+            target = self._target_workload_per_device
+            candidates = list()
+            for candidate_K in range(1, max_device_num + 1):
+                loads, candidate_assignments, candidate_indices = self._lpt_assign(tasks, candidate_K)
+                # The lexicographic score first keeps every active worker close
+                # to the calibrated target, then minimizes the longest worker,
+                # and finally prefers fewer devices for an exact tie.
+                score = (
+                    max(abs(load - target) for load in loads),
+                    max(loads),
+                    candidate_K,
+                )
+                candidates.append((score, candidate_assignments, candidate_indices))
+            (score, assignments, indices) = min(candidates, key=lambda _: _[0])
+            K = score[2]
 
         # Reformat assignments and build original-index -> scattered-position.
         assignments_tuple = tuple(Batch.from_data_list(dev_assign) for dev_assign in assignments)
@@ -232,8 +280,9 @@ class Model_Wrapper_pyg_MultiDevice(_BaseWrapper):
         # This class-wide value is read independently by every worker thread.
         Model_Wrapper_pyg_MultiDevice.grad_enabled = th.is_grad_enabled()
 
-        # Only the first active_device_num workers participate when the batch
-        # contains fewer structures than configured devices.
+        # Assignments always target the leading K devices. Workers after K keep
+        # their resident model replicas and remain blocked on their queues; no
+        # worker or CUDA resource is recreated when dynamic mode reduces K.
         for evt in self._threads_events[:active_device_num]: evt.clear()
         for i, _inp in enumerate(_data_split):
             _inp: th.Tensor
