@@ -123,6 +123,10 @@ class _BaseMD(BaseMotion):
         super().__init__(output_file)
         self.init_logger('Main.MD')
         self._setup_register_vars(dump_quantities, log_quantities)
+        if (self.output_file is None) and self.output_structures_per_step < self.max_step + 1:
+            self.logger.warning(
+                f"WARNING: Here is no output file while output structure per {self.output_structures_per_step} is required."
+            )
 
     def _reduce_Ek_T(self, batch_indices, masses, V):
         if batch_indices is not None:

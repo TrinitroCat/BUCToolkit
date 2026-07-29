@@ -9,6 +9,7 @@ import subprocess
 import shutil
 import torch as th
 
+import BUCToolkit as bt
 from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
 
 
