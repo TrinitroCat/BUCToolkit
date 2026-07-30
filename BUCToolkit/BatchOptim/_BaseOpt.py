@@ -108,16 +108,17 @@ class _BaseOpt(BaseMotion, ABC):
         self.F_threshold = F_threshold
         self.maxiter = maxiter
         self.n_batch, self.n_atom, self.n_dim = None, None, None
-        self.converge_mask = None  # To record the batch which has converged and not update.
+        # To record the batch which has converged and not update.
+        self.converge_mask = None
+        # The extra condition to control the structure convergence, may use for curvature check in TS search
+        self._extra_converge_mask: th.Tensor | None = None
+        # The container to store Opt status
+        self.s: StdContainer | None = None
         self.is_concat_X = False   # whether the output of `func` was concatenated.
 
         self._hold_samples = _hold_samples
         self.device = th.device(device)
         self.verbose = verbose
-
-        # If True, `dumper.close()` is skipped in `run()`, allowing continuous
-        # dumping across multiple `run()` calls (used by `StructureOptimization`).
-        self._HOLD_DUMPER = False
 
         # Validated dump-header metadata retained across runs.
         self.cell_vec: np.ndarray | None = None
@@ -127,6 +128,21 @@ class _BaseOpt(BaseMotion, ABC):
         super().__init__(output_file)
         self.init_logger('Main.OPT')
         self._setup_register_vars(dump_quantities, log_quantities)
+
+        # ==================================
+        #       INTERNAL CONVENTION ATTRs.
+        # ==================================
+
+        # Whether the `self.update_direction` method runs a complete whole update step and modify _X in-place.
+        # There are two ways to update directions:
+        #     1. traditionally return the search direction, and determine the steplength then (by line search). Classic algo. of CG/BFGS use it.
+        #     2. a complete whole update step in _update_direction, and bypass the explicit steplength update _X += \alpha * _p
+        # if self._is_inplace_update == False, scheme 1 is applied, otherwise 2 is applied.
+        self._is_inplace_update = False
+
+        # If True, `dumper.close()` is skipped in `run()`, allowing continuous
+        # dumping across multiple `run()` calls (used by `StructureOptimization`).
+        self._HOLD_DUMPER = False
 
     def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
         """
@@ -357,6 +373,70 @@ class _BaseOpt(BaseMotion, ABC):
             raise TypeError(f'`method` must be a callable, but {type(method)} is not.')
         self._line_search.set_batch_updater(line_search_method)
 
+    def _init_check_y_grad(
+            self,
+            func: Callable,
+            X: th.Tensor,
+            grad_func: Callable,
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            is_grad_func_contain_y: bool,
+            require_grad: bool,
+            atom_masks: th.Tensor,
+            batch_indices: List[int] | Tuple[int, ...] | th.Tensor | None,
+    ) -> StdContainer:
+        """Evaluate and validate the initial optimizer state, and initialize the StdContainer `self.s`.
+
+        Args:
+            func: Device-prepared objective callable.
+            X: Normalized coordinates on the optimizer device.
+            grad_func: Normalized gradient callable.
+            func_args: Positional objective arguments.
+            func_kwargs: Keyword objective arguments.
+            grad_func_args: Positional gradient arguments.
+            grad_func_kwargs: Keyword gradient arguments.
+            is_grad_func_contain_y: Whether the gradient callable receives the
+                objective value.
+            require_grad: Whether objective evaluation requires autograd.
+            atom_masks: Canonical movable-coordinate mask with the shape of X.
+            batch_indices: Irregular per-structure atom counts, or ``None``.
+
+        Returns:
+            Live state containing the checked coordinates, energy, gradient,
+            and force.
+        """
+        with th.set_grad_enabled(require_grad):
+            X.requires_grad_(require_grad)
+            energies: th.Tensor = func(X, *func_args, **func_kwargs)
+            if energies.shape[0] != self.n_batch:
+                if batch_indices is None:
+                    raise ValueError(
+                        f"batch indices is None "
+                        f"while shape of model output ({energies.shape}) does not match batch size ({self.n_batch})."
+                    )
+                if energies.shape[0] != self.n_true_batch:
+                    raise ValueError(f"shape of output ({energies.shape}) does not match given batch indices")
+            self.is_concat_X = (batch_indices is not None)
+            if is_grad_func_contain_y:
+                X_grad = grad_func(X, energies, *grad_func_args, **grad_func_kwargs)
+            else:
+                X_grad = grad_func(X, *grad_func_args, **grad_func_kwargs)
+            if X_grad.shape != X.shape:
+                raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
+
+        energies = energies.detach()
+        X_grad = X_grad.detach()
+        X_grad.mul_(atom_masks)
+        X = X.detach()
+        return StdContainer(
+            Energy=energies,
+            X=X,
+            Force=-X_grad,
+            X_grad=X_grad,
+        )
+
     def run(
             self,
             func: Any | nn.Module,
@@ -401,6 +481,9 @@ class _BaseOpt(BaseMotion, ABC):
             grad of argmin func: Tensor(X.shape), only output when `output_grad` == True. The gradient of X corresponding to minimum.
         """
         t_main = time.perf_counter()
+        # locally assign _is_inplace_update, accelerating variable accessing and avoiding dynamic change of self._is_inplace_update
+        _is_inplace_update = self._is_inplace_update
+
         if func_kwargs is None:
             func_kwargs = dict()
         if grad_func_kwargs is None:
@@ -451,7 +534,9 @@ class _BaseOpt(BaseMotion, ABC):
             self.batch_tensor = None
             self.batch_scatter = None
 
-        # initialize vars
+        # ================================================================
+        # Section: initialize vars
+        # ================================================================
         self.n_true_batch = n_true_batch
         maxiter = self.maxiter
         n_batch, n_atom, n_dim = X.shape
@@ -479,6 +564,7 @@ class _BaseOpt(BaseMotion, ABC):
 
         p = th.zeros_like(X)  # like X, the previous direction
         self.converge_mask = None  # (n_true_batch, )
+        self._extra_converge_mask = th.ones(n_true_batch, dtype=th.bool, device=self.device)
         X_grad_old = th.full_like(X, 1e-20, dtype=th.float32, device=self.device)  # like X, initial old grad.
         displace = th.full_like(X_grad_old, 0.)  # like X, the X displacement
         # grad_func
@@ -488,7 +574,7 @@ class _BaseOpt(BaseMotion, ABC):
             require_grad,
         )
         self._line_search.require_grad = require_grad  # set linear search
-        # Selective dyamics
+        # Selective dynamics
         atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)  # has the same shape as X
         # other check
         if (not isinstance(maxiter, int)) or (maxiter <= 0):
@@ -519,33 +605,39 @@ class _BaseOpt(BaseMotion, ABC):
             self.logger.info('-' * 100)
 
         with th.no_grad():
-            with th.set_grad_enabled(require_grad):
-                X.requires_grad_(require_grad)
-                energies: th.Tensor = func(X, *func_args, **func_kwargs)
-                # note: irregular tensor regularized by concat. thus n_batch of X shown as 1, but y has shape of the true batch size.
-                if energies.shape[0] != self.n_batch:
-                    if batch_indices is None:
-                        raise ValueError(
-                            f"batch indices is None "
-                            f"while shape of model output ({energies.shape}) does not match batch size ({self.n_batch})."
-                        )
-                    if energies.shape[0] != n_true_batch:
-                        raise ValueError(f"shape of output ({energies.shape}) does not match given batch indices")
-                self.is_concat_X = (batch_indices is not None)
-                # calc. grad
-                if is_grad_func_contain_y:
-                    X_grad = grad_func_(X, energies, *grad_func_args, **grad_func_kwargs)
-                else:
-                    X_grad = grad_func_(X, *grad_func_args, **grad_func_kwargs)
-                if X_grad.shape != X.shape:
-                    raise RuntimeError(f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.')
-            energies = energies.detach()
-            energies_old = th.full_like(energies, th.inf)
-            X_grad = X_grad.detach()
-            X_grad.mul_(atom_masks)
-            X = X.detach()
-            # Section: initialize custom algorithm state.
+            self.s = self._init_check_y_grad(
+                func,
+                X,
+                grad_func_,
+                func_args,
+                func_kwargs,
+                grad_func_args,
+                grad_func_kwargs,
+                is_grad_func_contain_y,
+                require_grad,
+                atom_masks,
+                batch_indices,
+            )
+            s = self.s  # mount self.s to s, their states are shared then.
+            self.initialize(
+                func,
+                s.X,
+                grad_func_,
+                func_args,
+                func_kwargs,
+                grad_func_args,
+                grad_func_kwargs,
+                is_grad_func_contain_y,
+                require_grad,
+                atom_masks,
+                self.batch_tensor,
+            )
             self.initialize_algo_param()
+
+            energies = s.Energy
+            energies_old = th.full_like(energies, th.inf)
+            X_grad = s.X_grad
+            X = s.X
 
             # ================================================================
             # Section: async dump infrastructure
@@ -556,9 +648,7 @@ class _BaseOpt(BaseMotion, ABC):
             total_names = self.get_transfer_vars()
             _is_cuda = (self.device.type == 'cuda')
 
-            # --- state container (all transfer vars, lazily filled) ---
-            s = StdContainer(Energy=energies, X=X, Force=-X_grad)
-            # Add log-only vars that aren't yet on s
+            # Add log-only vars that are not yet on the live state.
             for _n in total_names:
                 if not hasattr(s, _n):
                     setattr(s, _n, th.empty_like(energies) if _n in ('E_diff', 'F_eps') else th.empty_like(X))
@@ -643,7 +733,11 @@ class _BaseOpt(BaseMotion, ABC):
                             th.max(th.abs(X_grad[0]), dim=-1).values, self.batch_scatter, 0, 'amax', -1.
                         )
                         f_converge = F_eps < self.F_threshold
-                        converge_mask = (E_eps < self.E_threshold) & f_converge  # (n_true_batch, ), to stop the update of converged samples.
+                        converge_mask = (
+                            (E_eps < self.E_threshold) &
+                            f_converge &
+                            self._extra_converge_mask
+                        )  # (n_true_batch, ), to stop the update of converged samples.
                         converge_check = converge_mask
                         self.converge_mask = converge_check
                         converge_str = converge_check.numpy(force=True)
@@ -651,7 +745,11 @@ class _BaseOpt(BaseMotion, ABC):
                     else:
                         F_eps = th.amax(th.abs(X_grad), dim=(-2, -1))  # (n_batch, n_atom, 3) -> (n_batch)
                         f_converge = (F_eps < self.F_threshold).reshape(-1, 1, 1)
-                        converge_mask = (E_eps < self.E_threshold).reshape(-1, 1, 1) & f_converge  # To stop the update of converged samples.
+                        converge_mask = (
+                            (E_eps < self.E_threshold).reshape(-1, 1, 1) &
+                            f_converge &
+                            self._extra_converge_mask.reshape(-1, 1, 1)
+                        )  # To stop the update of converged samples.
                         converge_check = converge_mask[:, 0, 0]
                         self.converge_mask = converge_check
                         converge_str = (converge_mask[:, 0, 0]).numpy(force=True)
@@ -702,9 +800,9 @@ class _BaseOpt(BaseMotion, ABC):
                             X_grad_old_ = X_grad_old[:, select_mask, :]
                             p_ = p[:, select_mask, :]
                             X_ = X[:, select_mask, :]
-                            displace_ = displace[:, select_mask, :]
+                            displace_ = displace[:, select_mask, :] if not _is_inplace_update else None
                             atom_masks_ = atom_masks[:, select_mask, :]
-                            steplength_ = steplength_tensor[:, select_mask_short, :]
+                            steplength_ = steplength_tensor[:, select_mask_short, :] if not _is_inplace_update else None
                             batch_tensor_ = self.batch_tensor[select_mask_short]
                             batch_scatter_ = th.repeat_interleave(
                                 batch_tensor_indx_cache[:len(batch_tensor_)],
@@ -720,8 +818,8 @@ class _BaseOpt(BaseMotion, ABC):
                             p_ = p[select_mask, ...]
                             X_ = X[select_mask, ...]
                             atom_masks_ = atom_masks[select_mask, ...]
-                            displace_ = displace[select_mask, ...]
-                            steplength_ = steplength_tensor[select_mask, ...]
+                            displace_ = displace[select_mask, ...] if not _is_inplace_update else None
+                            steplength_ = steplength_tensor[select_mask, ...] if not _is_inplace_update else None
                             batch_tensor_ = None
                             batch_scatter_ = None
                     else:
@@ -743,6 +841,12 @@ class _BaseOpt(BaseMotion, ABC):
                         steplength_ = steplength_tensor
                         batch_tensor_ = self.batch_tensor
                         batch_scatter_ = self.batch_scatter
+                    s.func_args = func_args_
+                    s.func_kwargs = func_kwargs_
+                    s.grad_func_args = grad_func_args_
+                    s.grad_func_kwargs = grad_func_kwargs_
+                    s.atom_masks = atom_masks_
+                    s.batch_tensor = batch_tensor_
 
                     # Section: update algo. parameters.
                     self._update_algo_param(
@@ -758,6 +862,13 @@ class _BaseOpt(BaseMotion, ABC):
 
                     t_st = time.perf_counter()
                     # Section: search directions
+                    #   There are two ways to update directions:
+                    #       1. traditionally return the search direction, and determine the steplength then (by line search)
+                    #       2. a complete whole update step in _update_direction, and bypass the explicit steplength update X += \alpha * p
+                    #   If 2 is used, an extra synchronise point is required
+                    if _is_inplace_update and self._hold_samples and (not _is_cuda):
+                        self._dump_done.wait()
+                        self._print_done.wait()
                     p_ = self._update_direction(
                         X_grad_,
                         X_grad_old_,
@@ -765,75 +876,78 @@ class _BaseOpt(BaseMotion, ABC):
                         X_,
                         batch_scatter_,
                     )  # (n_batch, n_atom, n_dim)
-                    # use BB steplength_tensor
-                    if self.use_bb:
-                        g_go = X_grad_ - X_grad_old_  # (n_batch, n_atom, n_dim)
-                        if self.is_concat_X:
-                            _steplength_ = th.sum(index_inner_product(
-                                displace_,
-                                displace_,
-                                dim=1,
-                                batch_indices=batch_scatter_
-                            ), dim=-1, keepdim=True) / th.sum(index_inner_product(
-                                displace_,
-                                g_go,
-                                dim=1,
-                                batch_indices=batch_scatter_
-                            ), dim=-1, keepdim=True)  # BB1, (1, B, 1)
-                            _steplength_ = th.where(
-                                (_steplength_ < 2. * self.steplength) & (_steplength_ > 1e-4),
-                                _steplength_,
-                                steplength_
-                            )
+                    if not _is_inplace_update:
+                        # use BB steplength_tensor
+                        if self.use_bb:
+                            g_go = X_grad_ - X_grad_old_  # (n_batch, n_atom, n_dim)
+                            if self.is_concat_X:
+                                _steplength_ = th.sum(index_inner_product(
+                                    displace_,
+                                    displace_,
+                                    dim=1,
+                                    batch_indices=batch_scatter_
+                                ), dim=-1, keepdim=True) / th.sum(index_inner_product(
+                                    displace_,
+                                    g_go,
+                                    dim=1,
+                                    batch_indices=batch_scatter_
+                                ), dim=-1, keepdim=True)  # BB1, (1, B, 1)
+                                _steplength_ = th.where(
+                                    (_steplength_ < 2. * self.steplength) & (_steplength_ > 1e-4),
+                                    _steplength_,
+                                    steplength_
+                                )
+                            else:
+                                # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) =
+                                _steplength_ = th.sum(
+                                    displace_ * displace_, dim=(-2, -1), keepdim=True
+                                ) / th.sum(
+                                    displace_ * g_go, dim=(-2, -1), keepdim=True
+                                )  # BB1
+                                _steplength_ = th.where(
+                                    (_steplength_ < 2. * self.steplength) * (_steplength_ > 1e-4),
+                                    _steplength_,
+                                    steplength_
+                                )
                         else:
-                            # (n_batch, 1, n_atom*n_dim) @ (n_batch, n_atom*n_dim, 1) =
-                            _steplength_ = th.sum(
-                                displace_ * displace_, dim=(-2, -1), keepdim=True
-                            ) / th.sum(
-                                displace_ * g_go, dim=(-2, -1), keepdim=True
-                            )  # BB1
-                            _steplength_ = th.where(
-                                (_steplength_ < 2. * self.steplength) * (_steplength_ > 1e-4),
-                                _steplength_,
-                                steplength_
-                            )
-                    else:
-                        _steplength_ = steplength_
-                    # Section: search step length -> steplength_tensor: (n_batch, 1, 1)
-                    steplength_: th.Tensor = self._line_search.run(
-                        func,
-                        grad_func_,
-                        X_,
-                        energies_,
-                        X_grad_,
-                        p_,
-                        _steplength_,
-                        is_grad_func_contain_y,
-                        require_grad,
-                        func_args=func_args_,
-                        func_kwargs=func_kwargs_,
-                        grad_func_args=grad_func_args_,
-                        grad_func_kwargs=grad_func_kwargs_,
-                        batch_indices=batch_tensor_
-                    )
-                    # update X
-                    if self.is_concat_X:
-                        alpha = steplength_.index_select(1, batch_scatter_)
-                    else:
-                        alpha = steplength_
-                    displace_ = alpha * p_  # (n_batch, 1, 1) * (n_batch, n_atom, n_dim) or (1, sumN, 1) * (1, sumN, n_dim)
+                            _steplength_ = steplength_
+                        # Section: search step length -> steplength_tensor: (n_batch, 1, 1)
+                        steplength_: th.Tensor = self._line_search.run(
+                            func,
+                            grad_func_,
+                            X_,
+                            energies_,
+                            X_grad_,
+                            p_,
+                            _steplength_,
+                            is_grad_func_contain_y,
+                            require_grad,
+                            func_args=func_args_,
+                            func_kwargs=func_kwargs_,
+                            grad_func_args=grad_func_args_,
+                            grad_func_kwargs=grad_func_kwargs_,
+                            batch_indices=batch_tensor_
+                        )
+                        # update X
+                        if self.is_concat_X:
+                            alpha = steplength_.index_select(1, batch_scatter_)
+                        else:
+                            alpha = steplength_
+                        displace_ = alpha * p_  # (n_batch, 1, 1) * (n_batch, n_atom, n_dim) or (1, sumN, 1) * (1, sumN, n_dim)
 
-                    if self._hold_samples and not _is_cuda:
-                        # gate: in this mode `X_` aliases `X`, whose zero-copy views
-                        # were queued to the consumers above; `_update_direction` /
-                        # `X_.add_` below mutate it in place, so consumers must
-                        # finish reading first. (CUDA path is protected by s_buf
-                        # D2D staging — stream ordering after wait_event suffices.)
-                        self._dump_done.wait()
-                        self._print_done.wait()
+                        if self._hold_samples and (not _is_cuda):
+                            # gate: in this mode `X_` aliases `X`, whose zero-copy views
+                            # were queued to the consumers above; `_update_direction` /
+                            # `X_.add_` below mutate it in place, so consumers must
+                            # finish reading first. (CUDA path is protected by s_buf
+                            # D2D staging — stream ordering after wait_event suffices.)
+                            self._dump_done.wait()
+                            self._print_done.wait()
 
-                    # MAIN UPDATE
-                    X_.add_(displace_)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
+                        # MAIN UPDATE
+                        X_.add_(displace_)  # (n_batch, n_atom, 3) + (n_batch, n_atom, 3)
+                    # END _is_inplace_update Section  <<<
+
                     # update old grad
                     X_grad_old_ = X_grad_  # (n_batch, n_atom, n_dim)
                     # calc. new energy & grad.
@@ -869,9 +983,10 @@ class _BaseOpt(BaseMotion, ABC):
                             energies.index_copy_(0, select_indices_short, energies_)
                             X_grad.index_copy_(1, select_indices, X_grad_)
                             X_grad_old.index_copy_(1, select_indices, X_grad_old_)
-                            p.index_copy_(1, select_indices, p_)
+                            if not _is_inplace_update:
+                                p.index_copy_(1, select_indices, p_)
+                                displace.index_copy_(1, select_indices, displace_)
                             X.index_copy_(1, select_indices, X_)
-                            displace.index_copy_(1, select_indices, displace_)
                             #atom_masks.index_copy_(1, select_indices, atom_masks_)
                             #steplength_tensor.index_copy_(1, select_indices_short, steplength_)
 
@@ -881,9 +996,10 @@ class _BaseOpt(BaseMotion, ABC):
                             energies.index_copy_(0, select_indices, energies_)
                             X_grad.index_copy_(0, select_indices, X_grad_)
                             X_grad_old.index_copy_(0, select_indices, X_grad_old_)
-                            p.index_copy_(0, select_indices, p_)
+                            if not _is_inplace_update:
+                                p.index_copy_(0, select_indices, p_)
+                                displace.index_copy_(0, select_indices, displace_)
                             X.index_copy_(0, select_indices, X_)
-                            displace.index_copy_(0, select_indices, displace_)
                             #atom_masks.index_copy_(0, select_indices, atom_masks_)
                             #steplength_tensor.index_copy_(0, select_indices, steplength_)
                     else:
@@ -892,8 +1008,8 @@ class _BaseOpt(BaseMotion, ABC):
                         energies = energies_
                         X_grad = X_grad_
                         X_grad_old = X_grad_old_
-                        p = p_
                         X = X_
+                        p = p_
                         displace = displace_
                         #steplength_tensor = steplength_
                     # Section: update batch information of algos if necessary
@@ -993,6 +1109,41 @@ class _BaseOpt(BaseMotion, ABC):
         else:
             return energies, X  #, ptlist  # test <<<
 
+    def initialize(
+            self,
+            func: Callable,
+            X: th.Tensor,
+            grad_func: Callable,
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            is_grad_func_contain_y: bool,
+            require_grad: bool,
+            atom_masks: th.Tensor,
+            batch_indices: th.Tensor | None,
+    ) -> None:
+        """Initialize subclass runtime state before algorithm parameters.
+
+        Args:
+            func: Device-prepared objective callable.
+            X: Checked coordinates on the optimizer device.
+            grad_func: Normalized gradient callable.
+            func_args: Positional objective arguments.
+            func_kwargs: Keyword objective arguments.
+            grad_func_args: Positional gradient arguments.
+            grad_func_kwargs: Keyword gradient arguments.
+            is_grad_func_contain_y: Whether the gradient callable receives the
+                objective value.
+            require_grad: Whether objective evaluation requires autograd.
+            atom_masks: Canonical movable-coordinate mask with the shape of X.
+            batch_indices: Per-structure atom counts for an irregular batch.
+
+        Returns:
+            None.
+        """
+        pass
+
     @abstractmethod
     def initialize_algo_param(self):
         """
@@ -1018,7 +1169,7 @@ class _BaseOpt(BaseMotion, ABC):
             p: th.Tensor,
             X: th.Tensor,
             batch_scatter_indices: th.Tensor | None,
-    ) -> th.Tensor:
+    ) -> th.Tensor | None:
         """
         Override this method to implement X update algorithm.
         Args:
@@ -1029,7 +1180,9 @@ class _BaseOpt(BaseMotion, ABC):
             batch_scatter_indices: the batch indices. See `_update_algo_param`.
 
         Returns:
-            p: th.Tensor, the new update direction of X.
+            The new update direction when ``self._is_inplace_update`` is
+            ``False``. When it is ``True``, the return value is not used by
+            the base optimizer and may be ``None``.
         """
         raise NotImplementedError
 
