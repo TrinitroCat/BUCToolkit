@@ -7,7 +7,7 @@ from torch import nn
 
 from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.BatchOptim._BaseOpt import _BaseOpt
-from BUCToolkit.BatchOptim.TS.Dimer import FindMinEigen
+from BUCToolkit.BatchOptim.TSBaseOpt._eigen_solver import FindMinEigen
 from BUCToolkit.utils import index_ops
 from BUCToolkit.utils.grad_functions import fin_diff_hvp
 
@@ -162,7 +162,10 @@ class Dimer(_BaseOpt):
         if self._X_diff_init is None:
             raise RuntimeError('Dimer initial direction was not prepared before initialization.')
 
-        v = self._X_diff_init.to(self.device).mul(atom_masks)
+        v = self._X_diff_init.to(
+            device=self.device,
+            dtype=X.dtype,
+        ).mul(atom_masks)
         self.v, energies, X_grad, self.Hv, self.vHv = self.Rotator.run(
             func=func,
             X=X,
@@ -258,21 +261,40 @@ class Dimer(_BaseOpt):
         if batch_scatter_indices is None:
             raise NotImplementedError('Dimer requires irregular `batch_indices`.')
         atom_masks = self.s.atom_masks
+        n_local_batch = self._vHv.shape[1]
 
         vg = th.sum(
-            index_ops.index_inner_product(self._v, g, dim=1, batch_indices=batch_scatter_indices),
+            index_ops.index_inner_product(
+                self._v,
+                g,
+                dim=1,
+                batch_indices=batch_scatter_indices,
+                out_size=n_local_batch,
+            ),
             dim=-1,
             keepdim=True,
         )
         tangent_grad = g - vg.index_select(1, batch_scatter_indices) * self._v
         tangent_norm = th.sqrt(th.sum(
-            index_ops.index_inner_product(tangent_grad, tangent_grad, 1, batch_scatter_indices),
+            index_ops.index_inner_product(
+                tangent_grad,
+                tangent_grad,
+                1,
+                batch_scatter_indices,
+                out_size=n_local_batch,
+            ),
             dim=-1,
             keepdim=True,
         ))
         u = tangent_grad / (tangent_norm.index_select(1, batch_scatter_indices) + 1e-20)
         ug = th.sum(
-            index_ops.index_inner_product(u, g, dim=1, batch_indices=batch_scatter_indices),
+            index_ops.index_inner_product(
+                u,
+                g,
+                dim=1,
+                batch_indices=batch_scatter_indices,
+                out_size=n_local_batch,
+            ),
             dim=-1,
             keepdim=True,
         )
@@ -294,15 +316,19 @@ class Dimer(_BaseOpt):
 
         vHv = th.sum(index_ops.index_inner_product(
             self._v, self._Hv, dim=1, batch_indices=batch_scatter_indices,
+            out_size=n_local_batch,
         ), dim=-1, keepdim=True)
         vHu = th.sum(index_ops.index_inner_product(
             self._v, Hu, dim=1, batch_indices=batch_scatter_indices,
+            out_size=n_local_batch,
         ), dim=-1, keepdim=True)
         uHv = th.sum(index_ops.index_inner_product(
             u, self._Hv, dim=1, batch_indices=batch_scatter_indices,
+            out_size=n_local_batch,
         ), dim=-1, keepdim=True)
         uHu = th.sum(index_ops.index_inner_product(
             u, Hu, dim=1, batch_indices=batch_scatter_indices,
+            out_size=n_local_batch,
         ), dim=-1, keepdim=True)
         nondiag = 0.5 * (uHv + vHu)
         H22 = th.cat((vHv, nondiag, nondiag, uHu), dim=-1).reshape(-1, 2, 2)
@@ -321,7 +347,13 @@ class Dimer(_BaseOpt):
             coefficients[batch_scatter_indices, 1:] * u
         )
         dX_norm = th.sqrt(th.sum(
-            index_ops.index_inner_product(dX, dX, 1, batch_scatter_indices),
+            index_ops.index_inner_product(
+                dX,
+                dX,
+                1,
+                batch_scatter_indices,
+                out_size=n_local_batch,
+            ),
             dim=-1,
             keepdim=True,
         ))

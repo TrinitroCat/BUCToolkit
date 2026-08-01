@@ -12,7 +12,7 @@ import BUCToolkit.utils.batch_updaters
 import BUCToolkit.utils.index_ops
 from .ElemListReduce import elem_list_reduce
 from ._CheckModules import check_module
-from .exceptions import FatalError
+from .exceptions import FatalError, IterationStuckError
 
 __all__ = [
     'IrregularTensorReformat',
@@ -27,4 +27,5 @@ __all__ = [
     'batch_updaters',
     'index_ops',
     'FatalError',
+    'IterationStuckError',
 ]

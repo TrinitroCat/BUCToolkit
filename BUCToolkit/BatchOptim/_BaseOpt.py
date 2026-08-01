@@ -23,8 +23,12 @@ from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.Bases.BaseMotion import BaseMotion
 from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT
-from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
+from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL, DTYPE
+from BUCToolkit.utils.exceptions import IterationStuckError
 from BUCToolkit.utils.index_ops import index_reduce, index_inner_product
+
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 
 class _BaseOpt(BaseMotion, ABC):
@@ -498,6 +502,11 @@ class _BaseOpt(BaseMotion, ABC):
         else:
             raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
 
+        # Match the MD precision contract: coordinates enter the optimization
+        # loop in the dtype selected by BT_FLOAT_TYPE (float32 by default), and
+        # every floating-point work tensor is derived from that canonical X.
+        X, = self.handle_dtype_device(FLOAT_TYPE, self.device, X)
+
         if batch_indices is not None:
             if n_batch != 1:
                 raise RuntimeError(f'If batch_indices was specified, the 1st dimension of X must be 1 instead of {n_batch}.')
@@ -519,14 +528,14 @@ class _BaseOpt(BaseMotion, ABC):
             n_true_batch = len(batch_indices)   # the true batch size for irregular batches
             # steplength
             steplength_tensor = th.full(
-                (1, n_true_batch, 1), fill_value=self.steplength, device=self.device, dtype=th.float32
+                (1, n_true_batch, 1), fill_value=self.steplength, device=self.device, dtype=X.dtype
             )  # (n_batch, sumN, 1), initial step length
             batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
         else:
             n_true_batch = n_batch
             # steplength
             steplength_tensor = th.full(
-                (n_batch, 1, 1), fill_value=self.steplength, device=self.device, dtype=th.float32
+                (n_batch, 1, 1), fill_value=self.steplength, device=self.device, dtype=X.dtype
             )  # (n_batch, sumN, 1), initial step length
             batch_tensor_indx_cache = None
             self.batch_indices = None
@@ -565,7 +574,7 @@ class _BaseOpt(BaseMotion, ABC):
         p = th.zeros_like(X)  # like X, the previous direction
         self.converge_mask = None  # (n_true_batch, )
         self._extra_converge_mask = th.ones(n_true_batch, dtype=th.bool, device=self.device)
-        X_grad_old = th.full_like(X, 1e-20, dtype=th.float32, device=self.device)  # like X, initial old grad.
+        X_grad_old = th.full_like(X, 1e-20)  # like X, initial old grad.
         displace = th.full_like(X_grad_old, 0.)  # like X, the X displacement
         # grad_func
         grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(
@@ -586,7 +595,6 @@ class _BaseOpt(BaseMotion, ABC):
         if isinstance(grad_func_, nn.Module):
             grad_func_ = grad_func_.to(self.device)
         X = X.detach()
-        X = X.to(self.device)
 
         # initialize
         ############################## BATCHED ALGORITHM ###################################
@@ -730,7 +738,12 @@ class _BaseOpt(BaseMotion, ABC):
                     if self.is_concat_X:
                         # (1, n_batch*n_atom, 3)
                         F_eps = index_reduce(
-                            th.max(th.abs(X_grad[0]), dim=-1).values, self.batch_scatter, 0, 'amax', -1.
+                            th.max(th.abs(X_grad[0]), dim=-1).values,
+                            self.batch_scatter,
+                            0,
+                            'amax',
+                            -1.,
+                            out_size=n_true_batch,
                         )
                         f_converge = F_eps < self.F_threshold
                         converge_mask = (
@@ -885,12 +898,14 @@ class _BaseOpt(BaseMotion, ABC):
                                     displace_,
                                     displace_,
                                     dim=1,
-                                    batch_indices=batch_scatter_
+                                    batch_indices=batch_scatter_,
+                                    out_size=len(batch_tensor_),
                                 ), dim=-1, keepdim=True) / th.sum(index_inner_product(
                                     displace_,
                                     g_go,
                                     dim=1,
-                                    batch_indices=batch_scatter_
+                                    batch_indices=batch_scatter_,
+                                    out_size=len(batch_tensor_),
                                 ), dim=-1, keepdim=True)  # BB1, (1, B, 1)
                                 _steplength_ = th.where(
                                     (_steplength_ < 2. * self.steplength) & (_steplength_ > 1e-4),
@@ -1054,7 +1069,11 @@ class _BaseOpt(BaseMotion, ABC):
                     if self.is_concat_X:
                         _final_F_eps = index_reduce(
                             th.max(th.abs(X_grad[0]), dim=-1).values,
-                            self.batch_scatter, 0, 'amax', -1.
+                            self.batch_scatter,
+                            0,
+                            'amax',
+                            -1.,
+                            out_size=n_true_batch,
                         )
                     else:
                         _final_F_eps = th.amax(th.abs(X_grad), dim=(-2, -1))
@@ -1093,6 +1112,10 @@ class _BaseOpt(BaseMotion, ABC):
                         [['Final Coordinates', 'Final Forces']],
                         verbose=self.verbose,
                     )
+            except IterationStuckError as error:
+                warnings.warn(RuntimeWarning(str(error)))
+                if self.verbose > 0:
+                    self.logger.error(f"ERROR: {str(error)}")
             # release resources
             finally:
                 # --- dump cleanup ---
