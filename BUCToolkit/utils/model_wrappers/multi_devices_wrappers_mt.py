@@ -1,4 +1,8 @@
-""" To support model running on multi-device in parallel and reduce to the master device. """
+"""
+To support model running on multi-device in parallel and reduce to the master device.
+
+* NOTE: It is a multi-threading version, which would be limited by the Python GIL thus decreasing GPU utilisation.
+"""
 import warnings
 from typing import List, Dict, Any, Tuple
 import threading, queue, copy

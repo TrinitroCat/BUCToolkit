@@ -20,7 +20,7 @@ from BUCToolkit.BatchOptim.minimize.FIRE import FIRE
 from BUCToolkit.BatchStructures.batch import Batch
 from BUCToolkit.BatchStructures.data import Data
 from BUCToolkit.utils import FatalError
-from BUCToolkit.utils.model_wrappers.multi_devices_wrappers import Model_Wrapper_pyg_MultiDevice
+from BUCToolkit.utils.model_wrappers.multi_devices_wrappers_mp import Model_Wrapper_pyg_MultiDevice
 from BUCToolkit.utils.model_wrappers.pyg_model_wrappers import Model_Wrapper_pyg
 
 
@@ -129,6 +129,51 @@ def check_fatal_error(devices, graph):
         wrapper.close()
 
 
+def check_assignment_cache(model, devices, graph):
+    """Check fixed reuse and dynamic redistribution without model-specific hooks."""
+    fixed_wrapper = Model_Wrapper_pyg_MultiDevice(
+        copy.deepcopy(model), devices_list=devices, is_dynamic_workload=False,
+    )
+    dynamic_wrapper = Model_Wrapper_pyg_MultiDevice(
+        copy.deepcopy(model), devices_list=devices, is_dynamic_workload=True,
+    )
+    try:
+        for wrapper in (fixed_wrapper, dynamic_wrapper):
+            wrapper.eval()
+            coordinates = make_input(graph)
+            wrapper.Energy(coordinates, graph)
+            wrapper.Grad(coordinates, graph)
+            generation = wrapper._generation
+            buffer_version = wrapper._buffer_version
+            configurations = tuple(wrapper._worker_configurations)
+            wrapper.Energy(coordinates, graph)
+            wrapper.Grad(coordinates, graph)
+            if wrapper._generation != generation + 1:
+                raise AssertionError('An unchanged assignment was unnecessarily reconfigured.')
+            if wrapper._buffer_version != buffer_version:
+                raise AssertionError('An unchanged batch unnecessarily reallocated shared memory.')
+            if tuple(wrapper._worker_configurations) != configurations:
+                raise AssertionError('An unchanged assignment replaced worker configuration.')
+
+        smaller_graph = Batch.from_data_list(
+            graph.to_data_list()[:max(1, graph.num_graphs // 2)]
+        ).to(devices[0])
+        smaller_coordinates = make_input(smaller_graph)
+        previous_assignment = dynamic_wrapper._worker_structure_indices_cache
+        dynamic_wrapper.Energy(smaller_coordinates, smaller_graph)
+        dynamic_wrapper.Grad(smaller_coordinates, smaller_graph)
+        if dynamic_wrapper._worker_structure_indices_cache == previous_assignment:
+            raise AssertionError('A changed dynamic batch did not redistribute the assignment.')
+        generation = dynamic_wrapper._generation
+        dynamic_wrapper.Energy(smaller_coordinates, smaller_graph)
+        dynamic_wrapper.Grad(smaller_coordinates, smaller_graph)
+        if dynamic_wrapper._generation != generation + 1:
+            raise AssertionError('A repeated dynamic assignment was unnecessarily reconfigured.')
+    finally:
+        fixed_wrapper.close()
+        dynamic_wrapper.close()
+
+
 def main():
     args = parse_args()
     if not th.cuda.is_available() or th.cuda.device_count() < 2:
@@ -176,6 +221,7 @@ def main():
             lambda: run_nve(multi_wrapper, graph.clone(), atom_counts, master_device, args.steps),
             devices,
         )
+        check_assignment_cache(base_model, devices, graph.clone())
         check_fatal_error(devices, graph.clone())
 
         print(f'devices: {devices}')
