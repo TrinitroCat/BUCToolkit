@@ -652,6 +652,34 @@ gradient context of PyTorch. When `require_grad = False`, computation of `func` 
 the context of `torch.no_grad` to reduce the memory cost. Otherwise, gradient will be turned on explicitly
 by `torch.enable_grad`.
 
+#### Function Protocol and Model Adapters
+
+The low-level algorithms depend on the `func` / `grad_func` protocol rather than a particular model class.
+High-level APIs and model adapters provide convenient paths to the same protocol, while users can call the
+low-level engines directly with their own functions:
+
+```text
+High-level APIs / CLI -> model and data setup -> model adapters --+
+                                                               |
+PyG, VASP, and multi-device models -> utils/model_wrappers ------+-> func / grad_func protocol
+                                                               |             |
+User-defined functions and external calculators ----------------+             v
+                                                     BatchOptim / BatchMD / BatchMC
+```
+
+Adapters under `BUCToolkit/utils/model_wrappers/` translate common model interfaces into coordinate-based
+energy and gradient calls. For example, a PyG adapter updates the graph coordinates, evaluates the model,
+and presents its energy and forces through the protocol expected by the low-level algorithms. The adapter
+layer provides convenience only; the numerical engines remain usable without a deep-learning model or a
+specific graph framework.
+
+A matching Python call signature alone is not the complete contract. Inputs and outputs must also use the
+expected tensor shapes, dtypes, devices, energy/gradient convention, and batch layout. In particular,
+regular and irregular batches must follow the layouts described in [Batch Parallelism Scheme](#batch-parallelism-scheme),
+and `grad_func` must return the mathematical gradient rather than the physical force unless an adapter
+performs the sign conversion. These requirements allow analytic functions, machine-learning potentials,
+and external electronic-structure calculators to share the same optimized algorithms.
+
 ### Highly Customizable Algorithms
 All methods/algorithms are object-oriented modularized. They have `_Base*` abstract base classes 
 that implement highly optimized main loop routines, and are specialized by modifying several methods like 
