@@ -144,6 +144,9 @@ nontrivial methods.
 - Important examples include why irregular atomic numbers are flattened, why
   pinned memory is CUDA-only, why a constraint target is refreshed once per
   projection, and why header and data names are preserved separately.
+- For a part of code that implements a specified (relatively independent) function/method, 
+  one may add a simple, brief introduction. If this part is long, the comment would 
+  start with `# Section: xxx`
 
 ## 9. Error handling
 
@@ -210,12 +213,12 @@ nontrivial methods.
 
 ## 14. Change management
 
-- Read `DEVELOPMENT.md`, `HANDOFF.md`, and the current changelog before
+- Read `DEVELOPMENT.md`, and the current git change before
   modifying code.
-- Update the handoff and changelog after material implementation changes.
+- Update a changelog after material implementation changes.
 - Preserve unrelated worktree changes and untracked user files.
 - Do not alter software or database versions without an explicit format or
   release decision.
-- Commit messages order changes by importance and use numbered points.
+- Commit messages order changes by importance and use numbered points, unless only one change.
 - Each numbered commit-message point remains on one physical line.
 

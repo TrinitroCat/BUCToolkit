@@ -21,18 +21,19 @@ class VASP_Model(_BaseWrapper):
     Args:
         input_path: The path to the standard input files for VASP static calculation.
             Including `INCAR` `POSCAR` `KPOINTS` `POTCAR`, etc.
-        submit_script: the file name of the slurm script to submit tasks. It must be at the `input_path`.
-            subprocess will execute this script to submit tasks. A typical example includes `sbatch -w $submit_script`.
+        submit_script: the file name of the script to execute. It must be at the `input_path`.
         is_reuse_WAVECAR: whether to reuse WAVECAR file from last step output as the initial guess. (use move instead of copy)
+        use_slurm: whether to submit the script with ``sbatch --wait`` instead
+            of executing it directly.
 
     """
 
-    def __init__(self, input_path: str, submit_script: str, is_reuse_WAVECAR=True) -> None:
+    def __init__(self, input_path: str, submit_script: str, is_reuse_WAVECAR=True, use_slurm=False) -> None:
         super().__init__(input_path)
         if not os.path.isfile(os.path.join(input_path, 'INCAR')):
             raise FileNotFoundError(f"INCAR file not found at {input_path}.")
-        elif not os.path.isfile(os.path.join(input_path, 'KPOINTS')):
-            raise FileNotFoundError(f"KPOINTS file not found at {input_path}.")
+        elif not os.path.isfile(os.path.join(input_path, 'POSCAR')):
+            raise FileNotFoundError(f"POSCAR file not found at {input_path}.")
         elif not os.path.isfile(os.path.join(input_path, 'POTCAR')):
             raise FileNotFoundError(f"POTCAR file not found at {input_path}.")
         elif not os.path.isfile(os.path.join(input_path, 'KPOINTS')):
@@ -42,9 +43,11 @@ class VASP_Model(_BaseWrapper):
             raise FileNotFoundError(f"submit_script file {submit_script} not found at {input_path}.")
 
         self.submit_script = submit_script
-        self.input_path = input_path
+        self.input_path = os.path.abspath(input_path)
         self.step = 0  # steps of VASP static calculation
         self.is_reuse_WAVECAR = bool(is_reuse_WAVECAR)
+        self.use_slurm = bool(use_slurm)
+        self._submit_script_path = os.path.abspath(os.path.join(input_path, submit_script))
         self.data: bt.Structures | None = None  # data storage container
         self._X_check_cache = None  # used for check the consistency of input X in `Energy` and `Grad`, ensuring the correctness of F_cache
         self.F_tensor: th.Tensor | None = None  # A cache
@@ -64,6 +67,9 @@ class VASP_Model(_BaseWrapper):
         file_list = ['INCAR', 'KPOINTS', 'POTCAR']
         for inpf in file_list:
             shutil.copy(os.path.join(self.input_path, inpf), os.path.join(self.input_path, str(self.step), inpf))
+        step_path = os.path.join(self.input_path, str(self.step))
+        step_script = os.path.join(step_path, os.path.basename(self._submit_script_path))
+        shutil.copy2(self._submit_script_path, step_script)
         if self.is_reuse_WAVECAR:
             if (
                     os.path.isdir(os.path.join(self.input_path, f"{self.step - 1}"))
@@ -75,24 +81,29 @@ class VASP_Model(_BaseWrapper):
                     os.path.join(self.input_path, str(self.step), 'WAVECAR')
                 )
 
-        # submit
-        #res = subprocess.run(
-        #    ['sbatch', '--wait', f"{self.submit_script}"],
-        #    capture_output=True,
-        #    cwd=os.path.join(self.input_path, str(self.step)),
-        #    text=True
-        #)
-        # local test
+        if self.use_slurm:
+            command = ['sbatch', '--wait', f"./{os.path.basename(step_script)}"]
+        else:
+            command = [f"./{os.path.basename(step_script)}"]
         res = subprocess.run(
-            [f"{self.submit_script}"],
+            command,
             capture_output=True,
-            cwd=os.path.join(self.input_path, str(self.step)),
+            cwd=step_path,
             text=True
         )
         if res.returncode != 0:
-            raise RuntimeError(f"VASP Computation Failed. Please check OUTCAR at {self.input_path} for details.")
+            raise RuntimeError(
+                f"VASP computation failed in step {self.step}: {command!r}\n"
+                f"stdout: {res.stdout}\nstderr: {res.stderr}"
+            )
 
-        self.data = bt.io.OUTCAR2Feat(os.path.join(self.input_path, str(self.step)), verbose=0)  # text file reader & parser
+        outcar_path = os.path.join(step_path, 'OUTCAR')
+        if not os.path.isfile(outcar_path):
+            raise RuntimeError(
+                f"VASP command completed without creating {outcar_path}. "
+                f"stdout: {res.stdout}\nstderr: {res.stderr}"
+            )
+        self.data = bt.io.OUTCAR2Feat(step_path, verbose=0)  # text file reader & parser
         self.data.read(['OUTCAR'], n_core=1)
 
         self.step += 1
@@ -121,12 +132,19 @@ class VASP_Model(_BaseWrapper):
             self.F_tensor = None
 
         if self.F_tensor is None:
+            if self.data is not None:
+                self.data.Coords[-1] = X.squeeze(0).numpy(force=True)
+                self.data[-1].write2text(
+                    f"{self.input_path}/{self.step}",
+                    file_format='POSCAR',
+                    file_name_list=['POSCAR'],
+                    n_core=1,
+                )
             self._submit_task()
             F_tensor = th.as_tensor(self.data.Forces[-1:], device=X.device)  # not cache
-            return F_tensor
+            return - F_tensor.reshape(origin_shape).contiguous()
 
         else:
             F_tensor = self.F_tensor
             self.F_tensor = None  # empty cache
             return - F_tensor.reshape(origin_shape).contiguous()
-
