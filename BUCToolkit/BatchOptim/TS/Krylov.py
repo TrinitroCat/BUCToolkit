@@ -1,464 +1,361 @@
-#  Copyright (c) 2026.4.29, BUCToolkit.
-#  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
-#  File: Krylov.py
-#  Environment: Python 3.12
+"""Krylov transition-state searches implemented on the optimizer framework.
 
-# ruff: noqa: E701, E702, E703
-from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
-import time
+Both methods use ``_BaseOpt`` only for the outer optimization lifecycle.  A
+direction update is one complete transition-state iteration: it constructs a
+spectrally modified direction, changes the active coordinates in place, solves
+the low Hessian modes at the new coordinates, and publishes that model result
+through the existing line-search cache.  This ownership convention is why the
+classes declare ``_is_inplace_update = True``.
+"""
+
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 import warnings
 
-import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.utils._print_formatter import SCIENTIFIC_ARRAY_FORMAT, STRING_ARRAY_FORMAT, FLOAT_ARRAY_FORMAT
-from BUCToolkit.utils import index_ops
-from BUCToolkit.utils.grad_functions import fin_diff_hvp
-from BUCToolkit.utils.function_utils import preload_func
-from BUCToolkit.Bases.BaseMotion import BaseMotion
+from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.BatchOptim._BaseOpt import _BaseOpt
+from BUCToolkit.BatchOptim.TSBaseOpt._eigen_solver import FindEigen
+from BUCToolkit.utils import index_ops
+from BUCToolkit.utils.exceptions import IterationStuckError
+from BUCToolkit.utils.grad_functions import fin_diff_hvp
 
 
-class FindEigen(BaseMotion):
+class _KrylovBase(_BaseOpt):
+    """Shared BaseOpt lifecycle and eigen-state ownership for Krylov methods.
+
+    Full-batch attributes have names without a leading local marker, while
+    ``_eigenval`` and related attributes are views/copies for the structures
+    still active in the current BaseOpt iteration. The active results are
+    scattered back only after the in-place translation and eigen solve finish.
     """
-    Find the eigenvector with minimum eigenvalue by Riemann gradient descent on S^2 manifold v^T v = 1.
-    In fact, dimer only requires the direction within negative cone, i.e., v^T H v < 0.
-    """
+
     def __init__(
             self,
-            Torque_thres: float = 1e-2,
-            Eigen_thres: float = -0.1,
-            maxiter_lanczos: int = 10,
-            dx: float = 1.e-2,
-            device: str | th.device = 'cpu',
-            verbose: int = 2,
-            _hold_samples: bool = False,
-    ):
-        """
-
-        Args:
-            Torque_thres: convergence threshold of torque.
-            Eigen_thres: convergence threshold of the minimal eigenvalue differences.
-            maxiter_lanczos: maximum number of lanczos iterations.
-            dx: step size for finite difference approximation.
-            device: the device on which the computation runs.
-            verbose: the verbosity level.
-            _hold_samples: whether to hold samples during optimization. if True, samples will not be removed even they have converged.
-        """
-
-        warnings.filterwarnings('always')
+            iter_scheme: str,
+            E_threshold: float,
+            Torque_thres: float,
+            Eigen_thres: float,
+            F_threshold: float,
+            maxiter_trans: int,
+            maxiter_eig: int,
+            steplength: float,
+            dx: float,
+            device: str | th.device,
+            verbose: int,
+            morse_index: int,
+            neg_spectra_cutoff: float,
+            pos_spectra_cutoff: float,
+    ) -> None:
         self.Torque_thres = abs(float(Torque_thres))
         self.Eigen_thres = abs(float(Eigen_thres))
-        assert (maxiter_lanczos > 0) and isinstance(maxiter_lanczos, int), '`maxiter_rot` must be an integer greater than 0.'
-        self.maxiter_lanczos = int(maxiter_lanczos)
-        if self.maxiter_lanczos <= 1:
-            raise ValueError(f'`maxiter_rot` must be greater than 1, but got {self.maxiter_lanczos}.')
+        self.maxiter_trans = int(maxiter_trans)
+        if not isinstance(maxiter_eig, int) or maxiter_eig <= 1:
+            raise ValueError(
+                f'maxiter_eig must be an integer greater than 1, but got {maxiter_eig}.'
+            )
+        self.maxiter_eig = maxiter_eig
         self.dx = float(dx)
-        self.subspace_hessian = None
-        self.device = device
-        self.verbose = verbose
-        self.subspace_maxdim = self.maxiter_lanczos
+        self._morse_index = int(morse_index)
+        if self._morse_index < 0:
+            raise ValueError(f'Morse index should be positive, but got {self._morse_index}.')
+        if self._morse_index >= self.maxiter_eig:
+            raise ValueError(
+                'The Krylov subspace dimension must exceed the Morse index, '
+                f'but got {self.maxiter_eig} and {self._morse_index}.'
+            )
+        self.neg_spectra_cutoff = -abs(float(neg_spectra_cutoff))
+        self.pos_spectra_cutoff = abs(float(pos_spectra_cutoff))
 
-        self._hold_samples = _hold_samples
+        super().__init__(
+            iter_scheme=iter_scheme,
+            E_threshold=float(E_threshold),
+            F_threshold=float(F_threshold),
+            maxiter=self.maxiter_trans,
+            linesearch='None',
+            steplength=float(steplength),
+            use_bb=False,
+            device=device,
+            verbose=verbose,
+        )
+        # A Krylov direction update also translates X and evaluates the model
+        # at the accepted point. BaseOpt must therefore bypass its ordinary
+        # line-search/addition path and consume the stored energy and gradient.
+        self._is_inplace_update = True
+        self.EigenFinder = FindEigen(
+            self.Torque_thres,
+            self.Eigen_thres,
+            self.maxiter_eig,
+            self.dx,
+            self.device,
+            self.verbose,
+            _hold_samples=True,
+        )
 
-        # logger
-        super().__init__()
-        self.init_logger('Main.TS.Eigen')
-
-    def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
-        """
-        Default update method for the input of func if the func has non-opt variables, i.e., the identical transform.
-        Args:
-            mask:
-
-        Returns:
-
-        """
-        return func_args, func_kwargs, grad_func_args, grad_func_kwargs
+        self._X_diff_init: th.Tensor | None = None
+        self._extra_krylov_dim = 1
+        self._func: Callable | None = None
+        self._grad_func: Callable | None = None
+        self._is_grad_func_contain_y: bool | None = None
+        self._require_grad: bool | None = None
+        self.eigenval: th.Tensor | None = None
+        self.eigenvec: th.Tensor | None = None
+        self._eigenval: th.Tensor | None = None
+        self._eigenvec: th.Tensor | None = None
+        self._local_extra_converge_mask: th.Tensor | None = None
 
     def set_batch_updater(
             self,
-            method: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]]
+            method_trans: Callable,
+            method_rot: Callable | None = None,
     ) -> None:
-        """
-        Set a method to update the taget function when variables change.
-        It receives a mask tensor of shape (n_batch, ) that only selects the `True` part to input to the function, and receives the old
-        `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`,
-        returns the corresponding masked new `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`.
-
-        This method is used to dynamically 'remove' the samples which have been converged in a batch to avoid
-        redundant calculation of converged samples.
-
-        Default transform is identical transform (i.e., do nothing)
-        Args:
-            method: Callable(mask: Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict) -> Tuple[Tuple, Dict, Tuple, Dict],
-        the method of updating function arguments for a mask.
-
-        Returns: None
-        """
-        self._update_batch = method
-        self._hold_samples = False
+        """Register translation and eigen-solver batch updaters."""
+        super().set_batch_updater(method_trans, method_trans)
+        # Translation and finite-difference eigen evaluations may require
+        # different graph/data rebuilders. Without a rotation updater the
+        # eigen solver preserves the complete active translation batch.
+        if method_rot is None:
+            self.EigenFinder._hold_samples = True
+        else:
+            self.EigenFinder.set_batch_updater(method_rot)
 
     def run(
             self,
             func: Any | nn.Module,
             X: th.Tensor,
-            v: th.Tensor,
+            X_diff: th.Tensor | None = None,
             grad_func: Any | nn.Module = None,
-            func_args: Tuple = tuple(),
-            func_kwargs: Dict | None = None,
-            grad_func_args: Tuple = tuple(),
-            grad_func_kwargs: Dict | None = None,
+            func_args: Sequence = tuple(),
+            func_kwargs=None,
+            grad_func_args: Sequence = tuple(),
+            grad_func_kwargs=None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,
+            output_grad: bool = False,
             fixed_atom_tensor: Optional[th.Tensor] = None,
-            batch_indices: None | List[int] | Tuple[int, ...] | th.Tensor = None,
-            eigen_order: int = 1,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        """
-        Find the eigenvector of Hessian at X with the minimum eigenvalue, by Riemannian gradient descent on S^n manifold v^T v = I.
+            batch_indices: Optional[th.Tensor | List] = None,
+            extra_krylov_dim: int = 1,
+    ):
+        """Run a Krylov transition-state search.
 
-        Parameters:
-            func: the main function of instantiated torch.nn.Module class.
-            X: Tensor[n_batch, n_atom, 3], the atom coordinates that input to func.
-            v: Tensor[n_batch, n_atom, 3], the atom direction used to finite difference.
-            grad_func: user-defined function that grad_func(X, ...) returns the func's gradient at X. if None, grad_func(X, ...) = th.autograd.grad(func(X, ...), X).
-            func_args: optional, other input of func.
-            func_kwargs: optional, other input of func.
-            grad_func_args: optional, other input of grad_func.
-            grad_func_kwargs: optional, other input of grad_func.
-            is_grad_func_contain_y: bool, if True, grad_func contains output of func followed by X
-                i.e., grad = grad_func(X, y, *grad_func_args, **grad_func_kwargs), else grad = grad_func(X, *grad_func_args, **grad_func_kwargs)
-            require_grad: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs) calculation.
-            fixed_atom_tensor: Optional[th.Tensor], the indices of X that fixed.
-            batch_indices: Sequence | th.Tensor | np.ndarray | None, the split points for given X, Element_list & V_init, must be 1D integer array_like.
-                the format of batch_indices is the same as `split_size_or_sections` in torch.split:
-                batch_indices = (n1, n2, ..., nN) will split X, Element_list & V_init into N parts, and ith parts has ni atoms. sum(n1, ..., nN) = X.shape[1]
-            eigen_order: int, the number of required minimum eigenvalues.
+        ``X_diff`` seeds the first Lanczos solve. ``extra_krylov_dim`` is the
+        number of positive-side Ritz modes retained in addition to the
+        requested unstable Morse subspace. Irregular batches are required:
+        structure-layout state is indexed by ``batch_indices``, while atom-
+        layout coordinates and eigenvectors use BaseOpt's scatter indices.
 
-        Return: y, g, KRYLOV_BASES, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC;
-            y: the mean value of function at X, i.e., (f(X + delta * v) + f(X - delta * v))/2
-            g: the mean grad of function at X, i.e., (grad(X + delta * v) + grad(X - delta * v))/2
-            KRYLOV_EIGENVAL: the eigen values of krylov subspace Hessian
-            KRYLOV_EIGENVEC: the corresponding eigen vectors of Hessian
+        The initial eigensolve supplies the checked energy and gradient, so it
+        replaces rather than supplements BaseOpt's ordinary first evaluation.
+        Subsequent eigensolves likewise supply the accepted state after each
+        in-place translation.
         """
-        t_main = time.perf_counter()
-        if func_kwargs is None:
-            func_kwargs = dict()
-        if grad_func_kwargs is None:
-            grad_func_kwargs = dict()
-        # Check batch indices; irregular batch
-        if isinstance(X, th.Tensor):
-            if X.ndim == 2:
-                X.unsqueeze_(0)
-            n_batch, n_atom, n_dim = X.shape
-        else:
-            raise TypeError(f'`X` must be torch.Tensor, but got {type(X)}.')
-        if isinstance(v, th.Tensor):
-            if v.ndim == 2:
-                v.unsqueeze_(0)
-            if v.shape != X.shape:
-                raise ValueError(f"`v` must have same shape as `X`, but got shape {v.shape}.")
-        else:
-            raise TypeError(f'`v` must be torch.Tensor, but got {type(v)}.')
-        if batch_indices is None:
-            raise NotImplementedError(
-                f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
-                f'It is fully compatible with regular batches, but merely a little performance loss.'
-            )
-        if eigen_order >= self.maxiter_lanczos:
+        if not isinstance(X, th.Tensor):
+            raise TypeError(f'X must be torch.Tensor, but occurred {type(X)}.')
+        if X.ndim == 2:
+            X = X.unsqueeze(0)
+        elif X.ndim != 3:
+            raise ValueError(f'X must be 2D or 3D, but got shape {X.shape}.')
+        if X_diff is None:
+            X_diff = th.randn_like(X)
+        elif not isinstance(X_diff, th.Tensor):
+            raise TypeError(f'X_diff must be torch.Tensor, but occurred {type(X_diff)}.')
+        elif X_diff.ndim == 2:
+            X_diff = X_diff.unsqueeze(0)
+        elif X_diff.ndim != 3:
+            raise ValueError(f'X_diff must be 2D or 3D, but got shape {X_diff.shape}.')
+        if X_diff.shape != X.shape:
             raise ValueError(
-                f"Solving `eigen_order` ({eigen_order}) eigenvalues in {self.maxiter_lanczos} steps is impossible. "
-                f"`maxiter_lanczos` greater than `eigen_order + 5` is recommended."
+                f'X_diff and X must have the same shape, but got '
+                f'{X_diff.shape} and {X.shape}.'
             )
+        if batch_indices is None:
+            raise NotImplementedError('Krylov requires irregular batch_indices.')
+        extra_krylov_dim = int(extra_krylov_dim)
+        if extra_krylov_dim < 1:
+            raise ValueError('At least one extra Krylov eigenvalue is required.')
 
-        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
-            batch_indices, n_batch, device=self.device
-        )
-        # initialize vars
-        self.n_batch, self.n_atom, self.n_dim = n_batch, n_atom, n_dim
-        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(
-            grad_func, is_grad_func_contain_y, require_grad
-        )
-
-        if hasattr(self._update_batch, 'initialize'):
-            self._update_batch.initialize()
-        elif hasattr(self._update_batch, '__init__'):
-            self._update_batch.__init__()
-        # Selective dynamics
-        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
-        # atom_masks = atom_masks.flatten(-2, -1).unsqueeze(-1)  # (n_batch, n_atom*n_dim, 1)
-        # other check
-        if (not isinstance(self.maxiter_lanczos, int)) or (self.maxiter_lanczos <= 0):
-            raise ValueError(f'Invalid value of maxiter_rot: {self.maxiter_lanczos}. It would be an integer greater than 0.')
-
-        # set variables device
-        func = preload_func(func, self.device)
-
-        if isinstance(grad_func_, nn.Module):
-            grad_func_ = grad_func_.to(self.device)
-        X = X.detach()
-        X = X.to(self.device)
-        # normalize v
-        v.mul_(atom_masks)
-        v_norm = th.sqrt(th.sum(index_ops.index_inner_product(v, v, 1, self.batch_scatter), dim=-1, keepdim=True))
-        v = v / v_norm.index_select(1, self.batch_scatter)
-
-        # initialize
-        ############################## BATCHED ALGORITHM ###################################
-        # variables with '_' refer to the dynamically changed variables during iteration,
-        # and they will in-placed copy into origin variables (i.e., without '_') at the end
-        # of each iteration to update data.
-        #
-        ####################################################################################
-        is_main_loop_converge = False
-        t_st = time.perf_counter()
-        #ptlist = [X[:, None, :, 0].numpy(force=True)]  # for converged samp, stop calc., test <<<
-        if self.verbose:
-            self.logger.info('-' * 100)
-        # MAIN LOOP
-        # X (1, n_batch * n_atom, n_dim)
-        func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = func_args, func_kwargs, grad_func_args, grad_func_kwargs
-        y, g, Hv = fin_diff_hvp(
-            func,
-            func_args_,
-            func_kwargs_,
-            grad_func_,
-            grad_func_args_,
-            grad_func_kwargs_,
-            X,
-            v,
-            self.batch_scatter,
-            is_g_contain_y=is_grad_func_contain_y,
-            require_grad=require_grad,
-            delta=self.dx
-        )
-        g.mul_(atom_masks)
-        Hv.mul_(atom_masks)
-        vHv = th.sum(
-            index_ops.index_inner_product(v, Hv, dim=1, batch_indices=self.batch_scatter),
-            dim=-1,
-            keepdim=True
-        ) # curvature, vHv (1, B0, 1), essentially the Lanczos alpha
-        # grad in the tangent space 1st
-        u = Hv - vHv.index_select(1, self.batch_scatter) * v
-        beta = th.sqrt(th.sum(index_ops.index_inner_product(
-            u, u, 1, self.batch_scatter), dim=-1, keepdim=True)
-        )  # i.e., the lanczos beta. (1, B0, 1)
-        KRYLOV_BASES = th.zeros((self.subspace_maxdim, v.shape[1], v.shape[2]), device=self.device, dtype=X.dtype)
-        KRYLOV_BASES[0] = v[0].clone()
-        KRYLOV_HESSIAN = th.zeros(
-            (n_true_batch, self.subspace_maxdim, self.subspace_maxdim),
-            device=self.device, dtype=X.dtype
-        )
-        KRYLOV_HESSIAN[:, 0, 0] = vHv.reshape(n_true_batch).clone()
-        KRYLOV_EIGENVAL = th.zeros((n_true_batch, self.subspace_maxdim), device=self.device)
-        KRYLOV_EIGENVAL[:, 0] = vHv.reshape(n_true_batch).clone()
-        KRYLOV_EIGENVEC = th.zeros_like(KRYLOV_HESSIAN)
-        KRYLOV_EIGENVEC[:, 0, 0] = 1.
-        krylov_eigenval_old = th.full_like(KRYLOV_EIGENVAL, th.inf)
-        # cache for dynamically changed batch indices due to convergence, avoiding reallocate mem.
-        batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
-        iter_min = eigen_order
-        for i in range(1, self.maxiter_lanczos):
-            # threshold. Only need v in the negative cone, i.e., vHv < 0.
-            last_comp = KRYLOV_EIGENVEC[:, i - 1, :eigen_order]  # (B, k)
-            residual_norms = (beta * th.abs(last_comp)).amax(dim=-1, keepdim=True)  # (1, B, 1)
-            converge_mask_eig = (residual_norms < self.Eigen_thres)  # (1, B, 1)
-            #monitor_indx = min(eigen_order, i) - 1
-            converge_mask_torque = (beta < self.Torque_thres)
-            converge_mask = (converge_mask_eig | converge_mask_torque)  # (1, B, 1)
-            # print
-            #self.logger.debug(f"LANCZOS: H_sub:\n{KRYLOV_HESSIAN}")
-            #self.logger.debug(f"LANCZOS: K_EIG_VEC:\n{KRYLOV_EIGENVEC}")
-            #self.logger.debug(f"LANCZOS: K_EIG_VAL:\n{KRYLOV_EIGENVAL}")
-            if self.verbose > 0:
-                self.logger.info(
-                    f"Eigen {i:>5d}\n "
-                    f"Krylov Resi.: {np.array2string(residual_norms.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                    f"target Eig.:  {np.array2string(KRYLOV_EIGENVAL[:, eigen_order].squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                    f"Energies:     {np.array2string(y.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                    f"Eig. Conv.:   {np.array2string(converge_mask.squeeze().numpy(force=True), **STRING_ARRAY_FORMAT)}\n "
-                    f"TIME:         {time.perf_counter() - t_st:>6.4f} s"
-                )
-                t_st = time.perf_counter()
-            # judge thres
-            if th.all(converge_mask):
-                is_main_loop_converge = True
-                break
-            converge_mask_short = converge_mask
-            converge_mask = converge_mask_short[:, self.batch_scatter, ...]  # (1, sumB*A, 1)
-            # update batch, remove the already converged ones.
-            if not self._hold_samples:
-                func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                    ~converge_mask_short.squeeze(),
-                    func_args,
-                    func_kwargs,
-                    grad_func_args,
-                    grad_func_kwargs
-                )
-                select_mask = ~(converge_mask[0, :, 0])  # (sumB*A, )
-                select_mask_short = ~converge_mask_short[0, :, 0]  # (B, )
-                n_local_batch = th.sum(select_mask_short)
-                #y_ = y[select_mask_short]
-                Hv_ = Hv[:, select_mask, :]
-                X_ = X[:, select_mask, :]
-                v_ = v[:, select_mask, :]
-                u_ = u[:, select_mask, :]
-                beta_ = beta[:, select_mask_short, :]
-                atom_masks_ = atom_masks[:, select_mask, :]
-                batch_tensor_ = self.batch_tensor[select_mask_short]
-                batch_scatter_ = th.repeat_interleave(
-                    batch_tensor_indx_cache[:len(batch_tensor_)],
-                    batch_tensor_,
-                    dim=0
-                )
-
-                krylov_bases_ = KRYLOV_BASES[:, select_mask, :]
-                krylov_hessian_ = KRYLOV_HESSIAN[select_mask_short, ...]
-                sub_eigval_ = KRYLOV_EIGENVAL[select_mask_short, ...]
-                sub_eigvec_ = KRYLOV_EIGENVEC[select_mask_short, ...]
-            else:
-                select_mask = None
-                select_mask_short = None
-                n_local_batch = n_true_batch
-                func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = func_args, func_kwargs, grad_func_args, grad_func_kwargs
-                Hv_ = Hv
-                X_ = X
-                v_ = v
-                u_ = u
-                beta_ = beta
-                atom_masks_ = atom_masks
-                batch_tensor_ = self.batch_tensor
-                batch_scatter_ = self.batch_scatter
-                krylov_bases_ = KRYLOV_BASES
-                krylov_hessian_ =  KRYLOV_HESSIAN
-                sub_eigval_ = KRYLOV_EIGENVAL
-                sub_eigvec_ = KRYLOV_EIGENVEC
-
-            # construction subspace Hessian [[vHv vHw] [wHv wHw]] with shape (B0, 2, 2) for 2nd order precise linear search
-            w_ = u_ / (beta_.index_select(1, batch_scatter_).clamp_min_(1e-20))  # (1, sumB*A, N)
-            krylov_eigenval_old_ = sub_eigval_.clone()
-
-            y2_t, g2_, Hw_ = fin_diff_hvp(
-                func,
-                func_args_,
-                func_kwargs_,
-                grad_func_,
-                grad_func_args_,
-                grad_func_kwargs_,
-                X_,
-                w_,
-                batch_scatter_,
-                is_g_contain_y=is_grad_func_contain_y,
+        self._X_diff_init = X_diff
+        self._extra_krylov_dim = extra_krylov_dim
+        try:
+            return super().run(
+                func=func,
+                X=X,
+                grad_func=grad_func,
+                func_args=tuple(func_args),
+                func_kwargs={} if func_kwargs is None else func_kwargs,
+                grad_func_args=tuple(grad_func_args),
+                grad_func_kwargs={} if grad_func_kwargs is None else grad_func_kwargs,
+                is_grad_func_contain_y=is_grad_func_contain_y,
                 require_grad=require_grad,
-                delta=self.dx
+                output_grad=output_grad,
+                fixed_atom_tensor=fixed_atom_tensor,
+                batch_indices=batch_indices,
             )
-            g2_.mul_(atom_masks_)
-            Hw_.mul_(atom_masks_)  # mask
-            # subspace Hessian, It should be tridiagonal.
-            wHw_ = th.sum(
-                index_ops.index_inner_product(w_, Hw_, dim=1, batch_indices=batch_scatter_),
-                dim=-1,
-                keepdim=True
+        finally:
+            self._X_diff_init = None
+
+    def _init_check_y_grad(
+            self,
+            func: Callable,
+            X: th.Tensor,
+            grad_func: Callable,
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            is_grad_func_contain_y: bool,
+            require_grad: bool,
+            atom_masks: th.Tensor,
+            batch_indices: List[int] | Tuple[int, ...] | th.Tensor | None,
+    ) -> StdContainer:
+        """Run the initial Krylov solve and validate its energy and gradient."""
+        if batch_indices is None:
+            raise NotImplementedError('Krylov requires irregular batch_indices.')
+        if self._X_diff_init is None:
+            raise RuntimeError('Krylov initial direction was not prepared.')
+        eigen_order = self._morse_index + self._extra_krylov_dim
+        if X.shape[1] <= eigen_order:
+            raise ValueError(
+                'The sum of the Morse index and extra Krylov dimensions is '
+                f'not smaller than the total atom count ({X.shape[1]}).'
             )
-            # Lanczos recursion formula
-            u_ = Hw_ - wHw_.index_select(1, batch_scatter_) * w_ - beta_.index_select(1, batch_scatter_) * v_
-            # re-orthogonalize twice: (K, ba, d) * (1, ba, d) -> (K, b, 1)
-            Vu = index_ops.index_reduce(
-                th.sum(krylov_bases_[:i] * u_, dim=-1),
-                batch_scatter_,
-                dim=1,
-            ).index_select(1, batch_scatter_)
-            u_.sub_(th.einsum("kbd, kb -> bd", krylov_bases_[:i], Vu).unsqueeze(0))
-            Vu = index_ops.index_reduce(
-                th.sum(krylov_bases_[:i] * u_, dim=-1),
-                batch_scatter_,
-                dim=1,
-            ).index_select(1, batch_scatter_)
-            u_.sub_(th.einsum("kbd, kb -> bd", krylov_bases_[:i], Vu).unsqueeze(0))
+        # BaseOpt has already normalized X to BT_FLOAT_TYPE. The initial
+        # Lanczos direction follows that dtype so every finite difference uses
+        # one numerical precision even when the caller supplied another dtype.
+        v = self._X_diff_init.to(
+            device=self.device,
+            dtype=X.dtype,
+        ).mul(atom_masks)
+        energies, X_grad, self.eigenval, self.eigenvec = self.EigenFinder.run(
+            func=func,
+            X=X,
+            v=v,
+            grad_func=grad_func,
+            func_args=func_args,
+            func_kwargs=func_kwargs,
+            grad_func_args=grad_func_args,
+            grad_func_kwargs=grad_func_kwargs,
+            is_grad_func_contain_y=is_grad_func_contain_y,
+            require_grad=require_grad,
+            fixed_atom_tensor=atom_masks,
+            batch_indices=batch_indices,
+            eigen_order=eigen_order,
+        )
+        if energies.shape[0] != self.n_true_batch:
+            raise ValueError(
+                f'shape of output ({energies.shape}) does not match given batch indices'
+            )
+        if X_grad.shape != X.shape:
+            raise RuntimeError(
+                f'X_grad ({X_grad.shape}) and X ({X.shape}) have different shapes.'
+            )
+        self.is_concat_X = True
+        energies = energies.detach()
+        X_grad = X_grad.detach()
+        X_grad.mul_(atom_masks)
+        X = X.detach()
+        return StdContainer(Energy=energies, X=X, Force=-X_grad, X_grad=X_grad)
 
+    def initialize(
+            self,
+            func: Callable,
+            X: th.Tensor,
+            grad_func: Callable,
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            is_grad_func_contain_y: bool,
+            require_grad: bool,
+            atom_masks: th.Tensor,
+            batch_indices: th.Tensor | None,
+    ) -> None:
+        """Store model context for subsequent Krylov direction updates."""
+        if batch_indices is None:
+            raise NotImplementedError('Krylov requires irregular batch_indices.')
+        # These references are immutable run context. Per-iteration active
+        # arguments live on self.s and are replaced by BaseOpt's updater before
+        # each direction hook; keeping both kinds of state separate avoids
+        # silently using full-batch arguments for a reduced active batch.
+        self._func = func
+        self._grad_func = grad_func
+        self.s.func_args = func_args
+        self.s.func_kwargs = func_kwargs
+        self.s.grad_func_args = grad_func_args
+        self.s.grad_func_kwargs = grad_func_kwargs
+        self.s.atom_masks = atom_masks
+        self.s.batch_tensor = batch_indices
+        self._is_grad_func_contain_y = is_grad_func_contain_y
+        self._require_grad = require_grad
+        # BaseOpt may report force/energy convergence only after the lowest
+        # Ritz value confirms that each structure remains in a negative mode.
+        self._extra_converge_mask = self.eigenval[:, 0] < 0.
+        # The initial eigen solve already supplied the checked energy/gradient;
+        # no line-search cache exists until the first in-place update.
+        self._line_search.HAS_GRAD = False
 
-            # update bases and T, Only save the LOWER TRIANGULAR PART
-            krylov_hessian_[:, i, i] = wHw_.reshape(n_local_batch).clone()
-            krylov_hessian_[:, i, i - 1] = beta_.reshape(n_local_batch).clone()
-            krylov_bases_[i, :, :] = w_[0].clone()
+    def _update_algo_param(
+            self,
+            select_mask: th.Tensor,
+            select_mask_short: th.Tensor | None,
+            batch_scatter_indices: th.Tensor | None,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
+            displace: th.Tensor | None,
+    ) -> None:
+        # BaseOpt passes atom- and structure-level masks separately. Select the
+        # complete eigen state with the corresponding layout for this update:
+        # eigenvalues are [structure, mode], whereas eigenvectors are
+        # [mode, concatenated atom, Cartesian component]. Underscored members
+        # are the active working set and non-underscored members remain the
+        # stable full-batch owners until `_update_algo_batches()` commits them.
+        if self._hold_samples:
+            self._eigenval = self.eigenval
+            self._eigenvec = self.eigenvec
+        else:
+            self._eigenval = self.eigenval[select_mask_short]
+            self._eigenvec = self.eigenvec[:, select_mask, :]
 
-            # update beta
-            beta_ = th.sqrt_(th.sum(index_ops.index_inner_product(
-                u_, u_, 1, batch_scatter_), dim=-1, keepdim=True)
-            )  # i.e., the lanczos beta.
+    def _store_eigen_result(
+            self,
+            energies: th.Tensor,
+            gradients: th.Tensor,
+            eigenval: th.Tensor,
+            eigenvec: th.Tensor,
+    ) -> None:
+        # Publish the new local eigen solve through the existing line-search
+        # cache protocol, avoiding a duplicate model evaluation in BaseOpt.
+        self._eigenval = eigenval
+        self._eigenvec = eigenvec
+        self._local_extra_converge_mask = eigenval[:, 0] < 0.
+        self._line_search.HAS_GRAD = True
+        self._line_search.STORE_Y = energies
+        self._line_search.STORE_GRAD = gradients
 
-            #sub_eigval_, sub_eigvec_ = th.linalg.eigh(krylov_hessian_)  # (B, i), (B, i, i), default is using the lower triangular part
-            sub_eigval_[:, :i + 1], sub_eigvec_[:, :i + 1, :i + 1] = th.linalg.eigh(
-                krylov_hessian_[:, :i + 1, :i + 1]
+    def _update_eigen_batches(
+            self,
+            select_indices: th.Tensor,
+            select_indices_short: th.Tensor | None,
+    ) -> None:
+        # BaseOpt calls this only after the active in-place update has finished.
+        # Atom-layout eigenvectors and structure-layout eigenvalues must use
+        # their matching scatter indices to keep irregular batches aligned.
+        if self._hold_samples:
+            self.eigenval = self._eigenval
+            self.eigenvec = self._eigenvec
+            self._extra_converge_mask = self._local_extra_converge_mask
+        else:
+            self.eigenval.index_copy_(0, select_indices_short, self._eigenval)
+            self.eigenvec.index_copy_(1, select_indices, self._eigenvec)
+            self._extra_converge_mask.index_copy_(
+                0, select_indices_short, self._local_extra_converge_mask,
             )
 
-            # update next loop vars
-            v_ = w_
-            Hv_ = Hw_
 
-            # update origin variables
-            if not self._hold_samples:
-                select_indices = th.where(select_mask)[0]
-                select_indices_short = th.where(select_mask_short)[0]
-                y.index_copy_(0, select_indices_short, y2_t)
-                v.index_copy_(1, select_indices, v_)
-                u.index_copy_(1, select_indices, u_)
-                #w.index_copy_(1, select_indices, w_)
-                #X.index_copy_(1, select_indices, X_)
-                Hv.index_copy_(1, select_indices, Hv_)
-                beta.index_copy_(1, select_indices_short, beta_)
-                g.index_copy_(1, select_indices, g2_)
-                KRYLOV_BASES.index_copy_(1, select_indices, krylov_bases_)
-                KRYLOV_HESSIAN.index_copy_(0, select_indices_short, krylov_hessian_)
-                KRYLOV_EIGENVEC.index_copy_(0, select_indices_short, sub_eigvec_)
-                KRYLOV_EIGENVAL.index_copy_(0, select_indices_short, sub_eigval_)
-                krylov_eigenval_old.index_copy_(0, select_indices_short, krylov_eigenval_old_)
-            else:
-                y = y2_t
-                v = v_
-                u = u_
-                #w = w_
-                #X = X_
-                Hv = Hv_
-                beta = beta_
-                g = g2_
-                KRYLOV_HESSIAN = krylov_hessian_
-                KRYLOV_BASES = krylov_bases_
-                KRYLOV_EIGENVAL = sub_eigval_
-                KRYLOV_EIGENVEC = sub_eigvec_
-                krylov_eigenval_old = krylov_eigenval_old_
-            pass
-
-        if self.verbose:
-            if is_main_loop_converge:
-                self.logger.info(
-                    '-' * 100 + f'\neig done. time: {time.perf_counter() - t_main:<.4f} s\n'
-                )
-            else:
-                self.logger.warning(
-                    '-' * 100 + f'\nWARNING: Some Structures\' Hessian eigenvectors were NOT Converged yet!\n'
-                                f'eig done. time: {time.perf_counter() - t_main:<.4f} s\n'
-                )
-
-        # DEBUG
-        #H = th.autograd.functional.hessian(func, X)[0].squeeze()
-        #eigval, eigvec = th.linalg.eigh(H)
-        #print(f"KRYLOV_EIGENVAL: {KRYLOV_EIGENVAL[0, :eigen_order+1]}\nTRUE_EIGENVAL: {eigval[:eigen_order+1]}")
-
-        # KRYLOV_BASES: (m, a, d); KRYLOV_EIGENVEC: (a, m, m) 'mad, amk -> kad'
-        EIGVEC = th.einsum('mad, amk -> kad', KRYLOV_BASES, KRYLOV_EIGENVEC.index_select(0, self.batch_scatter))
-
-        return y, g, KRYLOV_EIGENVAL, EIGVEC
-
-
-class KrylovNewton(BaseMotion):
-    """
-    Using the krylov subspace Hessian with spectra modification to search 1-order saddle points
-    """
+class KrylovNewton(_KrylovBase):
+    """Krylov subspace Newton search with spectral modification."""
 
     def __init__(
             self,
@@ -476,706 +373,538 @@ class KrylovNewton(BaseMotion):
             morse_index: int = 1,
             neg_spectra_cutoff: float = 0.01,
             pos_spectra_cutoff: float = 0.01,
-    ):
-        warnings.filterwarnings('always')
-        self.E_threshold = float(E_threshold)
-        self.Torque_thres = abs(float(Torque_thres))
-        self.Eigen_thres = abs(float(Eigen_thres))
-        self.F_threshold = float(F_threshold)
-        self.maxiter_trans = int(maxiter_trans)
-        assert (maxiter_eig > 0) and isinstance(maxiter_eig, int), '`maxiter_rot` must be an integer greater than 0.'
-        self.maxiter_eig = int(maxiter_eig)
-
-        self.steplength = float(steplength)
+    ) -> None:
+        super().__init__(
+            'KrylovNewton',
+            E_threshold, Torque_thres, Eigen_thres, F_threshold,
+            maxiter_trans, maxiter_eig, steplength, dx, device, verbose,
+            morse_index, neg_spectra_cutoff, pos_spectra_cutoff,
+        )
+        self.steplength_sheme = steplength_sheme
         self._trust_reg_rad_max = 5. * self.steplength
         self._trust_reg_rad_min = 0.001 * self.steplength
+        self.delta2: th.Tensor | None = None
+        self._delta2: th.Tensor | None = None
 
-        self.dx = float(dx)
-        self.device = device
-        self.verbose = verbose
-        self._morse_index = int(morse_index)
-        self.steplength_sheme = steplength_sheme
-
-        if self._morse_index >= self.maxiter_eig:
-            raise ValueError(
-                f"To solve k-order saddle, one must ensure the krylov subspace dimension sufficiently higher than k, "
-                f"but got morse index {self._morse_index} and subspace dim {self.maxiter_eig}."
-            )
-        elif self._morse_index < 0:
-            raise ValueError(f"Morse index should be positive, but got {self._morse_index}.")
-
-        # INNER parameter
-        self.neg_spectra_cutoff = - abs(float(neg_spectra_cutoff))  # the negative clamp of k-th spectra
-        self.pos_spectra_cutoff = abs(float(pos_spectra_cutoff))    # the positive clamp of (n - k)-th spectra
-
-        self.EigenFinder = FindEigen(
-            self.Torque_thres,
-            self.Eigen_thres,
-            self.maxiter_eig,
-            self.dx,
-            self.device,
-            self.verbose,
-            _hold_samples=True
+    def initialize_algo_param(self) -> None:
+        """Initialize the Newton trust-region radii."""
+        self.delta2 = th.full(
+            (self.n_true_batch, 1),
+            self.steplength ** 2,
+            device=self.device,
+            dtype=self.s.X.dtype,
         )
 
-        # logger
-        super().__init__()
-        self.init_logger('Main.TS')
-
-    def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
-        """
-        Default update method for the input of func if the func has non-opt variables, i.e., the identical transform.
-        Args:
-            mask:
-
-        Returns:
-
-        """
-        return func_args, func_kwargs, grad_func_args, grad_func_kwargs
-
-    def _linear_search(self, dX_, ):
-        """
-        Linear search for dimer translation
-        Returns:
-
-        """
-        # TODO, adding linear search algo. to determine steplength.
-        pass
-
-    def set_batch_updater(
+    def _update_algo_param(
             self,
-            method_trans: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]],
-            method_rot: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]] | None = None,
+            select_mask: th.Tensor,
+            select_mask_short: th.Tensor | None,
+            batch_scatter_indices: th.Tensor | None,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
+            displace: th.Tensor | None,
     ) -> None:
-        """
-        Set a method to update the taget function when variables change.
-        It receives a mask tensor of shape (n_batch, ) that only selects the `True` part to input to the function, and receives the old
-        `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`,
-        returns the corresponding masked new `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`.
+        super()._update_algo_param(
+            select_mask, select_mask_short, batch_scatter_indices,
+            g, g_old, p, displace,
+        )
+        self._delta2 = (
+            self.delta2 if self._hold_samples else self.delta2[select_mask_short]
+        )
 
-        This method is used to dynamically 'remove' the samples which have been converged in a batch to avoid
-        redundant calculation of converged samples.
-
-        Default transform is identical transform (i.e., do nothing)
-        Args:
-            method_trans: Callable(mask: Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict) -> Tuple[Tuple, Dict, Tuple, Dict],
-            method_rot: batch updater for rotations. the method of updating function arguments for a mask.
-
-        Returns: None
-        """
-        if method_rot is not None:
-            self.EigenFinder.set_batch_updater(method_rot)
-        else:
-            self.EigenFinder._hold_samples = True
-        self._update_batch = method_trans
-
-    def _diag_trust_region(self, vg, dii, g_comp_square, Delta2, tol=1e-4, max_iter=50):
-        """
-        纯黄金分割法求解对角信赖域子问题，保证收敛。
-
-        Args:
-            vg: (k, b) projected gradient on subspace bases.
-            dii: (b, k) eigenvalues of subspace metric (diag of D).
-            Delta2: (b, 1) squared trust-region radius.
-            tol: 收敛容差（基于区间宽度）。
-            max_iter: 最大迭代次数（黄金分割收敛较慢，可适当设大）。
-
-        Returns:
-            mu: (b, 1) optimal Lagrange multiplier.
-        """
-        g_comp_square = g_comp_square.to(th.float64)  # (b, 1)
-        vg = vg.T.to(th.float64)  # (b, k)
-        dii = dii.to(th.float64)  # (b, k)
-        #Delta2 = th.as_tensor(Delta2, dtype=th.float64).view(-1, 1)
-
-        # 检查是否需要非零的 mu
-        f0 = ((vg / dii)**2).sum(dim=-1, keepdim=True) + g_comp_square - Delta2
-        active = (f0 > 0).squeeze(-1)
+    def _diag_trust_region(
+            self,
+            vg: th.Tensor,
+            dii: th.Tensor,
+            g_comp_square: th.Tensor,
+            delta2: th.Tensor,
+            tol: float = 1e-4,
+            max_iter: int = 50,
+    ) -> th.Tensor:
+        """Solve the diagonal trust-region equation in double precision."""
+        # In the modified Ritz basis the step norm is monotone in the
+        # non-negative multiplier mu. Samples whose unshifted Newton step is
+        # already inside the radius are inactive and receive mu = 0 at return;
+        # all samples remain in the batched scalar solve until then.
+        # The secular equation is sensitive to cancellation near its root.
+        # Keep this small scalar subproblem in float64 even when BT_FLOAT_TYPE
+        # is float32, then return mu in the caller's dtype so the surrounding
+        # optimizer retains its configured precision.
+        output_dtype = delta2.dtype
+        vg = vg.T.to(dtype=th.float64)
+        dii = dii.to(dtype=th.float64)
+        g_comp_square = g_comp_square.to(dtype=th.float64)
+        delta2 = delta2.to(dtype=th.float64)
+        f0 = ((vg / dii) ** 2).sum(dim=-1, keepdim=True) + g_comp_square - delta2
+        active = f0 > 0.
         if not active.any():
-            return th.zeros_like(f0, dtype=th.float32)
+            return th.zeros_like(f0, dtype=output_dtype)
 
-        # Bounds
+        # The upper bound follows from the norm of the diagonally scaled
+        # gradient. Golden-section updates are cheap here because the problem
+        # has only one scalar unknown per structure.
         v_norm_sq = ((dii * vg) ** 2).sum(dim=-1, keepdim=True) + g_comp_square
-        mu_min = th.zeros_like(v_norm_sq) + 1e-4
-        L = mu_min.clone()
-        R = mu_min + th.sqrt(v_norm_sq / Delta2) + 1e-8
-        R = th.maximum(R, L + 1e-4)  # 强制 R > L
-
-        # 黄金分割常数
-        inv_phi = (2.236067977 - 1.0) / 2.0  # 0.618
-
-        # 初始试探点（为了对称，选两个点之一即可，这里用右分区点）
-        # 标准黄金分割搜索用两点，但求根时一个点够了。
-        # 我们用 R - inv_phi*(R-L) 保证 f(x) 可能为负时能收缩右边界。
-        x = R - inv_phi * (R - L)
-        f_x = ((dii * vg / (dii ** 2 + x))**2).sum(dim=-1, keepdim=True) + g_comp_square/(1. + x)**2 - Delta2
+        left = th.zeros_like(v_norm_sq) + 1e-4
+        right = left + th.sqrt(v_norm_sq / delta2) + 1e-8
+        right = th.maximum(right, left + 1e-4)
+        inv_phi = (2.236067977 - 1.0) / 2.0
+        x = right - inv_phi * (right - left)
+        f_x = (
+            ((dii * vg / (dii ** 2 + x)) ** 2).sum(dim=-1, keepdim=True)
+            + g_comp_square / (1. + x) ** 2
+            - delta2
+        )
         is_converged = False
-
         for _ in range(max_iter):
-            # 收敛条件：区间宽度或函数值足够小
-            width = R - L
-            converged = (width < tol * Delta2) | (th.abs(f_x) < tol * Delta2)
-            #print(th.abs(f_x).squeeze())
+            converged = (
+                ((right - left) < tol * delta2)
+                | (th.abs(f_x) < tol * delta2)
+                | ~active
+            )
             if converged.all():
                 is_converged = True
                 break
-
-            # 根据 f(x) 的符号收缩区间
-            # f(x) > 0 → 根在右侧，左边界右移
-            # f(x) < 0 → 根在左侧，右边界左移
-            update_L = f_x > 0
-            update_R = f_x < 0
-
-            L = th.where(update_L, x, L)
-            R = th.where(update_R, x, R)
-
-            # 重新计算试探点，保持区间长度黄金比例
-            # 保守起见，每次都基于新的 [L, R] 重新选点
-            x = R - inv_phi * (R - L)
-
-            # 计算新函数值
-            f_x = ((dii * vg / (dii ** 2 + x))**2).sum(dim=-1, keepdim=True) + g_comp_square/(1. + x)**2 - Delta2
-
-        # 最终 mu 取区间中点（或 x），这里取中点更安全
-        mu = (L + R) * 0.5
-        #print(f"mu: {mu}")
-
-        if not is_converged:
-            self.logger.warning(
-                f"Golden-section trust-region not fully converged. "
-                f"Max residual: {th.abs(f_x).max():.2e}"
+            left = th.where(f_x > 0, x, left)
+            right = th.where(f_x < 0, x, right)
+            x = right - inv_phi * (right - left)
+            f_x = (
+                ((dii * vg / (dii ** 2 + x)) ** 2).sum(dim=-1, keepdim=True)
+                + g_comp_square / (1. + x) ** 2
+                - delta2
             )
-
-        return mu.to(th.float32)
+        if not is_converged:
+            max_residual = th.abs(f_x[active]).max()
+            self.logger.warning(
+                'Golden-section trust-region not fully converged. '
+                f'Max residual: {max_residual:.2e}'
+            )
+        mu = th.where(active, (left + right) * 0.5, 0.)
+        return mu.to(dtype=output_dtype)
 
     def _curve_cond_linesearch(
             self,
-            func,
-            func_args_,
-            func_kwargs_,
-            grad_func_,
-            grad_func_args_,
-            grad_func_kwargs_,
-            X_,
-            dX_,
-            g_,
-            steplength,
-            max_steplength,
-            n_local_batch,
-            batch_scatter_,
-            is_grad_func_contain_y,
-            require_grad,
-            atom_masks
-    ):
-        COEFF = 0.618
-        BETA = 0.9
-        is_converge = False
-        g_norm_ = th.sum(
-            index_ops.index_inner_product(g_, g_, 1, batch_scatter_, out_size=n_local_batch),
-            dim=-1, keepdim=True
-        ).sqrt_()  # (1, b, 1)
+            X: th.Tensor,
+            direction: th.Tensor,
+            gradient: th.Tensor,
+            steplength: th.Tensor,
+            n_local_batch: int,
+            batch_scatter: th.Tensor,
+            atom_masks: th.Tensor,
+    ) -> th.Tensor:
+        """Run the original curve-condition line search."""
+        gradient_norm = th.sum(
+            index_ops.index_inner_product(
+                gradient, gradient, 1, batch_scatter, out_size=n_local_batch,
+            ),
+            dim=-1,
+            keepdim=True,
+        ).sqrt_()
+        is_converged = False
         for _ in range(10):
-            _X = th.addcmul(X_, atom_masks * dX_, steplength)
-            y, g_now_ = self._calc_y_grad(
-                _X,
-                func,
-                func_args_,
-                func_kwargs_,
-                grad_func_,
-                grad_func_args_,
-                grad_func_kwargs_,
-                require_grad,
-                is_grad_func_contain_y,
+            trial_X = th.addcmul(X, atom_masks * direction, steplength)
+            _, trial_gradient = self._calc_y_grad(
+                trial_X,
+                self._func,
+                self.s.func_args,
+                self.s.func_kwargs,
+                self._grad_func,
+                self.s.grad_func_args,
+                self.s.grad_func_kwargs,
+                self._require_grad,
+                self._is_grad_func_contain_y,
             )
-            g_now_.mul_(atom_masks)
-            g_norm_now_ = th.sum(
-                index_ops.index_inner_product(g_now_, g_now_, 1, batch_scatter_, out_size=n_local_batch),
-                dim=-1, keepdim=True
-            ).sqrt_()  # (1, b, 1)
-            #print(f"{_}: g_norm_: {g_norm_}, g_norm_now_: {g_norm_now_}")
-            converge_mask = (g_norm_now_ < (BETA * g_norm_))
-            if th.all(converge_mask):
-                is_converge = True
+            trial_gradient.mul_(atom_masks)
+            trial_norm = th.sum(
+                index_ops.index_inner_product(
+                    trial_gradient,
+                    trial_gradient,
+                    1,
+                    batch_scatter,
+                    out_size=n_local_batch,
+                ),
+                dim=-1,
+                keepdim=True,
+            ).sqrt_()
+            if th.all(trial_norm < 0.9 * gradient_norm):
+                is_converged = True
                 break
-            steplength *= COEFF
-
-        if not is_converge:
-            self.logger.warning(f"Line search did not converge.")
-
+            steplength *= 0.618
+        if not is_converged:
+            self.logger.warning('Line search did not converge.')
         return steplength
 
     def _newton_steplength(
             self,
-            func,
-            func_args_,
-            func_kwargs_,
-            grad_func_,
-            grad_func_args_,
-            grad_func_kwargs_,
-            X_,
-            dX_,
-            g_,
-            steplength,
-            max_steplength,
-            n_local_batch,
-            batch_scatter_,
-            is_grad_func_contain_y,
-            require_grad,
-            atom_masks
-    ):
-        _y, _g, Hp = fin_diff_hvp(
-            func,
-            func_args_,
-            func_kwargs_,
-            grad_func_,
-            grad_func_args_,
-            grad_func_kwargs_,
-            X_,
-            dX_,
-            batch_scatter_,
-            is_g_contain_y=is_grad_func_contain_y,
-            require_grad=require_grad,
-            delta=self.dx
+            X: th.Tensor,
+            direction: th.Tensor,
+            gradient: th.Tensor,
+            n_local_batch: int,
+            batch_scatter: th.Tensor,
+            atom_masks: th.Tensor,
+    ) -> th.Tensor:
+        """Run the original directional Newton step estimate."""
+        _, _, Hp = fin_diff_hvp(
+            self._func,
+            self.s.func_args,
+            self.s.func_kwargs,
+            self._grad_func,
+            self.s.grad_func_args,
+            self.s.grad_func_kwargs,
+            X,
+            direction,
+            batch_scatter,
+            is_g_contain_y=self._is_grad_func_contain_y,
+            require_grad=self._require_grad,
+            delta=self.dx,
         )
         Hp.mul_(atom_masks)
-        gp = index_ops.index_inner_product(g_, dX_, 1, batch_scatter_, out_size=n_local_batch)
-        pHp = index_ops.index_inner_product(dX_, Hp, 1, batch_scatter_, out_size=n_local_batch)
-        steplength_ = (- gp / pHp).clamp_(0.01, max_steplength).index_select(1, batch_scatter_)
-        #print(f"gp: {gp}, pHp: {pHp}, gp/pHp: {- gp / pHp}, steplength_: {steplength_.flatten()}")
+        gp = index_ops.index_inner_product(
+            gradient, direction, 1, batch_scatter, out_size=n_local_batch,
+        )
+        pHp = index_ops.index_inner_product(
+            direction, Hp, 1, batch_scatter, out_size=n_local_batch,
+        )
+        return (
+            (-gp / pHp)
+            .clamp_(0.01, self.steplength)
+            .index_select(1, batch_scatter)
+        )
 
-        return steplength_
-
-    def _find_steplength(
-            self
-    ):
-        pass
-
-    def run(
+    def _update_direction(
             self,
-            func: Any | nn.Module,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
             X: th.Tensor,
-            X_diff: th.Tensor | None = None,
-            grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
-            func_kwargs=None,
-            grad_func_args: Sequence = tuple(),
-            grad_func_kwargs=None,
-            is_grad_func_contain_y: bool = True,
-            require_grad: bool = False,
-            output_grad: bool = False,
-            fixed_atom_tensor: Optional[th.Tensor] = None,
-            batch_indices: Optional[th.Tensor | List] = None,
-            extra_krylov_dim: int = 1
-    ):
-        """
-        run krylov search algo.
-        Args:
-            func:
-            X:
-            X_diff:
-            grad_func:
-            func_args:
-            func_kwargs:
-            grad_func_args:
-            grad_func_kwargs:
-            is_grad_func_contain_y:
-            require_grad:
-            output_grad:
-            fixed_atom_tensor:
-            batch_indices:
-            extra_krylov_dim: the number of extra converged eigenvalues higher than `the morse index`
-                requiring EigenFiner to solve. It can provide more 2nd order information to accelerate the convergence.
+            batch_scatter_indices: th.Tensor | None,
+    ) -> None:
+        if batch_scatter_indices is None:
+            raise NotImplementedError('Krylov requires irregular batch_indices.')
 
-        Returns:
+        # All tensors below describe only the structures that BaseOpt selected
+        # as active. The structure-level Ritz data and atom-level coordinates
+        # are linked by batch_scatter throughout this complete in-place step.
+        batch_scatter = batch_scatter_indices
+        batch_tensor = self.s.batch_tensor
+        atom_masks = self.s.atom_masks
+        n_local_batch = self._eigenval.shape[0]
+        morse_index = self._morse_index
+        extra = self._extra_krylov_dim
+        eigenval = self._eigenval
+        eigenvec = self._eigenvec
 
-        """
-        if grad_func_kwargs is None:
-            grad_func_kwargs = dict()
-        if func_kwargs is None:
-            func_kwargs = dict()
-        func_args = tuple(func_args)
-        grad_func_args = tuple(grad_func_args)
-        # Check batch indices; irregular batch
-        if isinstance(X, th.Tensor):
-            if len(X.shape) == 2:
-                X = X.unsqueeze(0)
-            elif len(X.shape) != 3:
-                raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
-            n_batch, n_atom, n_dim = X.shape
-        else:
-            raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
-        if X_diff is None:
-            X_diff = th.randn_like(X)
-        elif isinstance(X_diff, th.Tensor):
-            if len(X_diff.shape) == 2:
-                X_diff = X_diff.unsqueeze(0)
-            elif len(X_diff.shape) != 3:
-                raise ValueError(f'`X_diff` must be 2D or 3D, but got shape [{X_diff.shape}]')
-        else:
-            raise TypeError(f'`X_diff` must be torch.Tensor, but occurred {type(X_diff)}.')
+        # `spectra_cut_off` is deliberately a cheap curvature scale, not a
+        # rigorous bound on the omitted Hessian spectrum.  For a structure
+        # with n atoms it evaluates
+        #
+        #   (m * |lambda_min| + q * lambda_max + (n - m - q) * 1) / n,
+        #
+        # where m is the Morse index and q is the number of explicitly kept
+        # positive modes. Lanczos converges from both spectral edges, so the
+        # lowest Ritz value is a useful scale for the m unstable modes and the
+        # largest Ritz value above the Morse subspace is a cheap positive-edge
+        # estimate for the q retained modes. The unresolved modes keep the
+        # algorithm's unit-curvature model. Atom-count averaging, rather than a
+        # Cartesian-degree average, intentionally preserves the legacy scale.
+        # `amax` over all columns above the Morse subspace finds the resolved
+        # positive edge even when unequal Krylov dimensions leave zero padding
+        # at the right side of a batch row.
+        max_pos_eigenval = eigenval[:, morse_index:].amax(dim=1)
+        spectra_cut_off = (
+            morse_index * eigenval[:, 0].abs()
+            + extra * max_pos_eigenval
+            + batch_tensor - morse_index - extra
+        ) / batch_tensor
+        spectra_cut_off.unsqueeze_(-1)
+        eig_thres_neg = th.as_tensor(
+            self.neg_spectra_cutoff, dtype=X.dtype, device=X.device,
+        )
+        eig_thres_pos = th.as_tensor(
+            self.pos_spectra_cutoff, dtype=X.dtype, device=X.device,
+        )
+        # Enforce the requested saddle signature: unstable modes stay negative
+        # and all retained complement modes stay positive. The upper negative
+        # bound prevents one extreme mode from dominating the Newton solve.
+        spectra = th.zeros_like(eigenval[:, :morse_index + extra])
+        spectra[:, :morse_index] = eigenval[:, :morse_index].clamp(
+            -spectra_cut_off, eig_thres_neg,
+        )
+        spectra[:, morse_index:] = eigenval[
+            :, morse_index:morse_index + extra
+        ].clamp(eig_thres_pos, None)
 
-        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(grad_func, is_grad_func_contain_y, require_grad)
-        # batch_check
-        if batch_indices is None:
-            raise NotImplementedError(
-                f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
-                f'It is fully compatible with regular batches, but merely a little performance loss.'
+        # Split the gradient into the resolved Ritz subspace and its orthogonal
+        # complement. The latter uses unit curvature because no Hessian
+        # information is available there.
+        eigenvec_cut = eigenvec[:morse_index + extra]
+        projected_gradient = index_ops.index_reduce(
+            th.sum(eigenvec_cut * g, dim=-1),
+            batch_scatter,
+            dim=1,
+            out_size=n_local_batch,
+        )
+        complement = g - th.einsum(
+            'kbd,kb->bd',
+            eigenvec_cut,
+            projected_gradient.index_select(1, batch_scatter),
+        )
+        complement_square = th.sum(
+            index_ops.index_inner_product(
+                complement,
+                complement,
+                1,
+                batch_scatter,
+                out_size=n_local_batch,
+            ),
+            dim=-1,
+            keepdim=True,
+        )
+
+        if self.steplength_sheme == 'trust_region':
+            # mu shifts both the resolved spectrum and the unit-curvature
+            # complement so the combined step satisfies the current radius.
+            mu = self._diag_trust_region(
+                projected_gradient,
+                spectra,
+                complement_square[0],
+                self._delta2,
             )
-        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
-            batch_indices, n_batch, device=self.device
-        )
-
-        # Selective dynamics
-        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
-        # other check
-        if (not isinstance(self.maxiter_trans, int)) or (not isinstance(self.maxiter_eig, int)) \
-                or (self.maxiter_trans <= 0) or (self.maxiter_eig <= 0):
-            raise ValueError(f'Invalid value of maxiter: {self.maxiter_trans}. It would be an integer greater than 0.')
-        extra_krylov_dim = int(extra_krylov_dim)
-        if extra_krylov_dim < 1:
-            raise ValueError(f"At least one time extra krylov eigenvalues is required to ensure the stability.")
-
-        # set variables device
-        if isinstance(func, nn.Module):
-            func = func.to(self.device)
-            func.zero_grad()
-        if isinstance(grad_func_, nn.Module):
-            grad_func_ = grad_func_.to(self.device)
-        X = X.to(self.device)
-        X_diff = X_diff.to(self.device)
-        v = X_diff.mul(atom_masks)
-        #plist = list()  # TEST <<<<
-        is_main_loop_converge = False
-        # initialize
-        #   Constants
-        steplength_scheme = self.steplength_sheme
-        max_steplength = self.steplength
-        _stp_cache = th.scalar_tensor(1., device=self.device, dtype=X.dtype)
-        EIG_THRES_NEG = th.scalar_tensor(self.neg_spectra_cutoff, dtype=X.dtype, device=self.device)
-        EIG_THRES_POS = th.scalar_tensor(self.pos_spectra_cutoff, dtype=X.dtype, device=self.device)
-        MORSE_INDEX = self._morse_index
-        if n_atom <= (MORSE_INDEX + extra_krylov_dim):
-            raise ValueError(f"The sum of the Morse index and extra Krylov dimensions is larger than total free degree.")
-        DELTA2 = th.full((n_true_batch, 1), max_steplength**2, device=self.device, dtype=X.dtype)
-        IOTA1 = 0.25
-        IOTA2 = 0.75
-        #   init Krylov
-        y, g, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC = self.EigenFinder.run(
-            func=func,
-            X=X,
-            v=v,
-            grad_func=grad_func_,
-            func_args=func_args,
-            func_kwargs=func_kwargs,
-            grad_func_args=grad_func_args,
-            grad_func_kwargs=grad_func_kwargs,
-            is_grad_func_contain_y=is_grad_func_contain_y,
-            require_grad=require_grad,
-            fixed_atom_tensor=atom_masks,
-            batch_indices=self.batch_tensor,
-            eigen_order=MORSE_INDEX + extra_krylov_dim
-        )
-        # y: (B, )
-        # g: (1, B*A, D)
-        # KRYLOV_EIGENVEC: (K, B*A, D), K is the Krylov subspaces dimension.
-        # KRYLOV_EIGENVAL: (B, K, )
-        y_old = th.full_like(y, th.inf, device=self.device)
-        # Main loop
-        batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
-        t_st = time.perf_counter()
-        with th.no_grad():
-            for i in range(self.maxiter_trans):
-                #plist.append(X[:, None, :, 0].clone().numpy(force=True))  # TEST <<<<<<<<<<<<<
-                # Section: check threshold  <<<
-                # threshold.
-                min_eig = KRYLOV_EIGENVAL[:, 0]  # (B, )
-                converge_mask_curve = (min_eig < 0.).reshape(1, -1, 1)
-                F_eps = index_ops.index_reduce(
-                    th.max(th.abs(g), dim=-1, keepdim=True).values,
-                    self.batch_scatter, 1, 'amax', -th.inf
-                )  # (1, B, 1)
-                E_eps = th.abs(y - y_old)
-                converge_mask_g = (F_eps < self.F_threshold)
-                converge_mask_e = th.lt(E_eps, self.E_threshold).reshape(1, -1, 1)
-                converge_mask = converge_mask_curve & converge_mask_g & converge_mask_e  # (1, B, 1)
-                y_old = y.clone()
-                # print
-                if self.verbose > 0:
-                    self.logger.info(
-                        f"Translation {i:>5d}\n "
-                        f"MAD_Energies: {np.array2string(E_eps.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"MAX_F:        {np.array2string(F_eps.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"Curvature:    {np.array2string(min_eig.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"Energies:     {np.array2string(y.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"Converged:    {np.array2string(converge_mask.squeeze().numpy(force=True), **STRING_ARRAY_FORMAT)}\n "
-                        f"TIME:         {time.perf_counter() - t_st:>6.4f} s"
-                    )
-                    t_st = time.perf_counter()
-                # OUTPUT COORD
-                self.handle_arrays_print(
-                    self.logger,
-                    batch_indices,
-                    batch_slice_indx,
-                    ((X, g.neg()), ),
-                    (('Coordinates', 'Forces'), ),
-                    verbose=self.verbose,
-                )
-                # judge thres
-                if th.all(converge_mask):
-                    is_main_loop_converge = True
-                    break
-                converge_mask_short = converge_mask
-                converge_mask = converge_mask[:, self.batch_scatter, ...]  # (1, sumB*A, 1)
-
-                # Section: dynamically update batch, remove the already converged ones.
-                func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                    ~converge_mask_short.squeeze(),
-                    func_args,
-                    func_kwargs,
-                    grad_func_args,
-                    grad_func_kwargs
-                )
-                select_mask = ~(converge_mask[0, :, 0])  # (sumB*A, )
-                select_mask_short = ~converge_mask_short[0, :, 0]  # (B, )
-                n_local_batch = th.sum(select_mask_short)
-                X_ = X[:, select_mask, :]
-                g_ = g[:, select_mask, :]  # (1, ba, D)
-                sub_eigvec_ = KRYLOV_EIGENVEC[:, select_mask, :]        # (K, ba, D)
-                sub_eigval_ = KRYLOV_EIGENVAL[select_mask_short, ...]  # (b, K)
-
-                atom_masks_ = atom_masks[:, select_mask, :]
-                batch_tensor_ = self.batch_tensor[select_mask_short]
-                batch_scatter_ = th.repeat_interleave(
-                    batch_tensor_indx_cache[:len(batch_tensor_)],
-                    batch_tensor_,
-                    dim=0
-                )
-
-                # Section: Transition to the saddle  <<<
-                # Krylov subspace Newton Search
-                #   spectra modification. The unconverged Krylov eigenvec are not reliable, thus dropping them.
-                spectra_cut_off = (
-                        MORSE_INDEX * sub_eigval_[:, 0].abs() +
-                        extra_krylov_dim * sub_eigval_[:, -1] +
-                        batch_tensor_ - MORSE_INDEX - extra_krylov_dim
-                ) / batch_tensor_
-                spectra_cut_off.unsqueeze_(-1)
-                #print(f"neg_cut_val: {spectra_cut_off}")
-                T = th.zeros_like(sub_eigval_[:, :MORSE_INDEX + extra_krylov_dim])
-                T[:, :MORSE_INDEX] = sub_eigval_[:, :MORSE_INDEX].clamp(-spectra_cut_off, EIG_THRES_NEG)
-                T[:, MORSE_INDEX:] = sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim].clamp(EIG_THRES_POS, None)
-                sub_eigvec_cut_ = sub_eigvec_[:MORSE_INDEX + extra_krylov_dim]
-                Vg = index_ops.index_reduce(
-                    th.sum(sub_eigvec_cut_ * g_, dim=-1),
-                    batch_scatter_,
-                    dim=1,
-                    out_size=n_local_batch
-                )  # (K, b)
-                # the complement positive-definite space
-                #   x' += a * (I - V V^T) g, a > 0.
-                dX_complement = g_ - th.einsum("kbd, kb -> bd", sub_eigvec_cut_, Vg.index_select(1, batch_scatter_))  # (1, ba, D)
-                # self.logger.debug(f"TRANSLATION: dX_complement:\n{dX_complement}")
-                # complement trust-reg:
-                dX_comp_square_ = th.sum(
-                    index_ops.index_inner_product(dX_complement, dX_complement, 1, batch_scatter_, out_size=n_local_batch),
-                    dim=-1, keepdim=True
-                )  # (1, b, 1)
-                #complement_steplength = (DELTA_cmp / dX_comp_norm_).clamp_max_(1.).index_select(1, batch_scatter_)
-                if steplength_scheme == 'trust_region':
-                    #   Section: trust region search (K, ba, D) (1, ba, D)
-                    DELTA2_ = DELTA2[select_mask_short, ...]  # (b, 1)
-                    steplength_ = _stp_cache
-                    mu = self._diag_trust_region(Vg, T, dX_comp_square_[0], DELTA2_, )
-                    #print(f"{i}: mu = {mu.tolist()}")
-                    #(D + mu D ^ -1)
-                    T_inv = (T + mu * T.reciprocal()).reciprocal_()
-                    complement_steplength = (mu + 1.).reciprocal_().index_select(0, batch_scatter_).unsqueeze(0)
-                    #print(f"{i}: T_inv = {T_inv}")
-
-                else:
-                    T_inv = T.reciprocal()
-                    complement_steplength = _stp_cache
-                #   x' = - V_nk Q_kk Ainv_kk Q^T V^T g_n
-                # sub_eigvec_cut_: (k, ba, d), T_inv: (b, k)
-                dX_tangent_ = th.einsum(
-                    "kad, ak, ka -> ad",
-                    sub_eigvec_cut_,
-                    T_inv.index_select(0, batch_scatter_),
-                    Vg.index_select(1, batch_scatter_)
-                ).unsqueeze(0)
-                dX_ = th.addcmul(dX_tangent_, dX_complement, complement_steplength).neg_()
-
-                dX_norm_ = th.sum(
-                    index_ops.index_inner_product(dX_, dX_, 1, batch_scatter_, out_size=n_local_batch),
-                    dim=-1, keepdim=True
-                ).sqrt_()  # (1, B, 1)
-
-                #   where is positive definition zone
-                is_neg_curv = (sub_eigval_[:, 0] < 0.).index_select(0, batch_scatter_).reshape(1, -1, 1)
-                # steplength search
-                if steplength_scheme == 'line_search':
-                    steplength_ = th.full((1, X_.shape[1], 1), max_steplength, dtype=X.dtype, device=X.device)
-                    steplength_ = self._curve_cond_linesearch(
-                        func,
-                        func_args_,
-                        func_kwargs_,
-                        grad_func_,
-                        grad_func_args_,
-                        grad_func_kwargs_,
-                        X_,
-                        dX_,
-                        g_,
-                        steplength_,
-                        max_steplength,
-                        n_local_batch,
-                        batch_scatter_,
-                        is_grad_func_contain_y,
-                        require_grad,
-                        atom_masks_
-                    )
-                elif steplength_scheme == 'line_newton':
-                    steplength_ = self._newton_steplength(
-                        func,
-                        func_args_,
-                        func_kwargs_,
-                        grad_func_,
-                        grad_func_args_,
-                        grad_func_kwargs_,
-                        X_,
-                        dX_,
-                        g_,
-                        max_steplength,
-                        max_steplength,
-                        n_local_batch,
-                        batch_scatter_,
-                        is_grad_func_contain_y,
-                        require_grad,
-                        atom_masks_
-                    )
-                elif steplength_scheme == 'trust_region':
-                    # prepare updating trust-region radii Delta
-                    g_norm_ = th.sum(
-                        index_ops.index_inner_product(g_, g_, 1, batch_scatter_, out_size=n_local_batch),
-                        dim=-1, keepdim=True
-                    ).sqrt_()  # (1, B, 1)
-                    #print(f"grad_norm: {g_norm_.squeeze().tolist()}")
-                    # (b, 1)/((b, k)**2 + (b, 1))
-                    g_Gg_norm_ = (th.einsum('bk,bk,bk->b', mu / (T ** 2 + mu), Vg.T, Vg.T).unsqueeze(-1)
-                                  + (mu / (1. + mu)) ** 2 * dX_comp_square_[0]).sqrt_().reshape(1, -1, 1)
-
-                    predicted_grad_desc_ = g_norm_ - g_Gg_norm_
-                    #print(f"predicted_grad_desc: {predicted_grad_desc_.squeeze().tolist()}")
-                else:
-                    raise NotImplementedError
-
-                ##   main update
-                dX_ = th.where(
-                    is_neg_curv,
-                    dX_,
-                    dX_ + 0.1 * th.randn_like(dX_) * dX_norm_.index_select(1, batch_scatter_)
-                )
-
-                X_.addcmul_(steplength_ * dX_, atom_masks_)
-                # reinsurance
-                #print(f"{i}: displacement length = {dX_norm_}")
-                _small_dX_ = (dX_norm_ < 1.e-6)  # (1, B0, 1)
-                if th.any(_small_dX_):
-                    _too_small_step_indx = th.where(select_mask_short)[0][th.where(_small_dX_)[0]]
-                    warnings.warn(
-                        RuntimeWarning(
-                        f'Convergence is not met while the steplengths of {_too_small_step_indx.tolist()}-th structure(s) are 0. '
-                        )
-                    )
-                    if th.all(_small_dX_):
-                        self.logger.error('ERROR: All unconverged structures reached 0 steplength. LOOP BREAK.')
-                        break
-
-                # Section: Find Eigen at new points  <<<
-                # update initial guess v_
-                #   v_ = Q V[:, 0], the invariant space given by last Lanczos iteration
-                v_ = th.mean(sub_eigvec_cut_, dim=0, keepdim=True) # (1, ba, D)
-                #   Lanczos finder
-                y_, g_, sub_eigval_, sub_eigvec_ = self.EigenFinder.run(
-                    func=func,
-                    X=X_,
-                    v=v_,
-                    grad_func=grad_func_,
-                    func_args=func_args_,
-                    func_kwargs=func_kwargs_,
-                    grad_func_args=grad_func_args_,
-                    grad_func_kwargs=grad_func_kwargs_,
-                    is_grad_func_contain_y=is_grad_func_contain_y,
-                    require_grad=require_grad,
-                    fixed_atom_tensor=atom_masks_,
-                    batch_indices=batch_tensor_,
-                    eigen_order=MORSE_INDEX + extra_krylov_dim
-                )
-                #print(f"{i}: Gradient norm = {th.linalg.norm(g_)}")
-
-                # update origin variables
-                select_indices = th.where(select_mask)[0]
-                select_indices_short = th.where(select_mask_short)[0]
-                y.index_copy_(0, select_indices_short, y_)
-                v.index_copy_(1, select_indices, v_)
-                X.index_copy_(1, select_indices, X_)
-                g.index_copy_(1, select_indices, g_)
-                KRYLOV_EIGENVEC.index_copy_(1, select_indices, sub_eigvec_)
-                KRYLOV_EIGENVAL.index_copy_(0, select_indices_short, sub_eigval_)
-
-                if self.steplength_sheme == 'trust_region':
-                    # Section Now update trust-region radii Delta
-                    g_norm_new_ = th.sum(
-                        index_ops.index_inner_product(g_, g_, 1, batch_scatter_, out_size=n_local_batch),
-                        dim=-1, keepdim=True
-                    ).sqrt_()  # (1, B, 1)
-                    rho = th.where(
-                        predicted_grad_desc_ < 0.,
-                        0.,
-                        (g_norm_ - g_norm_new_) / predicted_grad_desc_
-                    )
-                    _DELTA = DELTA2_.sqrt()
-                    _DELTA = th.where(
-                        rho >= IOTA2,
-                        (_DELTA * 1.1).clamp_max_(self._trust_reg_rad_max),
-                        th.where(
-                            (rho >= IOTA1), #| (g_norm_new_ < IOTA2),
-                            _DELTA,
-                            (_DELTA * 0.5).clamp_min_(self._trust_reg_rad_min)
-                        )
-                    )
-                    DELTA2_ = _DELTA.square_().reshape(-1, 1)
-                    DELTA2.index_copy_(0, select_indices_short, DELTA2_)
-                    #print(f"\npredicted_grad_desc: {predicted_grad_desc_.squeeze().tolist()}\n"
-                    #      f"g_norm: {g_norm_new_.squeeze().tolist()}\nrho: {rho.squeeze().tolist()}\n"
-                    #      f"Delta2 now: {DELTA2_.squeeze().tolist()}\n")
-
-                # Section DEBUG
-                #var_dict = {}
-                #for var_name, var in locals().items():
-                #    if isinstance(var, th.Tensor):
-                #        mem = var.untyped_storage()
-                #        if mem not in var_dict:
-                #            var_dict[mem] = var_name
-                #        else:
-                #            print('*'*80 + f"\n{var_name} and {var_dict[mem]} share the same memory.\n" + '*'*80)
-                # Section END <<<<<<<<
-
-        if self.verbose:
-            if is_main_loop_converge:
-                self.logger.info('-' * 100 + '\nAll Structures Were Converged.\nMAIN LOOP Done.')
-            else:
-                self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
-
-        if output_grad:
-            return y, X, g
+            spectra_inv = (
+                spectra + mu * spectra.reciprocal()
+            ).reciprocal_()
+            complement_step = (
+                (mu + 1.)
+                .reciprocal_()
+                .index_select(0, batch_scatter)
+                .unsqueeze(0)
+            )
         else:
-            return y, X#, plist  # TEST <<<<<<
+            mu = None
+            spectra_inv = spectra.reciprocal()
+            complement_step = th.ones(
+                (), dtype=X.dtype, device=X.device,
+            )
+
+        # Reconstruct the spectral Newton component in Cartesian coordinates,
+        # then add the independently scaled unresolved complement.
+        tangent = th.einsum(
+            'kad,ak,ka->ad',
+            eigenvec_cut,
+            spectra_inv.index_select(0, batch_scatter),
+            projected_gradient.index_select(1, batch_scatter),
+        ).unsqueeze(0)
+        direction = th.addcmul(
+            tangent, complement, complement_step,
+        ).neg_()
+        direction_norm = th.sum(
+            index_ops.index_inner_product(
+                direction,
+                direction,
+                1,
+                batch_scatter,
+                out_size=n_local_batch,
+            ),
+            dim=-1,
+            keepdim=True,
+        ).sqrt_()
+        has_negative_curvature = (
+            eigenval[:, 0]
+            .lt(0.)
+            .index_select(0, batch_scatter)
+            .reshape(1, -1, 1)
+        )
+
+        # The three experimental step policies share the same modified Newton
+        # direction. Trust-region already scales the direction through mu and
+        # therefore applies a scalar unit steplength below.
+        if self.steplength_sheme == 'line_search':
+            steplength = th.full(
+                (1, X.shape[1], 1),
+                self.steplength,
+                dtype=X.dtype,
+                device=X.device,
+            )
+            steplength = self._curve_cond_linesearch(
+                X,
+                direction,
+                g,
+                steplength,
+                n_local_batch,
+                batch_scatter,
+                atom_masks,
+            )
+        elif self.steplength_sheme == 'line_newton':
+            steplength = self._newton_steplength(
+                X,
+                direction,
+                g,
+                n_local_batch,
+                batch_scatter,
+                atom_masks,
+            )
+        elif self.steplength_sheme == 'trust_region':
+            steplength = th.ones((), dtype=X.dtype, device=X.device)
+            gradient_norm = th.sum(
+                index_ops.index_inner_product(
+                    g, g, 1, batch_scatter, out_size=n_local_batch,
+                ),
+                dim=-1,
+                keepdim=True,
+            ).sqrt_()
+            residual_norm = (
+                th.einsum(
+                    'bk,bk,bk->b',
+                    mu / (spectra ** 2 + mu),
+                    projected_gradient.T,
+                    projected_gradient.T,
+                ).unsqueeze(-1)
+                + (mu / (1. + mu)) ** 2 * complement_square[0]
+            ).sqrt_().reshape(1, -1, 1)
+            predicted_gradient_descent = gradient_norm - residual_norm
+        else:
+            raise NotImplementedError(
+                f'Unknown steplength scheme: {self.steplength_sheme}.'
+            )
+
+        # Before a negative mode is located, perturb the direction to avoid
+        # repeatedly following a purely positive-curvature Newton trajectory.
+        # This decision is structure-local but is expanded through the atom
+        # scatter so every coordinate of that structure follows one branch.
+        direction = th.where(
+            has_negative_curvature,
+            direction,
+            direction + 0.1 * th.randn_like(direction) * direction_norm.index_select(1, batch_scatter),
+        )
+        displacement = steplength * direction * atom_masks
+        displacement_norm = th.sum(
+            index_ops.index_inner_product(
+                displacement,
+                displacement,
+                1,
+                batch_scatter,
+                out_size=n_local_batch,
+            ),
+            dim=-1,
+            keepdim=True,
+        ).sqrt_()
+        # `step_tolerance` is an absolute floating-point floor for the applied
+        # Cartesian displacement, not an energy/force convergence criterion.
+        # For n atoms in d dimensions the displacement norm combines n*d
+        # components; assuming independent roundoff at the coordinate scale,
+        # its accumulated noise is approximately sqrt(n*d) * machine epsilon.
+        # This system-size scaling avoids one hard-coded threshold for every
+        # structure while remaining far below a physical optimizer tolerance.
+        # It follows X.dtype and therefore also follows BT_FLOAT_TYPE. The test
+        # is made after step selection and fixed-atom masking, so it measures
+        # the coordinates that would actually be added to X.
+        step_tolerance = (
+            batch_tensor.to(dtype=X.dtype)
+            .mul(X.shape[-1])
+            .sqrt_()
+            .mul_(th.finfo(X.dtype).eps)
+            .reshape(1, -1, 1)
+        )
+        small_step = displacement_norm <= step_tolerance
+        if th.all(small_step):
+            raise IterationStuckError(
+                'All active iterations are stuck because their coordinate '
+                'displacements are below the numerical threshold.'
+            )
+        elif th.any(small_step):
+            warnings.warn(
+                RuntimeWarning(
+                    'Convergence is not met while some coordinate '
+                    'displacements are below the numerical threshold.'
+                )
+            )
+        # This is the coordinate mutation declared by `_is_inplace_update`.
+        # It occurs only after the stuck check, leaving X and its cached model
+        # state mutually consistent when IterationStuckError exits the loop.
+        # BaseOpt has also protected any aliased output buffers before entry.
+        X.add_(displacement)
+
+        # Reuse the retained low-mode subspace as the next Lanczos seed. The
+        # returned midpoint energy/gradient belong to the translated X and are
+        # handed back to BaseOpt through `_store_eigen_result`.
+        next_v = th.mean(eigenvec_cut, dim=0, keepdim=True)
+        energies, gradients, eigenval, eigenvec = self.EigenFinder.run(
+            func=self._func,
+            X=X,
+            v=next_v,
+            grad_func=self._grad_func,
+            func_args=self.s.func_args,
+            func_kwargs=self.s.func_kwargs,
+            grad_func_args=self.s.grad_func_args,
+            grad_func_kwargs=self.s.grad_func_kwargs,
+            is_grad_func_contain_y=self._is_grad_func_contain_y,
+            require_grad=self._require_grad,
+            fixed_atom_tensor=atom_masks,
+            batch_indices=batch_tensor,
+            eigen_order=morse_index + extra,
+        )
+
+        if self.steplength_sheme == 'trust_region':
+            # Compare predicted and observed gradient-norm reduction, then
+            # update each structure's radius for the next outer iteration.
+            # The radius is local working state here; it is not published to
+            # the full batch until the energy, gradient, and Ritz state are all
+            # ready to be committed together below.
+            new_gradient_norm = th.sum(
+                index_ops.index_inner_product(
+                    gradients,
+                    gradients,
+                    1,
+                    batch_scatter,
+                    out_size=n_local_batch,
+                ),
+                dim=-1,
+                keepdim=True,
+            ).sqrt_()
+            rho = th.where(
+                predicted_gradient_descent < 0.,
+                0.,
+                (
+                    gradient_norm - new_gradient_norm
+                ) / predicted_gradient_descent,
+            )
+            radius = self._delta2.sqrt()
+            radius = th.where(
+                rho >= 0.75,
+                (radius * 1.1).clamp_max_(self._trust_reg_rad_max),
+                th.where(
+                    rho >= 0.25,
+                    radius,
+                    (radius * 0.5).clamp_min_(self._trust_reg_rad_min),
+                ),
+            )
+            self._delta2 = radius.square_().reshape(-1, 1)
+
+        self._store_eigen_result(
+            energies, gradients, eigenval, eigenvec,
+        )
+        return None
+
+    def _update_algo_batches(
+            self,
+            select_indices: th.Tensor,
+            select_indices_short: th.Tensor | None,
+    ) -> None:
+        # Commit the active eigen solve and its next trust radius together so
+        # the following BaseOpt iteration observes one consistent state. The
+        # dynamic-batch path scatters only active structures; removed samples
+        # retain the last state at which BaseOpt declared them converged.
+        self._update_eigen_batches(select_indices, select_indices_short)
+        if self._hold_samples:
+            self.delta2 = self._delta2
+        else:
+            self.delta2.index_copy_(
+                0, select_indices_short, self._delta2,
+            )
 
 
-class KrylovDynamics(BaseMotion):
-    """
-    Using the krylov subspace Hessian with spectra modification to search 1-order saddle points
-    """
+class KrylovDynamics(_KrylovBase):
+    """Krylov dynamics transition-state search."""
 
     def __init__(
             self,
@@ -1198,452 +927,277 @@ class KrylovDynamics(BaseMotion):
             fac_inc: float = 1.1,
             fac_dec: float = 0.5,
             N_min: int = 5,
-    ):
-        warnings.filterwarnings('always')
-        self.E_threshold = float(E_threshold)
-        self.Torque_thres = abs(float(Torque_thres))
-        self.Eigen_thres = abs(float(Eigen_thres))
-        self.F_threshold = float(F_threshold)
-        self.maxiter_trans = int(maxiter_trans)
-        assert (maxiter_eig > 0) and isinstance(maxiter_eig, int), '`maxiter_rot` must be an integer greater than 0.'
-        self.maxiter_eig = int(maxiter_eig)
-        self.max_steplength = float(steplength) * 5.
-        self.dx = float(dx)
-        self.device = device
-        self.verbose = verbose
-        self._morse_index = int(morse_index)
+    ) -> None:
+        super().__init__(
+            'KrylovDynamics',
+            E_threshold, Torque_thres, Eigen_thres, F_threshold,
+            maxiter_trans, maxiter_eig, steplength, dx, device, verbose,
+            morse_index, neg_spectra_cutoff, pos_spectra_cutoff,
+        )
         self.steplength_sheme = steplength_sheme
-
-        self.alpha = alpha
-        self.alpha_fac = alpha_fac
-        self.fac_inc = fac_inc
-        self.fac_dec = fac_dec
-        self.N_min = N_min
+        self.max_steplength = float(steplength) * 5.
+        self.alpha = float(alpha)
+        self.alpha_fac = float(alpha_fac)
+        self.fac_inc = float(fac_inc)
+        self.fac_dec = float(fac_dec)
+        self.N_min = int(N_min)
         self.t_init = float(steplength)
 
-        if self._morse_index >= self.maxiter_eig:
-            raise ValueError(
-                f"To solve k-order saddle, one must ensure the krylov subspace dimension sufficiently higher than k, "
-                f"but got morse index {self._morse_index} and subspace dim {self.maxiter_eig}."
-            )
-        elif self._morse_index < 0:
-            raise ValueError(f"Morse index should be positive, but got {self._morse_index}.")
+        self.t: th.Tensor | None = None
+        self.a: th.Tensor | None = None
+        self.n_count: th.Tensor | None = None
+        self.veloc: th.Tensor | None = None
+        self._t: th.Tensor | None = None
+        self._a: th.Tensor | None = None
+        self._n_count: th.Tensor | None = None
+        self._veloc: th.Tensor | None = None
 
-        # INNER parameter
-        self.neg_spectra_cutoff = - abs(float(neg_spectra_cutoff))  # the negative clamp of k-th spectra
-        self.pos_spectra_cutoff = abs(float(pos_spectra_cutoff))    # the positive clamp of (n - k)-th spectra
-
-        self.EigenFinder = FindEigen(
-            self.Torque_thres,
-            self.Eigen_thres,
-            self.maxiter_eig,
-            self.dx,
-            self.device,
-            self.verbose,
-            _hold_samples=True
+    def initialize_algo_param(self) -> None:
+        """Initialize FIRE-like translation state."""
+        X = self.s.X
+        # FIRE's t, a, and positive-power count are logically structure-level,
+        # but are stored in atom layout so they can share BaseOpt's existing
+        # active-atom selection/scatter protocol with velocity. Every atom of a
+        # structure receives the same value and follows the same FIRE branch.
+        self.t = th.full(
+            (1, X.shape[1], 1),
+            self.t_init,
+            device=self.device,
+            dtype=X.dtype,
         )
+        self.a = th.full_like(self.t, self.alpha)
+        self.n_count = th.zeros_like(self.t, dtype=th.int)
+        self.veloc = th.zeros_like(X)
 
-        # logger
-        super().__init__()
-        self.init_logger('Main.TS')
-
-    def _update_batch(self, mask: th.Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict):
-        """
-        Default update method for the input of func if the func has non-opt variables, i.e., the identical transform.
-        Args:
-            mask:
-
-        Returns:
-
-        """
-        return func_args, func_kwargs, grad_func_args, grad_func_kwargs
-
-    def _linear_search(self, dX_, ):
-        """
-        Linear search for dimer translation
-        Returns:
-
-        """
-        # TODO, adding linear search algo. to determine steplength.
-        pass
-
-    def set_batch_updater(
+    def _update_algo_param(
             self,
-            method_trans: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]],
-            method_rot: Callable[[th.Tensor, Tuple | None, Dict | None, Tuple | None, Dict | None], Tuple[Tuple, Dict, Tuple, Dict]] | None = None,
+            select_mask: th.Tensor,
+            select_mask_short: th.Tensor | None,
+            batch_scatter_indices: th.Tensor | None,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
+            displace: th.Tensor | None,
     ) -> None:
-        """
-        Set a method to update the taget function when variables change.
-        It receives a mask tensor of shape (n_batch, ) that only selects the `True` part to input to the function, and receives the old
-        `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`,
-        returns the corresponding masked new `func_args`, `func_kwargs`, `grad_func_args`, and `grad_func_kwargs`.
-
-        This method is used to dynamically 'remove' the samples which have been converged in a batch to avoid
-        redundant calculation of converged samples.
-
-        Default transform is identical transform (i.e., do nothing)
-        Args:
-            method_trans: Callable(mask: Tensor, func_args: Tuple, func_kwargs: Dict, grad_func_args: Tuple, grad_func_kwargs: Dict) -> Tuple[Tuple, Dict, Tuple, Dict],
-            method_rot: batch updater for rotations. the method of updating function arguments for a mask.
-
-        Returns: None
-        """
-        if method_rot is not None:
-            self.EigenFinder.set_batch_updater(method_rot)
+        super()._update_algo_param(
+            select_mask, select_mask_short, batch_scatter_indices,
+            g, g_old, p, displace,
+        )
+        # Underscored tensors are the active-batch working state. Hold mode may
+        # alias the full tensors because BaseOpt will not scatter them later.
+        if self._hold_samples:
+            self._t = self.t
+            self._a = self.a
+            self._n_count = self.n_count
+            self._veloc = self.veloc
         else:
-            self.EigenFinder._hold_samples = True
-        self._update_batch = method_trans
+            self._t = self.t[:, select_mask, :]
+            self._a = self.a[:, select_mask, :]
+            self._n_count = self.n_count[:, select_mask, :]
+            self._veloc = self.veloc[:, select_mask, :]
 
-    def run(
+    def _update_direction(
             self,
-            func: Any | nn.Module,
+            g: th.Tensor,
+            g_old: th.Tensor,
+            p: th.Tensor,
             X: th.Tensor,
-            X_diff: th.Tensor | None = None,
-            grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
-            func_kwargs=None,
-            grad_func_args: Sequence = tuple(),
-            grad_func_kwargs=None,
-            is_grad_func_contain_y: bool = True,
-            require_grad: bool = False,
-            output_grad: bool = False,
-            fixed_atom_tensor: Optional[th.Tensor] = None,
-            batch_indices: Optional[th.Tensor | List] = None,
-            extra_krylov_dim: int = 1
-    ):
-        """
-        run krylov search algo.
-        Args:
-            func:
-            X:
-            X_diff:
-            grad_func:
-            func_args:
-            func_kwargs:
-            grad_func_args:
-            grad_func_kwargs:
-            is_grad_func_contain_y:
-            require_grad:
-            output_grad:
-            fixed_atom_tensor:
-            batch_indices:
-            extra_krylov_dim: the number of extra converged eigenvalues higher than `the morse index`
-                requiring EigenFiner to solve. It can provide more 2nd order information to accelerate the convergence.
+            batch_scatter_indices: th.Tensor | None,
+    ) -> None:
+        if batch_scatter_indices is None:
+            raise NotImplementedError('Krylov requires irregular batch_indices.')
 
-        Returns:
+        # As in KrylovNewton, this hook owns the complete coordinate update and
+        # publishes the following eigen solve through BaseOpt's cache protocol.
+        batch_scatter = batch_scatter_indices
+        batch_tensor = self.s.batch_tensor
+        atom_masks = self.s.atom_masks
+        n_local_batch = self._eigenval.shape[0]
+        morse_index = self._morse_index
+        extra = self._extra_krylov_dim
+        eigenval = self._eigenval
+        eigenvec = self._eigenvec
 
-        """
-        if grad_func_kwargs is None:
-            grad_func_kwargs = dict()
-        if func_kwargs is None:
-            func_kwargs = dict()
-        func_args = tuple(func_args)
-        grad_func_args = tuple(grad_func_args)
-        # Check batch indices; irregular batch
-        if isinstance(X, th.Tensor):
-            if len(X.shape) == 2:
-                X = X.unsqueeze(0)
-            elif len(X.shape) != 3:
-                raise ValueError(f'`X` must be 2D or 3D, but got shape [{X.shape}]')
-            n_batch, n_atom, n_dim = X.shape
-        else:
-            raise TypeError(f'`X` must be torch.Tensor, but occurred {type(X)}.')
-        if X_diff is None:
-            X_diff = th.randn_like(X)
-        elif isinstance(X_diff, th.Tensor):
-            if len(X_diff.shape) == 2:
-                X_diff = X_diff.unsqueeze(0)
-            elif len(X_diff.shape) != 3:
-                raise ValueError(f'`X_diff` must be 2D or 3D, but got shape [{X_diff.shape}]')
-        else:
-            raise TypeError(f'`X_diff` must be torch.Tensor, but occurred {type(X_diff)}.')
+        # Use the same deliberately coarse cutoff as KrylovNewton:
+        #
+        #   (m * |lambda_min| + q * lambda_max + (n - m - q) * 1) / n.
+        #
+        # The two Ritz edge values represent the retained unstable and positive
+        # modes, while omitted modes retain unit curvature. This is only a
+        # low-cost per-structure scale for clipping the modified spectrum, not
+        # a claim that the interior spectrum has been reconstructed. Lanczos'
+        # two-sided edge convergence makes `amax` above the Morse subspace a
+        # reasonable positive-edge estimate, and it cannot be displaced by the
+        # trailing zero padding used for unequal effective Krylov dimensions.
+        max_pos_eigenval = eigenval[:, morse_index:].amax(dim=1)
+        spectra_cut_off = (
+            morse_index * eigenval[:, 0].abs()
+            + extra * max_pos_eigenval
+            + batch_tensor - morse_index - extra
+        ) / batch_tensor
+        spectra_cut_off.unsqueeze_(-1)
+        eig_thres_neg = th.as_tensor(
+            self.neg_spectra_cutoff, dtype=X.dtype, device=X.device,
+        )
+        eig_thres_pos = th.as_tensor(
+            self.pos_spectra_cutoff, dtype=X.dtype, device=X.device,
+        )
+        spectra = th.zeros_like(eigenval[:, :morse_index + extra])
+        spectra[:, :morse_index] = eigenval[:, :morse_index].clamp(
+            -spectra_cut_off, eig_thres_neg,
+        )
+        spectra[:, morse_index:] = eigenval[
+            :, morse_index:morse_index + extra
+        ].clamp(eig_thres_pos, spectra_cut_off)
+        spectra_inv = spectra.reciprocal()
 
-        grad_func_, require_grad, is_grad_func_contain_y = self.handle_grad_func(grad_func, is_grad_func_contain_y, require_grad)
-        # batch_check
-        if batch_indices is None:
-            raise NotImplementedError(
-                f'Regular batch version is not implemented yet. You may specify a `batch_indices` with identity values instead.'
-                f'It is fully compatible with regular batches, but merely a little performance loss.'
-            )
-        n_true_batch, batch_indices, self.batch_tensor, self.batch_scatter, batch_slice_indx = self.handle_batch_indices(
-            batch_indices, n_batch, device=self.device
+        # Apply the inverse modified spectrum only in the resolved Ritz
+        # subspace. The unresolved orthogonal component keeps unit response.
+        eigenvec_cut = eigenvec[:morse_index + extra]
+        projected_gradient = index_ops.index_reduce(
+            th.sum(eigenvec_cut * g, dim=-1),
+            batch_scatter,
+            dim=1,
+            out_size=n_local_batch,
+        )
+        complement = g - th.einsum(
+            'kbd,kb->bd',
+            eigenvec_cut,
+            projected_gradient.index_select(1, batch_scatter),
+        )
+        tangent = th.einsum(
+            'kad,ak,ka->ad',
+            eigenvec_cut,
+            spectra_inv.index_select(0, batch_scatter),
+            projected_gradient.index_select(1, batch_scatter),
+        ).unsqueeze(0)
+        effective_force = th.add(
+            tangent, complement,
+        ).neg_().mul(atom_masks)
+        force_norm = th.sum(
+            index_ops.index_inner_product(
+                effective_force,
+                effective_force,
+                1,
+                batch_scatter,
+                out_size=n_local_batch,
+            ),
+            dim=-1,
+            keepdim=True,
+        ).sqrt_()
+        # Zero effective force is a valid stationary state; clamping only the
+        # divisor leaves its normalized direction exactly zero.
+        force_norm.clamp_min_(th.finfo(force_norm.dtype).eps)
+
+        force_hat = (
+            effective_force
+            / force_norm.index_select(1, batch_scatter)
+        )
+        # FIRE power is evaluated per structure and then expanded to atoms so
+        # all atoms in one structure share the same accept/reset decision.
+        power = index_ops.index_reduce(
+            th.sum(force_hat * self._veloc, dim=-1, keepdim=True),
+            batch_scatter,
+            dim=1,
+            out_size=n_local_batch,
+        ).index_select(1, batch_scatter)
+        velocity_norm = th.sum(
+            index_ops.index_inner_product(
+                self._veloc,
+                self._veloc,
+                dim=1,
+                batch_indices=batch_scatter,
+                out_size=n_local_batch,
+            ),
+            dim=-1,
+            keepdim=True,
+        ).sqrt_().index_select(1, batch_scatter)
+
+        # FIRE control flow is intentionally structure-local:
+        #   1. mix velocity toward the normalized effective force;
+        #   2. update the consecutive-positive-power counter;
+        #   3. after N_min positive steps, increase dt and reduce mixing a;
+        #   4. on nonpositive power, reduce dt and reset velocity/a/counter;
+        #   5. integrate velocity and then coordinates with the final state.
+        # Structure decisions are already expanded to atom layout, so no atom
+        # within one structure can enter a different FIRE branch.
+        force_hat.mul_(velocity_norm)
+        self._veloc.mul_(1. - self._a)
+        self._veloc.addcmul_(self._a, force_hat)
+        self._n_count += th.where(power > 0., 1, -self._n_count)
+        enough_positive_steps = self._n_count >= self.N_min
+        new_t = (
+            self._t * self.fac_inc
+        ).clamp_max_(self.max_steplength)
+        self._t = th.where(
+            enough_positive_steps, new_t, self._t,
+        )
+        self._a = th.where(
+            enough_positive_steps,
+            self._a * self.alpha_fac,
+            self._a,
         )
 
-        # Selective dynamics
-        atom_masks = self.handle_motion_mask(X, fixed_atom_tensor)
-        # other check
-        if (not isinstance(self.maxiter_trans, int)) or (not isinstance(self.maxiter_eig, int)) \
-                or (self.maxiter_trans <= 0) or (self.maxiter_eig <= 0):
-            raise ValueError(f'Invalid value of maxiter: {self.maxiter_trans}. It would be an integer greater than 0.')
-        extra_krylov_dim = int(extra_krylov_dim)
-        if extra_krylov_dim < 1:
-            raise ValueError(f"At least one time extra krylov eigenvalues is required to ensure the stability.")
+        nonpositive_power = power <= 0.
+        self._t = th.where(
+            nonpositive_power,
+            self._t * self.fac_dec,
+            self._t,
+        )
+        self._veloc.masked_fill_(nonpositive_power, 0.)
+        self._a.masked_fill_(nonpositive_power, self.alpha)
+        # FIRE integration order is v <- v + c F dt, then X <- X + v dt;
+        # consequently a force-only first displacement scales as dt squared.
+        self._veloc.addcmul_(
+            effective_force,
+            self._t,
+            value=9.64853329045427e-3,
+        )
+        X.addcmul_(self._veloc, self._t)
 
-        # set variables device
-        if isinstance(func, nn.Module):
-            func = func.to(self.device)
-            func.zero_grad()
-        if isinstance(grad_func_, nn.Module):
-            grad_func_ = grad_func_.to(self.device)
-        X = X.to(self.device)
-        X_diff = X_diff.to(self.device)
-        v = X_diff.mul(atom_masks)
-        #plist = list()  # TEST <<<<
-        is_main_loop_converge = False
-        # initialize
-        #   Constants
-        _stp_cache = th.scalar_tensor(1., device=self.device, dtype=X.dtype)
-        EIG_THRES_NEG = th.scalar_tensor(self.neg_spectra_cutoff, dtype=X.dtype, device=self.device)
-        EIG_THRES_POS = th.scalar_tensor(self.pos_spectra_cutoff, dtype=X.dtype, device=self.device)
-        MORSE_INDEX = self._morse_index
-        if n_atom <= (MORSE_INDEX + extra_krylov_dim):
-            raise ValueError(f"The sum of the Morse index and extra Krylov dimensions is larger than total free degree.")
-        t = th.full((1, n_atom, 1), self.t_init, device=self.device)
-        a = th.full((1, n_atom, 1), self.alpha, device=self.device)
-        n_count = th.zeros((1, n_atom, 1), dtype=th.int, device=self.device)
-        veloc = th.zeros_like(X, device=self.device)
-        alpha = self.alpha
-        alpha_fac = self.alpha_fac
-        fac_inc = self.fac_inc
-        fac_dec = self.fac_dec
-        N_min = self.N_min
-
-        #   init Krylov
-        y, g, KRYLOV_EIGENVAL, KRYLOV_EIGENVEC = self.EigenFinder.run(
-            func=func,
+        # Refresh the low modes and cache the translated energy/gradient for
+        # BaseOpt instead of evaluating the model a second time.
+        next_v = th.mean(eigenvec_cut, dim=0, keepdim=True)
+        energies, gradients, eigenval, eigenvec = self.EigenFinder.run(
+            func=self._func,
             X=X,
-            v=v,
-            grad_func=grad_func_,
-            func_args=func_args,
-            func_kwargs=func_kwargs,
-            grad_func_args=grad_func_args,
-            grad_func_kwargs=grad_func_kwargs,
-            is_grad_func_contain_y=is_grad_func_contain_y,
-            require_grad=require_grad,
+            v=next_v,
+            grad_func=self._grad_func,
+            func_args=self.s.func_args,
+            func_kwargs=self.s.func_kwargs,
+            grad_func_args=self.s.grad_func_args,
+            grad_func_kwargs=self.s.grad_func_kwargs,
+            is_grad_func_contain_y=self._is_grad_func_contain_y,
+            require_grad=self._require_grad,
             fixed_atom_tensor=atom_masks,
-            batch_indices=self.batch_tensor,
-            eigen_order=MORSE_INDEX + extra_krylov_dim
+            batch_indices=batch_tensor,
+            eigen_order=morse_index + extra,
         )
-        # y: (B, )
-        # g: (1, B*A, D)
-        # KRYLOV_BASES: (K, B*A, D), K is the Krylov subspaces dimension.
-        # KRYLOV_EIGENVAL: (B, K)
-        # KRYLOV_EIGENVEC: (B, K, K)
-        y_old = th.full_like(y, th.inf, device=self.device)
-        # Main loop
-        batch_tensor_indx_cache = th.arange(0, len(self.batch_tensor), dtype=th.int64, device=self.device)
-        t_st = time.perf_counter()
-        with th.no_grad():
-            for i in range(self.maxiter_trans):
-                #plist.append(X[:, None, :, 0].clone().numpy(force=True))  # TEST <<<<<<<<<<<<<
-                # Section: check threshold  <<<
-                # threshold.
-                min_eig = KRYLOV_EIGENVAL[:, 0]  # (B, )
-                converge_mask_curve = (min_eig < 0.).reshape(1, -1, 1)
-                F_eps = index_ops.index_reduce(
-                    th.max(th.abs(g), dim=-1, keepdim=True).values,
-                    self.batch_scatter, 1, 'amax', -th.inf
-                )  # (1, B, 1)
-                E_eps = th.abs(y - y_old)
-                converge_mask_g = (F_eps < self.F_threshold)
-                converge_mask_e = th.lt(E_eps, self.E_threshold).reshape(1, -1, 1)
-                converge_mask = converge_mask_curve & converge_mask_g & converge_mask_e  # (1, B, 1)
-                y_old = y.clone()
-                # print
-                if self.verbose > 0:
-                    self.logger.info(
-                        f"Translation {i:>5d}\n "
-                        f"MAD_Energies: {np.array2string(E_eps.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"MAX_F:        {np.array2string(F_eps.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"Curvature:    {np.array2string(min_eig.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"Energies:     {np.array2string(y.numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}\n "
-                        f"Converged:    {np.array2string(converge_mask.squeeze().numpy(force=True), **STRING_ARRAY_FORMAT)}\n "
-                        f"TIME:         {time.perf_counter() - t_st:>6.4f} s"
-                    )
-                    t_st = time.perf_counter()
-                # OUTPUT COORD
-                self.handle_arrays_print(
-                    self.logger,
-                    batch_indices,
-                    batch_slice_indx,
-                    ((X, g.neg()), ),
-                    (('Coordinates', 'Forces'), ),
-                    verbose=self.verbose,
-                )
-                # judge thres
-                if th.all(converge_mask):
-                    is_main_loop_converge = True
-                    break
-                converge_mask_short = converge_mask
-                converge_mask = converge_mask[:, self.batch_scatter, ...]  # (1, sumB*A, 1)
+        self._store_eigen_result(
+            energies, gradients, eigenval, eigenvec,
+        )
+        return None
 
-                # Section: dynamically update batch, remove the already converged ones.
-                func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                    ~converge_mask_short.squeeze(),
-                    func_args,
-                    func_kwargs,
-                    grad_func_args,
-                    grad_func_kwargs
-                )
-                select_mask = ~(converge_mask[0, :, 0])  # (sumB*A, )
-                select_mask_short = ~converge_mask_short[0, :, 0]  # (B, )
-                n_local_batch = th.sum(select_mask_short)
-                X_ = X[:, select_mask, :]
-                g_ = g[:, select_mask, :]  # (1, ba, D)
-                sub_eigvec_ = KRYLOV_EIGENVEC[:, select_mask, :]        # (K, ba, D)
-                sub_eigval_ = KRYLOV_EIGENVAL[select_mask_short, ...]  # (b, K)
-
-                atom_masks_ = atom_masks[:, select_mask, :]
-                batch_tensor_ = self.batch_tensor[select_mask_short]
-                batch_scatter_ = th.repeat_interleave(
-                    batch_tensor_indx_cache[:len(batch_tensor_)],
-                    batch_tensor_,
-                    dim=0
-                )
-
-                t_: th.Tensor = t[:, select_mask, :]  # (1, sumN, 1)
-                a_ = a[:, select_mask, :]  # (1, sumN, 1)
-                n_count_ = n_count[:, select_mask, :]
-                veloc_ = veloc[:, select_mask, :]
-
-                # Section: Transition to the saddle  <<<
-                # Krylov subspace Newton Search
-                #   spectra modification. The unconverged Krylov eigenvec are not reliable, thus dropping them.
-                spectra_cut_off = (
-                                          MORSE_INDEX * sub_eigval_[:, 0].abs() +
-                                          extra_krylov_dim * sub_eigval_[:, -1] +
-                                          batch_tensor_ - MORSE_INDEX - extra_krylov_dim
-                                  ) / batch_tensor_
-                spectra_cut_off.unsqueeze_(-1)
-                T = th.zeros_like(sub_eigval_[:, :MORSE_INDEX + extra_krylov_dim])
-                T[:, :MORSE_INDEX] = sub_eigval_[:, :MORSE_INDEX].clamp(-spectra_cut_off, EIG_THRES_NEG)
-                T[:, MORSE_INDEX:] = sub_eigval_[:, MORSE_INDEX:MORSE_INDEX + extra_krylov_dim].clamp(
-                    EIG_THRES_POS,
-                    spectra_cut_off
-                )
-                T_inv = T.reciprocal()
-
-                sub_eigvec_cut_ = sub_eigvec_[:MORSE_INDEX + extra_krylov_dim]
-                Vg = index_ops.index_reduce(
-                    th.sum(sub_eigvec_cut_ * g_, dim=-1),
-                    batch_scatter_,
-                    dim=1,
-                    out_size=n_local_batch
-                )  # (K, b)
-                # the complement positive-definite space
-                #   x' += a * (I - V V^T) g, a > 0.
-                dX_complement = g_ - th.einsum("kbd, kb -> bd", sub_eigvec_cut_, Vg.index_select(1, batch_scatter_))  # (1, ba, D)
-                complement_steplength = _stp_cache
-                #   x' = - V_nk Q_kk Ainv_kk Q^T V^T g_n
-                dX_tangent_ = th.einsum(
-                    "kad, ak, ka -> ad",
-                    sub_eigvec_cut_,
-                    T_inv.index_select(0, batch_scatter_),
-                    Vg.index_select(1, batch_scatter_)
-                ).unsqueeze(0)
-                #self.logger.debug(f"TRANSLATION: dX_tengent:\n{dX_tangent_}")
-                Ginv_g_ = th.add(dX_tangent_, dX_complement)  # (1, ba, d)
-                F_ = Ginv_g_.neg() * atom_masks_  # reuse the memory of dX_tangent_
-
-                F_norm_ = th.sum(
-                    index_ops.index_inner_product(F_, F_, 1, batch_scatter_, out_size=n_local_batch),
-                    dim=-1, keepdim=True
-                ).sqrt_()  # (1, B, 1)
-
-                #   where is positive definition zone
-                is_neg_curv = (sub_eigval_[:, 0] < 0.).index_select(0, batch_scatter_).reshape(1, -1, 1)
-                # steplength search
-                # Section <<<<<<<<<<<<<<<<<<<<<
-                # (1, sumN, n_dim)
-                F_hat_ = F_ / F_norm_.index_select(1, batch_scatter_)
-                # (1, b, 1)
-                power_ = index_ops.index_reduce(
-                    th.sum(F_hat_ * veloc_, dim=-1, keepdim=True),
-                    batch_scatter_,
-                    dim=1,
-                    out_size=n_local_batch
-                ).index_select(1, batch_scatter_)
-                # (1, sumN, 1)
-                v_norm_ = th.sum(
-                    index_ops.index_inner_product(
-                        veloc_,
-                        veloc_,
-                        dim=1,
-                        batch_indices=batch_scatter_
-                    ),
-                    dim=-1,
-                    keepdim=True
-                ).sqrt_().index_select(1, batch_scatter_)
-                # update velocity: v = v * (1 - a) + a * |v| * \hat{F}
-                F_hat_.mul_(v_norm_)
-                veloc_.mul_((1. - a_))
-                veloc_.addcmul_(a_, F_hat_)
-                # if P > 0
-                n_count_ += th.where(power_ > 0., 1, -n_count_)  # (1, sumN, 1)
-                is_ncount_gt_Nmin = n_count_ >= N_min
-                #
-                new_t_ = (t_ * fac_inc).clamp_max_(self.max_steplength)
-                t_ = th.where(is_ncount_gt_Nmin, new_t_, t_)
-                a_ = th.where(is_ncount_gt_Nmin, (a_ * alpha_fac), a_)
-                # if P <= 0.
-                is_p_lt_0 = power_ <= 0.
-                t_ = th.where(is_p_lt_0, (t_ * fac_dec), t_)
-                veloc_.masked_fill_(
-                    is_p_lt_0,
-                    0.
-                )
-                a_.masked_fill_(is_p_lt_0, alpha)
-
-                veloc_.addcdiv_(F_, t_, value=9.64853329045427e-3)
-
-                # Section END
-                X_.addcmul_(veloc_, t_)
-
-                # Section: Find Eigen at new points  <<<
-                # update initial guess v_
-                #   v_ = Q V[:, 0], the eigenvec with min eigenval given by last Lanczos iteration
-                v_ = th.mean(sub_eigvec_cut_, dim=0, keepdim=True)  # (1, ba, D)
-                #   Lanczos finder
-                y_, g_, sub_eigval_, sub_eigvec_ = self.EigenFinder.run(
-                    func=func,
-                    X=X_,
-                    v=v_,
-                    grad_func=grad_func_,
-                    func_args=func_args_,
-                    func_kwargs=func_kwargs_,
-                    grad_func_args=grad_func_args_,
-                    grad_func_kwargs=grad_func_kwargs_,
-                    is_grad_func_contain_y=is_grad_func_contain_y,
-                    require_grad=require_grad,
-                    fixed_atom_tensor=atom_masks_,
-                    batch_indices=batch_tensor_,
-                    eigen_order=MORSE_INDEX + extra_krylov_dim
-                )
-                #print(f"{i}: Gradient norm = {th.linalg.norm(g_)}")
-
-                # update origin variables
-                select_indices = th.where(select_mask)[0]
-                select_indices_short = th.where(select_mask_short)[0]
-                y.index_copy_(0, select_indices_short, y_)
-                v.index_copy_(1, select_indices, v_)
-                X.index_copy_(1, select_indices, X_)
-                g.index_copy_(1, select_indices, g_)
-                KRYLOV_EIGENVEC.index_copy_(1, select_indices, sub_eigvec_)
-                KRYLOV_EIGENVAL.index_copy_(0, select_indices_short, sub_eigval_)
-
-                t.index_copy_(1, select_indices, t_)
-                a.index_copy_(1, select_indices, a_)
-                n_count.index_copy_(1, select_indices, n_count_)
-                veloc.index_copy_(1, select_indices, veloc_)
-
-        if self.verbose:
-            if is_main_loop_converge:
-                self.logger.info('-' * 100 + '\nAll Structures Were Converged.\nMAIN LOOP Done.')
-            else:
-                self.logger.info('-' * 100 + '\nSome Structures were NOT Converged yet!\nMAIN LOOP Done.')
-
-        if output_grad:
-            return y, X, g
+    def _update_algo_batches(
+            self,
+            select_indices: th.Tensor,
+            select_indices_short: th.Tensor | None,
+    ) -> None:
+        # Scatter active eigen and FIRE state back to their full-batch owners;
+        # hold mode can directly replace those owners with the working tensors.
+        # This method is the sole publication point for underscored working
+        # state, keeping the next outer iteration independent of whether the
+        # current batch was held intact or dynamically reduced.
+        self._update_eigen_batches(
+            select_indices, select_indices_short,
+        )
+        if self._hold_samples:
+            self.t = self._t
+            self.a = self._a
+            self.n_count = self._n_count
+            self.veloc = self._veloc
         else:
-            return y, X#, plist  # TEST <<<<<<
-
+            self.t.index_copy_(1, select_indices, self._t)
+            self.a.index_copy_(1, select_indices, self._a)
+            self.n_count.index_copy_(1, select_indices, self._n_count)
+            self.veloc.index_copy_(1, select_indices, self._veloc)
