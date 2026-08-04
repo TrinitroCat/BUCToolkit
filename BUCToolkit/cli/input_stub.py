@@ -16,13 +16,14 @@ CONFIG_STUB = {
 
     # I/O configs
     "LOAD_CHK_FILE_PATH": ("your/model/checkpoint/file/path", str, "path of model checkpoint to load"),
+    "OUTPUT_ROOT": ("./output", str, "root directory that owns task outputs"),
     "OUTPUT_PATH": ("your/log/output/path", str, "path to save logs"),
     "OUTPUT_POSTFIX": ("your_logfile_suffix", str, "suffix for log file name"),
     "PREDICTIONS_SAVE_FILE": ("your/model/predictions/save/path", str, "path of saving predictions"),
     "STRICT_LOAD": (True, bool, "whether to strictly load model parameter"),
     "REDIRECT": (True, bool, "whether output training logs to OUTPUT_PATH or directly print on screen"),
     "SAVE_PREDICTIONS": (True, bool, "only for predictions. Whether output predictions to a dump file"),
-    "DATA_TYPE": ("BS", str, "Data type. Options: 'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD'"),
+    "DATA_TYPE": ("BS", str, "Data type. Options: 'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC'"),
     "DATA_PATH": ("/your/data/path", str, "path of data used for calculation. If training, it is viewed as the training set"),
     "DATA_NAME_SELECTOR": (".*$", str, "regular expression to select data names. Only matched names will be loaded"),
     "FSDATA_PATH": ("your/final/state/data/path", str, "path for final state data, used for calculations requiring both initial and final states, e.g., CI-NEB"),
@@ -34,6 +35,7 @@ CONFIG_STUB = {
 
     # Training
     "TRAIN": {
+        "CHK_SAVE_PATH": ("./output/chk", str, "directory used to save training checkpoints"),
         "EPOCH": (10, int, "number of training epochs"),
         "VAL_BATCH_SIZE": (20, int, "batch size for validation. default is the same as BATCH_SIZE"),
         "VAL_PER_STEP": (100, int, "validate every VAL_PER_STEP steps. step = BATCH_SIZE * ACCUMULATE_STEP"),
@@ -66,13 +68,13 @@ CONFIG_STUB = {
     # Relaxation
     "RELAXATION": {
         "ALGO": ("FIRE", str, "optimization algorithm. Options: CG, BFGS, FIRE"),
-        "ITER_SCHEME": ("PR+", str, "conjugate gradient iteration scheme. Only for ALGO=CG. Options: 'PR+', 'FR', 'PR', 'WYL'"),
+        "ITER_SCHEME": ("PR+", str, "conjugate gradient iteration scheme. Only for ALGO=CG. Options: 'PR+', 'FR', 'SD'"),
         "E_THRES": (1e4, float, "threshold of energy difference for convergence"),
         "F_THRES": (0.05, float, "threshold of max force for convergence"),
         "MAXITER": (300, int, "maximum number of iterations"),
         "STEPLENGTH": (0.5, float, "initial step length"),
         "USE_BB": (True, bool, "whether to use Barzilai-Borwein I steplength as initial steplength"),
-        "LINESEARCH": ("B", str, "line search method. 'Backtrack' with Armijo's condition, 'Wolfe' for weak Wolfe condition, 'Exact' for exact linear search"),
+        "LINESEARCH": ("B", str, "line search method. Options: 'Backtrack'/'B', 'Wolfe'/'W'/'MT', 'EXACT', 'None'/'N'"),
         "LINESEARCH_MAXITER": (8, int, "maximum iterations of line search per outer iteration"),
         "LINESEARCH_THRES": (0.02, float, "threshold for exact line search"),
         "LINESEARCH_FACTOR": (0.5, float, "shrinkage factor for backtracking"),
@@ -116,6 +118,8 @@ CONFIG_STUB = {
     # Molecular dynamics
     "MD": {
         "ENSEMBLE": ("NVT", str, "MD ensemble. Options: NVE, NVT"),
+        "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
+        "NIMAGE": (3, int, "number of interpolation images for BLUE_MOON constrained MD"),
         "THERMOSTAT": ("CSVR", str, "thermostat for NVT ensemble. Options: Langevin, VR, Nose-Hoover, CSVR"),
         "THERMOSTAT_CONFIG": {
             "DAMPING_COEFF": (0.01, float, "damping coefficient for Langevin thermostat. Unit: fs^-1"),
@@ -128,6 +132,20 @@ CONFIG_STUB = {
         "CONSTRAINTS_FILE": ("./constraints.py", str, "path to constraints function file"),
         "CONSTRAINTS_FUNC": ("func", str, "name of constraints function in CONSTRAINTS_FILE"),
         "REQUIRE_GRAD": (False, bool, "whether to toggle on auto-gradient during calculation"),
+    },
+
+    # Monte Carlo
+    "MC": {
+        "TYPE": ("Metropolis", str, "Monte Carlo type. Currently supported: Metropolis"),
+        "ITER_SCHEME": ("Gaussian", str, "coordinate proposal distribution. Options: Gaussian, Cauchy, Uniform"),
+        "COORDINATE_UPDATE_PARAM": (0.2, float, "scale of coordinate proposals"),
+        "MAXITER": (10000, int, "number of Monte Carlo iterations"),
+        "T_INIT": (298.15, float, "initial temperature"),
+        "T_SCHEME": ("constant", str, "temperature scheme. Options: constant, linear, exponential, log, fast"),
+        "T_UPDATE_FREQ": (1, int, "frequency of temperature updates"),
+        "T_SCHEME_PARAM": (0.0, float, "parameter passed to the temperature scheme"),
+        "OUTPUT_COORDS_PER_STEP": (1, int, "frequency of writing coordinates"),
+        "MOVE_TO_CENTER_FREQ": (20, int, "frequency of moving structures to their center"),
     },
 
     # Model configs

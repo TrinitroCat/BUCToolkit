@@ -273,12 +273,12 @@ class MolecularDynamics(_CONFIGS):
             if self.VERBOSE: self.logger.info(f'Molecular Dynamics Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             if mole_dynam is not None:
                 mole_dynam.dumper.close()
             self.logger.removeHandler(self.log_handler)

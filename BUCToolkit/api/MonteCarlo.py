@@ -76,7 +76,7 @@ class MonteCarlo(_CONFIGS):
             'device': self.DEVICE,
             'verbose': self.VERBOSE
         }
-        if self.REDIRECT:
+        if self.SAVE_PREDICTIONS:
             self.MC_config['output_file'] = self.PREDICTIONS_SAVE_FILE
         if self.MC['TYPE'].upper() == 'METROPOLIS':
             self.MC_config.update(
@@ -271,12 +271,12 @@ class MonteCarlo(_CONFIGS):
             if self.VERBOSE: self.logger.info(f'Monte Carlo Simulation Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             if mont_carlo is not None:
                 mont_carlo.dumper.close()
             self.logger.removeHandler(self.log_handler)

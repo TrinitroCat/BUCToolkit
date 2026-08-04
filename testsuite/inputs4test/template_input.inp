@@ -10,13 +10,13 @@ BATCH_SIZE: !!int 16    # the batch size of input data during calculation
 
 # I/O configs
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
-OUTPUT_PATH: !!str your/log/output/path
+OUTPUT_ROOT: !!str ./output
 OUTPUT_POSTFIX: !!str your_logfile_suffix
-PREDICTIONS_SAVE_FILE: !!str your/model/predictions/save/path  # path of saving predictions
+# Optional overrides: OUTPUT_PATH, PREDICTIONS_SAVE_FILE, TRAIN.CHK_SAVE_PATH
 STRICT_LOAD: !!bool true  # whether to strictly load model parameter
 REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
 SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
-###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD']. BS is the build-in structures format obtained by `Structures().save(...)`
+###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC']. BS is the build-in structures format obtained by `Structures().save(...)`
 
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
@@ -76,7 +76,7 @@ TRAIN:
 # relaxation
 RELAXATION:
   ALGO: !!str 'FIRE'  # options: CG, BFGS, FIRE
-  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'PR'
+  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'SD'
   E_THRES: !!float 1.e4  # threshold of Energy difference
   F_THRES: !!float 0.05  # threshold of max Force
   MAXITER: !!int 300     # maximum iteration
@@ -123,6 +123,8 @@ NEB:
 # molecular dynamics
 MD:
   ENSEMBLE: !!str NVT     # MD ensemble. options: NVE, NVT
+  CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH
+  NIMAGE: !!int 3         # CMD interpolation images
   THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # thermostat configs
     DAMPING_COEFF: !!float 0.01  # damping coefficient for Langevin thermostat. unit: fs^-1

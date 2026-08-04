@@ -336,6 +336,17 @@ users can directly launch tasks in a shell like:
 ```shell
 buctoolkit -i './input_file.inp'
 ```
+Paths inside YAML input files are resolved relative to the input file's
+directory. Command-line paths passed to `-i`, `-o`, or `--convert` remain
+relative to the directory where the command is invoked.
+
+Each one-line task requires `OUTPUT_ROOT` (the legacy `OUTPUT_PATH` is used as
+the root when `OUTPUT_ROOT` is absent). A missing root is created; an existing
+root must be an empty, non-symbolic-link directory. Logs default to
+`OUTPUT_ROOT/logs`, results to `OUTPUT_ROOT/results/result` (or `result.pt` for
+VIB), and training checkpoints to `OUTPUT_ROOT/chk`. Explicit `OUTPUT_PATH`,
+`PREDICTIONS_SAVE_FILE`, and `TRAIN.CHK_SAVE_PATH` values take precedence.
+
 An interactive command-line interface can be used as well by inputting no argument:
 ```
 user@host:/some/path$ buctoolkit
@@ -400,13 +411,13 @@ BATCH_SIZE: !!int 16    # the batch size of input data during calculation
 
 # I/O configs
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
-OUTPUT_PATH: !!str your/log/output/path
+OUTPUT_ROOT: !!str ./output
 OUTPUT_POSTFIX: !!str your_logfile_suffix
-PREDICTIONS_SAVE_FILE: !!str your/model/predictions/save/path  # path of saving predictions
+# Optional overrides: OUTPUT_PATH, PREDICTIONS_SAVE_FILE, TRAIN.CHK_SAVE_PATH
 STRICT_LOAD: !!bool true  # whether to strictly load model parameter
 REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
 SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
-###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD']. BS is the build-in structures format obtained by `Structures().save(...)`
+###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC']. BS is the build-in structures format obtained by `Structures().save(...)`
 
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
@@ -466,7 +477,7 @@ TRAIN:
 # relaxation
 RELAXATION:
   ALGO: !!str 'FIRE'  # options: CG, BFGS, FIRE
-  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'PR'
+  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'SD'
   E_THRES: !!float 1.e4  # threshold of Energy difference
   F_THRES: !!float 0.05  # threshold of max Force
   MAXITER: !!int 300     # maximum iteration
@@ -513,6 +524,8 @@ NEB:
 # molecular dynamics
 MD:
   ENSEMBLE: !!str NVT     # MD ensemble. options: NVE, NVT
+  CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH
+  NIMAGE: !!int 3         # CMD interpolation images
   THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # thermostat configs
     DAMPING_COEFF: !!float 0.01  # damping coefficient for Langevin thermostat. unit: fs^-1
@@ -578,6 +591,12 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 ```
 This command will convert all files in `$input_path` with assumed format of `$input_type` into 
 `$output_path` in the format of `$output_type`.
+
+Direct outputs are never silently overwritten. If `-o FILE` names an existing
+regular file, it is moved to `FILE.bakYYYYmmdd_HHMMSS` first. A conversion
+destination is backed up as a whole directory with the same suffix. Backup
+name collisions in the same second receive `_1`, `_2`, and so on; files,
+directories, or symbolic links of the wrong kind are rejected.
 
 For a finer control, the following Python script can be used:
 ```python
@@ -834,4 +853,3 @@ For bug reports or feature requests, please use [GitHub Issues](https://github.c
 ## License
 
 The code of BUCToolkit is published and distributed under the **[MIT License](https://github.com/TrinitroCat/BUCToolkit/blob/main/LICENSE)**.
-

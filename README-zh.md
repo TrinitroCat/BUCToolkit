@@ -326,6 +326,16 @@ BUCToolkit 也可以直接作为普通可执行程序使用。通过在输入文
 buctoolkit -i './input_file.inp'
 ```
 
+YAML 输入文件中的路径统一相对于输入文件所在目录解析；命令行参数 `-i`、
+`-o` 和 `--convert` 中的路径仍相对于命令执行时的当前目录解析。
+
+每个单行任务都需要 `OUTPUT_ROOT`；若未提供，则兼容地将旧
+`OUTPUT_PATH` 视为根目录。根目录不存在时会创建，已存在时必须是空的、
+非符号链接目录。日志默认写入 `OUTPUT_ROOT/logs`，结果默认写入
+`OUTPUT_ROOT/results/result`（VIB 为 `result.pt`），训练检查点默认写入
+`OUTPUT_ROOT/chk`。显式的 `OUTPUT_PATH`、`PREDICTIONS_SAVE_FILE` 和
+`TRAIN.CHK_SAVE_PATH` 始终优先。
+
 如果不带任何参数运行，则进入交互式命令行界面：
 
 ```
@@ -387,13 +397,13 @@ BATCH_SIZE: !!int 16    # 计算时输入数据的批大小
 
 # I/O 配置
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
-OUTPUT_PATH: !!str your/log/output/path
+OUTPUT_ROOT: !!str ./output
 OUTPUT_POSTFIX: !!str your_logfile_suffix
-PREDICTIONS_SAVE_FILE: !!str your/model/predictions/save/path  # 保存预测结果的文件路径
+# 可选覆盖项：OUTPUT_PATH、PREDICTIONS_SAVE_FILE、TRAIN.CHK_SAVE_PATH
 STRICT_LOAD: !!bool true  # 是否严格加载模型参数
 REDIRECT: !!bool true    # 是否将训练日志重定向到 OUTPUT_PATH，还是直接打印到屏幕
 SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出到转储文件
-###DATA_TYPE: !!str BS  # 可选值：'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD'。BS 是 Structures().save(...) 保存的内置结构格式
+###DATA_TYPE: !!str BS  # 可选值：'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC'。BS 是 Structures().save(...) 保存的内置结构格式
 
 ###DATA_PATH: !!str /your/data/path # 用于计算的数据路径；如果是训练，将被视为训练集
 ###DATA_NAME_SELECTOR: !!str ".*$"  # 用于选择数据名称的正则表达式，仅加载匹配的名称
@@ -447,7 +457,7 @@ TRAIN:
 # 结构弛豫（优化）
 RELAXATION:
   ALGO: !!str 'FIRE'  # 算法选项：CG, BFGS, FIRE
-  ITER_SCHEME: !!str 'PR+'  # 仅当 ALGO=CG 时有效，选项：'PR+', 'FR', 'PR'
+  ITER_SCHEME: !!str 'PR+'  # 仅当 ALGO=CG 时有效，选项：'PR+', 'FR', 'SD'
   E_THRES: !!float 1.e4  # 能量差阈值
   F_THRES: !!float 0.05  # 最大力阈值
   MAXITER: !!int 300     # 最大迭代次数
@@ -494,6 +504,8 @@ NEB:
 # 分子动力学
 MD:
   ENSEMBLE: !!str NVT     # MD 系综，可选：NVE, NVT
+  CONSTR_MD_SCHEME: !!str BLUE_MOON  # 仅 CMD：BLUE_MOON 或 SLOW_GROWTH
+  NIMAGE: !!int 3         # CMD 插值镜像数
   THERMOSTAT: !!str CSVR  # 仅当 ENSEMBLE=NVT 时有效，可选：'Langevin', 'VR', 'Nose‑Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # 热浴参数
     DAMPING_COEFF: !!float 0.01  # Langevin 热浴的阻尼系数，单位：fs⁻¹
@@ -558,6 +570,11 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 ```
 
 该命令会将 `$input_path` 下所有假定格式为 `$input_type` 的文件转换为 `$output_path` 中格式为 `$output_type` 的文件。
+
+直接输出不会静默覆盖已有内容。若 `-o FILE` 指向已有普通文件，CLI 会先
+将其改名为 `FILE.bakYYYYmmdd_HHMMSS`；转换目标则会以相同后缀整体备份。
+同一秒内发生重名时依次追加 `_1`、`_2`。类型不符的文件、目录或符号链接
+会被拒绝。
 
 如需更精细的控制，可使用以下 Python 脚本：
 

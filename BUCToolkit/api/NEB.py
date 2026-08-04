@@ -16,7 +16,7 @@ from torch import nn
 
 from BUCToolkit.BatchOptim.TS.CI_NEB import CI_NEB
 from BUCToolkit.utils._CheckModules import check_module
-from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from ._io import _CONFIGS, _Model_Wrapper_pyg, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils.AtomSelector import atom_fix_selector
 from BUCToolkit.BatchStructures import Batch
@@ -75,11 +75,14 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
         self.require_grad = self.NEB.get('REQUIRE_GRAD', False)
         # check modes
         self.N_IMAGES = self.NEB['N_IMAGES']
+        optimizer_configs = dict(self.NEB.get('OPTIMIZER_CONFIGS') or {})
+        if self.SAVE_PREDICTIONS:
+            optimizer_configs['output_file'] = self.PREDICTIONS_SAVE_FILE
         self.NEB_config = {
             'N_images': self.NEB['N_IMAGES'],
             'spring_const': float(self.NEB.get('SPRING_CONST', 1.)),
             'optimizer': self.NEB.get('OPTIMIZER', 'FIRE'),
-            'optimizer_configs': self.NEB.get('OPTIMIZER_CONFIGS', None),
+            'optimizer_configs': optimizer_configs,
             'steplength': self.NEB.get('STEPLENGTH', 0.2),
             'E_threshold': float(self.NEB.get('E_THRESHOLD', 1e-3)),
             'F_threshold': float(self.NEB.get('F_THRESHOLD', 0.05)),
@@ -124,6 +127,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
         self.n_samp = len(self.TRAIN_DATA['dataIS'])  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
+        neb_ops = None
         try:
             # I/O
             if self.VERBOSE > 0:
@@ -196,6 +200,13 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
 
             # Instantiate NEB ALGO class
             neb_ops = self.NEB_ALGO(**self.NEB_config)
+            if self.SAVE_PREDICTIONS:
+                neb_ops.Optimizer._HOLD_DUMPER = True
+                neb_ops.Optimizer.dumper.reset_args(
+                    self.PREDICTIONS_SAVE_FILE,
+                    mode='a',
+                    cache_size=4096,
+                )
             if ('dataIS' not in self.TRAIN_DATA) or ('dataFS' not in self.TRAIN_DATA):
                 raise ValueError('Invalid `TRAIN_DATA`, which requires keys of "dataIS" and "dataFS" but could not be found.')
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, **self._data_loader_configs)
@@ -204,7 +215,6 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                 if self.VERBOSE: self.logger.error(__err_msg)
                 raise ValueError(__err_msg)
             n_c = 1  # running batch now
-            n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             for dataIS, dataFS in val_set:
                 try:
                     # get basic information of IS.
@@ -283,6 +293,16 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     if fixed_atom_tensor.ndim != 2:
                         raise ValueError(f"Expected `fixed_atom_tensor.ndim` to be 2, but got {fixed_atom_tensor.ndim}.")
                     dataIS = rebatched_graph(dataIS, self.N_IMAGES)
+                    image_batch_indices = get_batch_indx(dataIS)
+                    image_atomic_numbers = get_atomic_number(dataIS).reshape(-1)
+                    atomic_number_rows = [
+                        numbers.tolist()
+                        for numbers in th.split(image_atomic_numbers, image_batch_indices)
+                    ]
+                    neb_ops.Optimizer.set_system_info(
+                        get_cell_vec(dataIS),
+                        atomic_number_rows,
+                    )
 
                     # run
                     _energy, _X, out_grad = neb_ops.run(
@@ -299,31 +319,11 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     _energy.detach_()
                     _X.detach_()
                     out_grad.detach_()
-                    idx = get_indx(dataIS)
-                    batch_indx = get_batch_indx(dataIS)
-                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
-                    n_s += len(batch_indx)
-                    self.dumper.collect(
-                        batch_indx,
-                        idx,
-                        get_atomic_number(dataIS).squeeze(0),
-                        get_cell_vec(dataIS),
-                        _X.flatten(0, 1),
-                        fixed_atom_tensor.repeat(self.N_IMAGES + 2, 1),
-                        _energy,
-                        - out_grad.flatten(0, 1),
-                    )
 
                     # Print info
                     if self.VERBOSE > 0:
                         self.logger.info(f'Batch {n_c} done.')
                     n_c += 1
-                    if self.SAVE_PREDICTIONS:
-                        t_save = time.perf_counter()
-                        with _LoggingEnd(self.log_handler):
-                            if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
-                        self.dumper.flush()
-                        if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
 
                 except Exception as e:
                     self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
@@ -335,13 +335,14 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
             if self.VERBOSE: self.logger.info(f'NEB Search Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
-            pass
+            if neb_ops is not None:
+                neb_ops.Optimizer.dumper.close()

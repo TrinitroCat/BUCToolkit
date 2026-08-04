@@ -17,7 +17,6 @@ from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
 
 import numpy as np
 import torch as th
-import yaml
 from torch import nn
 
 from BUCToolkit.utils._CheckModules import check_module
@@ -27,6 +26,7 @@ from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 from BUCToolkit.BatchStructures import Batch
+from BUCToolkit.cli._config import load_input_config
 
 
 class _LoggingEnd:
@@ -214,7 +214,7 @@ class _CONFIGS(object):
             algo_info = "Finite Difference" if self.VIBRATION.get('METHOD', 'Coord') == "Coord" else "Automatic Differentiation"
         elif mode == 'MC':
             self.logger.info(' TASK: Monte Carlo <<')
-            algo_info = f"{self.MC["ENSEMBLE"]} Ensemble"
+            algo_info = self.MC["TYPE"]
         elif mode == 'TRAIN':
             self.logger.info(' TASK: TRAINING & VALIDATION <<')
         elif mode == 'PREDICT':
@@ -398,14 +398,27 @@ class _CONFIGS(object):
         if not has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
 
     def reload_config(self, config_file_path: str| None = None) -> None:
-        """
-        Reload the yaml configs file.
+        """Reload and validate API configuration from a YAML input file.
+
+        Known path fields are resolved relative to the input file by the same
+        helper used by the command-line entry point.
+
+        Args:
+            config_file_path: Input path to load. ``None`` reuses
+                ``self.config_file``.
+
+        Returns:
+            None.
+
+        Raises:
+            FileNotFoundError: If the selected input file does not exist.
+            TypeError: If a typed configuration field has an invalid type.
+            ValueError: If the YAML document or a configuration value is
+                invalid.
         """
         # load config file
         config_file_path = self.config_file if config_file_path is None else config_file_path
-        with open(config_file_path, 'r', encoding='utf-8') as f:
-            config: Dict[str, Any] = yaml.safe_load(f)
-        self.config = config
+        self.config = load_input_config(config_file_path)
 
         # global information
         self.START = self.config.get('START', 0)
@@ -444,9 +457,7 @@ class _CONFIGS(object):
         if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
             raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
-            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
-        else:
-            self.dumper = DumpStructures(None, )
+            os.makedirs(os.path.dirname(self.PREDICTIONS_SAVE_FILE) or '.', exist_ok=True)
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
         if self.REDIRECT:
             self.OUTPUT_PATH = self.config.get('OUTPUT_PATH', './')
@@ -483,17 +494,6 @@ class _CONFIGS(object):
     @property
     def PREDICTIONS_SAVE_FILE(self):
         return self._PREDICTIONS_SAVE_FILE
-
-    @PREDICTIONS_SAVE_FILE.setter
-    def PREDICTIONS_SAVE_FILE(self, value):
-        if not self.SAVE_PREDICTIONS:
-            self.logger.warning(
-                f'WARNING: You are setting a new predictions save file, while `SAVE_PREDICTIONS` is still False.\n'
-                f'Hence, NOTHING WILL HAPPEN. BYE!'
-            )
-            return
-        self._PREDICTIONS_SAVE_FILE = value
-        self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
 
 
 class _Model_Wrapper_pyg(_BaseWrapper):

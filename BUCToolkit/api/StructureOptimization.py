@@ -17,7 +17,7 @@ from torch import nn
 from BUCToolkit import BatchOptim
 from BUCToolkit.BatchOptim.minimize import CG, QN, FIRE
 from BUCToolkit.BatchOptim.TS.Dimer import Dimer
-from BUCToolkit.api._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl, PygBatchUpdater
+from BUCToolkit.api._io import _CONFIGS, _Model_Wrapper_pyg, _Model_Wrapper_dgl, PygBatchUpdater
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER
 from BUCToolkit.utils._CheckModules import check_module
@@ -184,6 +184,8 @@ class StructureOptimization(_CONFIGS):
         if (self.RELAXATION is None) and (self.TRANSITION_STATE is None):
             self.logger.error('** ERROR: Both `RELAXATION` and `TRANSITION_STATE` were NOT set. NO TASK HERE, BYE!!! **')
             raise RuntimeError('** ERROR: Both `RELAXATION` and `TRANSITION_STATE` were NOT set. NO TASK HERE, BYE!!! **')
+        if self.SAVE_PREDICTIONS:
+            self.Stru_Opt_config['output_file'] = self.PREDICTIONS_SAVE_FILE
 
     def set_dimer_init_direction(self, directions: th.Tensor):
         """
@@ -237,6 +239,7 @@ class StructureOptimization(_CONFIGS):
         self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
+        optimizer = None
         # I/O
         try:
             if self.VERBOSE > 0:
@@ -321,6 +324,13 @@ class StructureOptimization(_CONFIGS):
                 raise NotImplementedError
 
             optimizer = self.Stru_Opt(**self.Stru_Opt_config)
+            if self.SAVE_PREDICTIONS:
+                optimizer._HOLD_DUMPER = True
+                optimizer.dumper.reset_args(
+                    self.PREDICTIONS_SAVE_FILE,
+                    mode='a',
+                    cache_size=4096,
+                )
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
@@ -371,6 +381,11 @@ class StructureOptimization(_CONFIGS):
                     idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
                     n_s += len(batch_indx)
                     element_tensor = get_atomic_number(val_data)
+                    atomic_number_rows = [
+                        numbers.tolist()
+                        for numbers in th.split(element_tensor.reshape(-1), batch_indx)
+                    ]
+                    optimizer.set_system_info(CELL, atomic_number_rows)
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
@@ -419,17 +434,6 @@ class StructureOptimization(_CONFIGS):
                         fin_ener = fin_ener.detach()#.squeeze(0)
                         fin_x = fin_x.detach().squeeze(0)
                         fin_grad = fin_grad.detach().squeeze(0)
-                        # Postprocessing & save TODO: reformat it in future to apply to all functions.
-                        self.dumper.collect(
-                            batch_indx,
-                            idx,
-                            get_atomic_number(val_data).squeeze(0),
-                            CELL,
-                            fin_x,
-                            fixed_mask[0],
-                            fin_ener,
-                            - fin_grad,
-                        )
 
                     # Print info
                     if self.VERBOSE > 0:
@@ -444,24 +448,19 @@ class StructureOptimization(_CONFIGS):
                     n_c += 1
 
             if self.VERBOSE: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
-            if self.SAVE_PREDICTIONS:
-                t_save = time.perf_counter()
-                with _LoggingEnd(self.log_handler):
-                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
-                self.dumper.flush()
-                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
-            self.dumper.close()
+            if optimizer is not None:
+                optimizer.dumper.close()
 
     def relax(self, model):
         """

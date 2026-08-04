@@ -107,7 +107,7 @@ class Predictor(_CONFIGS):
         Parameters:
             model: the input model which is uninstantiated nn.Module class.
             test_model: bool, if True, consumed time per batch and max memory per batch would be returned.
-            warm_up: bool, if True, model will idle on some pseudo-samples for warming up.
+            warm_up: bool, if True, model will idle on some pseudo-samples for warming up. It requires the cuda availability.
 
         Returns:
             None, if `SAVE_PREDICTIONS` in config_file is true.
@@ -119,6 +119,10 @@ class Predictor(_CONFIGS):
             path=self.PREDICTIONS_SAVE_FILE if self.SAVE_PREDICTIONS else None,
             mode='x',
         )
+        if warm_up and (not th.cuda.is_available()):
+            self.logger.warning(f"Cuda is not available, so `warm_up` will be turned off.")
+            warnings.warn("Cuda is not available, so `warm_up` will be turned off.")
+            warm_up = False
         # check vars
         _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1 or self.START == 2:

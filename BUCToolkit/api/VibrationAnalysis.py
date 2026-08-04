@@ -271,12 +271,12 @@ class VibrationAnalysis(_CONFIGS):
                 if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()

@@ -98,8 +98,8 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                           'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
                           'device': self.DEVICE,
                           'verbose': self.VERBOSE}
-        #if self.REDIRECT:
-        #    self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+        if self.SAVE_PREDICTIONS:
+            self.MD_config['output_file'] = self.PREDICTIONS_SAVE_FILE
         if self.MD['ENSEMBLE'] == 'NVT':
             self.MD_config['thermostat'] = self.MD.get('THERMOSTAT', 'CSVR')
             self.MD_config['thermostat_config'] = self.MD.get('THERMOSTAT_CONFIG', dict())
@@ -265,12 +265,12 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 )
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             if mole_dynam is not None:
                 mole_dynam.dumper.close()
             self.logger.removeHandler(self.log_handler)

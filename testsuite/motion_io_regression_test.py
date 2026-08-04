@@ -395,8 +395,8 @@ class MotionIORegressionTest(unittest.TestCase):
         transferred_names = allocate_buffers.call_args.args[1]
         self.assertEqual(set(transferred_names), {'Energy', 'X'})
 
-    def test_mc_proposal_validation_is_moved_outside_the_loop(self):
-        """Validated MC state uses lightweight per-step distributions."""
+    def test_mc_proposal_uses_an_owned_random_generator(self):
+        """MC proposals and acceptance masks share one run-local generator."""
         runner = MMC(
             maxiter=2,
             temperature_init=300.,
@@ -407,20 +407,38 @@ class MotionIORegressionTest(unittest.TestCase):
         )
         coordinates = th.zeros((1, 2, 3), dtype=th.float32)
 
-        with mock.patch(
-                'BUCToolkit.BatchMC.MetropolisMC.th.distributions.Normal',
-                wraps=th.distributions.Normal,
-        ) as normal_distribution:
-            runner.run(
-                lambda value: th.sum(value ** 2, dim=(-2, -1)),
-                coordinates,
-                [['H', 'H']],
-            )
+        runner.run(
+            lambda value: th.sum(value ** 2, dim=(-2, -1)),
+            coordinates,
+            [['H', 'H']],
+        )
 
-        self.assertEqual(normal_distribution.call_count, 2)
-        for call in normal_distribution.call_args_list:
-            self.assertIs(call.kwargs['validate_args'], False)
+        self.assertIsInstance(runner._random_generator, th.Generator)
         self.assertEqual(runner._proposal_scale.shape, (1, 1, 1))
+
+    @unittest.skipUnless(th.cuda.is_available(), 'CUDA is required')
+    def test_mc_gaussian_after_cuda_graph_capture(self):
+        """MC Gaussian proposals remain valid after an unrelated CUDA graph."""
+        device = th.device('cuda')
+        static = th.zeros((1, 2, 3), device=device)
+        graph = th.cuda.CUDAGraph()
+        with th.cuda.graph(graph):
+            static.add_(1.)
+        graph.replay()
+
+        runner = MMC(
+            maxiter=2,
+            temperature_init=300.,
+            coordinate_update_param=0.01,
+            output_file=None,
+            device=device,
+            verbose=0,
+        )
+        runner.run(
+            lambda value: th.sum(value ** 2, dim=(-2, -1)),
+            th.zeros_like(static),
+            [['H', 'H']],
+        )
 
     def test_mc_proposal_initialization_rejects_invalid_state(self):
         """Initialization safeguards replace repeated distribution checks."""
