@@ -1,0 +1,17 @@
+START: 0
+VERBOSE: 1
+DEVICE: cpu
+BATCH_SIZE: 1
+REDIRECT: false
+SAVE_PREDICTIONS: true
+STRICT_LOAD: true
+IS_SHUFFLE: false
+MODEL_FILE: ../_toy_models.py
+MODEL_NAME: GNNLJDirectionalEAM
+MODEL_CONFIG:
+  max_atomic_number: 100
+  embedding_dim: 4
+  hidden_dim: 8
+  cutoff: 6.0
+  min_dist: 0.5
+  eam_hidden_dim: 8

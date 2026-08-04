@@ -152,6 +152,7 @@ class MMC(_BaseMC):
 
         self.coordinate_update_param = coordinate_update_param
         self._proposal_scale: th.Tensor | None = None
+        self._random_generator: th.Generator | None = None
         __X_scheme_dict = {
             'Gaussian': self.__x_Gaussian,
             'Cauchy': self.__x_Cauchy,
@@ -181,29 +182,35 @@ class MMC(_BaseMC):
     def __x_Gaussian(self, X: th.Tensor):
         temperature_scale = math.sqrt(max(10., self.T_now))
         proposal_std = self._proposal_scale * temperature_scale
-        # Initialization guarantees a finite positive scale. Avoid repeating
-        # Distribution's CUDA-wide argument reductions at every MC step.
-        g = th.distributions.Normal(X, proposal_std, validate_args=False)
-        X_new = g.sample()
-        return X_new
+        noise = th.randn(
+            X.shape,
+            dtype=X.dtype,
+            device=X.device,
+            generator=self._random_generator,
+        )
+        return X + noise * proposal_std
 
     def __x_Cauchy(self, X: th.Tensor):
         temperature_scale = math.sqrt(max(10., self.T_now))
         proposal_std = self._proposal_scale * temperature_scale
-        g = th.distributions.Cauchy(X, proposal_std, validate_args=False)
-        X_new = g.sample()
-        return X_new
+        uniform = th.rand(
+            X.shape,
+            dtype=X.dtype,
+            device=X.device,
+            generator=self._random_generator,
+        )
+        return X + proposal_std * th.tan(math.pi * (uniform - 0.5))
 
     def __x_Uniform(self, X: th.Tensor):
         temperature_scale = math.sqrt(max(10., self.T_now))
         proposal_std = self._proposal_scale * temperature_scale
-        g = th.distributions.Uniform(
-            X - proposal_std,
-            X + proposal_std,
-            validate_args=False,
+        uniform = th.rand(
+            X.shape,
+            dtype=X.dtype,
+            device=X.device,
+            generator=self._random_generator,
         )
-        X_new = g.sample()
-        return X_new
+        return X + proposal_std * (2. * uniform - 1.)
 
     def _update_X(self, func, func_args, func_kwargs, energies_old, X: th.Tensor):
         """
@@ -223,7 +230,12 @@ class MMC(_BaseMC):
         delta_E = _energy - energies_old  # (n_batch, )
         metropolis_mask = th.exp(- delta_E / (8.617333262145e-5 * self.T_now))  # (n_batch, ); Boltzmann constant kB = 8.617333262145e-5 eV/K
         # metropolis_mask.clamp_max_(1.)  # no need to cut-off because rand_like always < 1.
-        _x_mask = th.rand_like(_energy) < metropolis_mask
+        _x_mask = th.rand(
+            _energy.shape,
+            dtype=_energy.dtype,
+            device=_energy.device,
+            generator=self._random_generator,
+        ) < metropolis_mask
         energy_new = th.where(
             _x_mask,
             _energy,
@@ -286,3 +298,6 @@ class MMC(_BaseMC):
         else:
             proposal_scale = proposal_scale.reshape(-1, 1, 1)
         self._proposal_scale = proposal_scale
+        random_seed = th.initial_seed()  # inherit seed from the global one. Can be set by th.manual_seed directly
+        self._random_generator = th.Generator(device=self.device)
+        self._random_generator.manual_seed(random_seed)
