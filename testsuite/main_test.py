@@ -8,7 +8,6 @@ import unittest
 import os
 import glob
 import math
-import tempfile
 import sys
 import warnings
 
@@ -19,7 +18,7 @@ import torch as th
 import numpy as np
 
 from BUCToolkit.cli.main import launch_task
-from BUCToolkit.BatchStructures import read_md_traj, read_opt_structures, read_mc_traj
+from BUCToolkit.BatchStructures import read_freq, read_md_traj, read_opt_structures, read_mc_traj
 from BUCToolkit.api._io import _Model_Wrapper_pyg
 from BUCToolkit.BatchMD import NVE, NVT
 from BUCToolkit.BatchMD import ConstrNVE, ConstrNVT
@@ -871,6 +870,34 @@ class MainTest(unittest.TestCase):
             verbose=1,
             is_compile=False
         )
+        runner_cpu_cauchy_nvt = MMC(
+            'Cauchy',
+            100000,
+            TEMPERATURE,
+            'constant',
+            1,
+            None,
+            0.07,
+            f'{self.out_pt}results/MC_CAUCHY_NVT_CPU',
+            10,
+            device='cpu',
+            verbose=1,
+            is_compile=False
+        )
+        runner_cpu_uniform_nvt = MMC(
+            'Uniform',
+            100000,
+            TEMPERATURE,
+            'constant',
+            1,
+            None,
+            0.07,
+            f'{self.out_pt}results/MC_UNIFORM_NVT_CPU',
+            10,
+            device='cpu',
+            verbose=1,
+            is_compile=False
+        )
         runner_gpu_nvt = MMC(
             'Gaussian',
             100000,
@@ -901,12 +928,16 @@ class MainTest(unittest.TestCase):
 
         RUNNER_NAME = [
             'MC_GAUSS_NVT_CPU',
+            'MC_CAUCHY_NVT_CPU',
+            'MC_UNIFORM_NVT_CPU',
             'MC_GAUSS_NVT_GPU',
             'MC_GAUSS_ANNEAL_GPU',
         ]
         #import matplotlib.pyplot as plt
         for i, runner in enumerate([
             runner_cpu_nvt,
+            runner_cpu_cauchy_nvt,
+            runner_cpu_uniform_nvt,
             runner_gpu_nvt,
             runner_gpu_anneal,
         ]):
@@ -936,7 +967,7 @@ class MainTest(unittest.TestCase):
                                 [_ for _ in fbs.Energies[2::3]])
             STANDARD_VALUES = [
                 [0.5 * dof * kB * TEMPERATURE for dof in DOF_vib],  # Ep mean
-                [0.5 * dof * (kB * TEMPERATURE) ** 2 for dof in DOF_vib],  # Ep var
+                [math.sqrt(0.5 * dof) * kB * TEMPERATURE for dof in DOF_vib],  # Ep std
             ]
             for _i, _en in enumerate((ene1, ene2, ene3)):
                 #plt.plot(_en)
@@ -951,23 +982,28 @@ class MainTest(unittest.TestCase):
                 _mean_val = np.mean(_en[prebalance:])
                 _std_val = np.std(_en[prebalance:])
                 if 'ANNEAL' not in RUNNER_NAME[i]:
-                    try:
-                        self.assertStatisticalEqual(_mean_val, STANDARD_VALUES[0][_i], rtol=5e-2)
-                        self.assertStatisticalEqual(_std_val, STANDARD_VALUES[1][_i], rtol=5e-2)
-                        print(f"Mean Ep: {_mean_val}, STD Ep: {_std_val}")
-                        print(f'\n"MC Energy" Test {_i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"MC Energy" Test {_i+ 1} Failed:\n'
-                              f'test value:\n\tenergy mean: {_mean_val}\n\tenergy std: {_std_val}'
-                              f'\nstandard value:\n\tenergy mean: {STANDARD_VALUES[0][_i]}\n\tenergy std: {STANDARD_VALUES[1][_i]}\n')
+                    self.assertStatisticalEqual(
+                        _mean_val, STANDARD_VALUES[0][_i], rtol=5e-2,
+                        msg=(
+                            f'{RUNNER_NAME[i]} structure {_i}: potential-energy '
+                            f'mean {_mean_val} != {STANDARD_VALUES[0][_i]}'
+                        ),
+                    )
+                    self.assertStatisticalEqual(
+                        _std_val, STANDARD_VALUES[1][_i], rtol=5e-2,
+                        msg=(
+                            f'{RUNNER_NAME[i]} structure {_i}: potential-energy '
+                            f'std {_std_val} != {STANDARD_VALUES[1][_i]}'
+                        ),
+                    )
+                    print(f"Mean Ep: {_mean_val}, STD Ep: {_std_val}")
+                    print(f'\n"MC Energy" Test {_i + 1} passed. <<<<<')
                 else:
-                    try:
-                        self.assertAlmostEqual(th.max(th.abs(_data.pos - data.pos0)).item(), 0., delta=1e-4)
-                    except AssertionError:
-                        print(f'\n"MC Energy" Test {_i + 1} Failed:\n'
-                              f'test value:\n\tfin energy: {_en[-1]}'
-                              f'\nstandard value:\n\tenergy: 0.\n'
-                              f'position displacement max error: {th.max(th.abs(_data.pos - data.pos0)).item()}')
+                    self.assertAlmostEqual(
+                        th.max(th.abs(_data.pos - data.pos0)).item(),
+                        0.,
+                        delta=1e-4,
+                    )
 
 
     def test_OPT(self):
@@ -1351,6 +1387,162 @@ class MainTest(unittest.TestCase):
             except AssertionError:
                 print('KrylovDynamics failed.')
             th.cuda.synchronize()
+
+    def test_VIB(self):
+        """Validate all Hessian paths and the frequency dump round trip."""
+        devices = ['cpu']
+        if th.cuda.is_available():
+            devices.append('cuda:0')
+
+        output_root = os.path.join(self.out_pt, 'results')
+        for output_file in glob.glob(os.path.join(output_root, 'VIB_*.bin')):
+            if os.path.isfile(output_file):
+                os.remove(output_file)
+
+        n_atom = 8
+        n_free_atom = 7
+        n_free_dof = 3 * n_free_atom
+        for device in devices:
+            for dtype in (th.float32, th.float64):
+                hessian_diagonal = th.linspace(
+                    2., 4., n_free_dof, device=device, dtype=dtype
+                )
+                expected_hessian = th.diag(hessian_diagonal)
+                hessian_coupling = th.full(
+                    (n_free_dof - 1,), 0.05, device=device, dtype=dtype
+                )
+                expected_hessian += (
+                    th.diag(hessian_coupling, diagonal=1)
+                    + th.diag(hessian_coupling, diagonal=-1)
+                )
+                full_hessian = th.zeros(
+                    3 * n_atom, 3 * n_atom, device=device, dtype=dtype
+                )
+                full_hessian[:n_free_dof, :n_free_dof] = expected_hessian
+                full_hessian[n_free_dof:, n_free_dof:] = th.eye(
+                    3, device=device, dtype=dtype
+                )
+                coordinates = th.linspace(
+                    -0.02, 0.02, 3 * n_atom, device=device, dtype=dtype
+                ).reshape(n_atom, 3)
+                free_atom_mask = th.tensor(
+                    [1] * n_free_atom + [0], device=device
+                )
+
+                def energy(X):
+                    X_flat = X.reshape(X.size(0), -1)
+                    return 0.5 * th.einsum(
+                        'bi,ij,bj->b', X_flat, full_hessian, X_flat
+                    )
+
+                def gradient(X):
+                    return (X.reshape(X.size(0), -1) @ full_hessian).reshape_as(X)
+
+                expected_eigenvalues, expected_eigenvectors = th.linalg.eigh(
+                    expected_hessian
+                )
+                expected_frequencies = th.sqrt(expected_eigenvalues)
+                expected_modes = expected_eigenvectors.reshape(
+                    n_free_dof, n_free_atom, 3
+                )
+                tolerance = 5.e-3 if dtype == th.float32 else 1.e-8
+
+                for method in ('EnergyDiff', 'GradDiff', 'Autograd'):
+                    with self.subTest(
+                            method=method, device=device, dtype=dtype,
+                    ):
+                        dtype_name = str(dtype).split('.')[-1]
+                        output_file = os.path.join(
+                            output_root,
+                            f'VIB_{method}_{device.replace(":", "_")}_{dtype_name}.bin',
+                        )
+                        calculator = Frequency(
+                            method=method,
+                            block_size=17,
+                            delta=1.e-2,
+                            output_file=output_file,
+                            dump_hessian=True,
+                        )
+                        try:
+                            frequencies, normal_mode = calculator.normal_mode(
+                                energy,
+                                coordinates.clone(),
+                                grad_func=gradient,
+                                fixed_atom_tensor=free_atom_mask,
+                                save_hessian=True,
+                            )
+                        finally:
+                            calculator.dumper.close()
+
+                        th.testing.assert_close(
+                            calculator.hessian,
+                            expected_hessian,
+                            rtol=tolerance,
+                            atol=tolerance,
+                        )
+                        th.testing.assert_close(
+                            frequencies,
+                            expected_frequencies,
+                            rtol=tolerance,
+                            atol=tolerance,
+                        )
+                        th.testing.assert_close(
+                            normal_mode.abs(),
+                            expected_modes.abs(),
+                            rtol=tolerance,
+                            atol=tolerance,
+                        )
+
+                        dumped = read_freq(output_file)
+                        self.assertEqual(
+                            tuple(dumped),
+                            ('frequencies', 'normal_mode', 'hessian'),
+                        )
+                        self.assertEqual(
+                            {name: len(values) for name, values in dumped.items()},
+                            {'frequencies': 1, 'normal_mode': 1, 'hessian': 1},
+                        )
+                        th.testing.assert_close(
+                            dumped['frequencies'][0], frequencies.cpu()
+                        )
+                        th.testing.assert_close(
+                            dumped['normal_mode'][0], normal_mode.cpu()
+                        )
+                        th.testing.assert_close(
+                            dumped['hessian'][0], calculator.hessian.cpu()
+                        )
+
+        output_file = os.path.join(output_root, 'VIB_different_shapes.bin')
+        calculator = Frequency(
+            method='GradDiff',
+            block_size=17,
+            output_file=output_file,
+        )
+        try:
+            for n_atom in (7, 8):
+                coordinates = th.zeros(n_atom, 3)
+                calculator.normal_mode(
+                    lambda X: X.square().sum(dim=(-2, -1)),
+                    coordinates,
+                    grad_func=lambda X: 2. * X,
+                )
+        finally:
+            calculator.dumper.close()
+        dumped = read_freq(output_file)
+        self.assertEqual(tuple(dumped), ('frequencies', 'normal_mode'))
+        self.assertEqual(
+            [value.shape for value in dumped['frequencies']],
+            [(21,), (24,)],
+        )
+        self.assertEqual(
+            [value.shape for value in dumped['normal_mode']],
+            [(21, 7, 3), (24, 8, 3)],
+        )
+
+        self.assertEqual(Frequency('Coord').method, 'EnergyDiff')
+        self.assertEqual(Frequency('Grad').method, 'Autograd')
+        with self.assertRaisesRegex(ValueError, 'method'):
+            Frequency('invalid')
 
     def test_parallel(self):
         """

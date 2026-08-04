@@ -97,9 +97,10 @@ CONFIG_STUB = {
 
     # Vibration analyses
     "VIBRATION": {
-        "METHOD": ("Coord", str, "method for vibration analysis. 'Coord' for finite difference, 'Grad' for auto-grad"),
+        "METHOD": ("EnergyDiff", str, "Hessian method: EnergyDiff, GradDiff, or Autograd"),
         "BLOCK_SIZE": (1, int, "block size for tensor/vectorize parallelization"),
         "DELTA": (0.01, float, "finite difference length for Hessian-vector product"),
+        "SAVE_HESSIAN": (False, bool, "whether to dump the Hessian with vibration results"),
     },
 
     # NEB transition state

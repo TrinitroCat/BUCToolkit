@@ -1599,6 +1599,63 @@ def read_dump_arrays(
     )
 
 
+def read_freq(path: str) -> Dict[str, List[th.Tensor]]:
+    """Read harmonic frequencies, normal modes, and an optional Hessian.
+
+    Each structure written by :class:`BUCToolkit.BatchOptim.frequency.Frequency`
+    occupies one named, single-cycle group. Groups may have different shapes,
+    allowing structures with different atom counts to share one output file.
+
+    Args:
+        path: Canonical vibration dump written by ``Frequency``.
+
+    Returns:
+        A tensor dictionary containing ``frequencies`` and ``normal_mode``
+        lists in calculation order. ``hessian`` is present when it was enabled
+        by the writer.
+
+    Raises:
+        EOFError: If a group does not contain exactly one calculation.
+        ValueError: If required names are absent or group schemas differ.
+        RuntimeError: If the file cannot be parsed as a canonical array dump.
+    """
+    reader = ArrayDumpReader(path)
+    raw_groups = reader.read(groups=-1, indices=-1, is_copy=True)
+    group_names = reader.names or {}
+    required_names = {'frequencies', 'normal_mode'}
+    allowed_names = required_names | {'hessian'}
+    reference_names = None
+    output: Dict[str, List[th.Tensor]] = {}
+
+    for group_index in range(reader.n_groups):
+        cycles = raw_groups[f'group{group_index}']
+        if len(cycles) != 1:
+            raise EOFError(
+                f'Frequency group {group_index} must contain one cycle, '
+                f'but got {len(cycles)}.'
+            )
+        names = group_names.get(group_index)
+        if names is None:
+            raise ValueError(f'Frequency group {group_index} has no array names.')
+        name_set = set(names)
+        if not required_names.issubset(name_set) or not name_set.issubset(allowed_names):
+            raise ValueError(
+                f'Frequency group {group_index} has invalid names {names}; '
+                'expected frequencies, normal_mode, and optional hessian.'
+            )
+        if reference_names is None:
+            reference_names = tuple(names)
+            output = {name: [] for name in names}
+        elif tuple(names) != reference_names:
+            raise ValueError(
+                f'Frequency group {group_index} has schema {names}, but '
+                f'previous groups use {list(reference_names)}.'
+            )
+        for name, array in zip(names, cycles[0]):
+            output[name].append(th.from_numpy(array.copy()))
+    return output
+
+
 def read_dump_arrays_old(
         path: str,
         indices: List[int] | slice | int = -1,

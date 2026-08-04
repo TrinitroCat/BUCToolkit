@@ -208,7 +208,7 @@ REDIRECT: !!bool true
 LOAD_CHK_FILE_PATH: '{chk_dir}/best_checkpoint_test_model_chk.pt'
 
 VIBRATION:
-  METHOD: !!str Coord
+  METHOD: !!str EnergyDiff
   BLOCK_SIZE: !!int 6
   DELTA: !!float 0.01
   SAVE_HESSIAN: !!bool true

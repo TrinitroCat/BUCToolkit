@@ -1052,9 +1052,10 @@ TRANSITION_STATE:
 ARGS_VIB = """
 # vibration analyses (harmonic)
 VIBRATION:
-  METHOD: !!str 'Coord'  # Coord/Grad corresponding to finite difference and auto-grad scheme.
+  METHOD: !!str 'EnergyDiff'  # EnergyDiff / GradDiff / Autograd.
   BLOCK_SIZE: !!int 1
   DELTA: !!float 1e-2
+  SAVE_HESSIAN: !!bool false
 """
 
 ARGS_NEB = """

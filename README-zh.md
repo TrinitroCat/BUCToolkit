@@ -332,7 +332,7 @@ YAML 输入文件中的路径统一相对于输入文件所在目录解析；命
 每个单行任务都需要 `OUTPUT_ROOT`；若未提供，则兼容地将旧
 `OUTPUT_PATH` 视为根目录。根目录不存在时会创建，已存在时必须是空的、
 非符号链接目录。日志默认写入 `OUTPUT_ROOT/logs`，结果默认写入
-`OUTPUT_ROOT/results/result`（VIB 为 `result.pt`），训练检查点默认写入
+`OUTPUT_ROOT/results/result`，训练检查点默认写入
 `OUTPUT_ROOT/chk`。显式的 `OUTPUT_PATH`、`PREDICTIONS_SAVE_FILE` 和
 `TRAIN.CHK_SAVE_PATH` 始终优先。
 
@@ -484,9 +484,10 @@ TRANSITION_STATE:
 
 # 振动分析（简谐近似）
 VIBRATION:
-  METHOD: !!str 'Coord'  # Coord / Grad，对应有限差分和自动梯度两种方案
+  METHOD: !!str 'EnergyDiff'  # EnergyDiff / GradDiff / Autograd
   BLOCK_SIZE: !!int 1    # 张量/向量并行化的块大小
   DELTA: !!float 1e-2    # 有限差分计算 Hessian‑向量积的步长
+  SAVE_HESSIAN: !!bool false  # 随频率和简正模式一同保存 Hessian
 
 # NEB 过渡态
 NEB:

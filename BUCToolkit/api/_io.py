@@ -211,7 +211,14 @@ class _CONFIGS(object):
             algo_info = f"{self.MD["ENSEMBLE"]} Ensemble"
         elif mode == 'VIB':
             self.logger.info(' TASK: Vibrational Analysis (Harmonic) <<')
-            algo_info = "Finite Difference" if self.VIBRATION.get('METHOD', 'Coord') == "Coord" else "Automatic Differentiation"
+            vibration_method = self.VIBRATION.get('METHOD', 'EnergyDiff')
+            algo_info = {
+                'EnergyDiff': 'Energy Finite Difference',
+                'GradDiff': 'Gradient Finite Difference',
+                'Autograd': 'Automatic Differentiation',
+                'Coord': 'Energy Finite Difference',
+                'Grad': 'Automatic Differentiation',
+            }.get(vibration_method, vibration_method)
         elif mode == 'MC':
             self.logger.info(' TASK: Monte Carlo <<')
             algo_info = self.MC["TYPE"]
@@ -686,7 +693,7 @@ class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
 
         force: th.Tensor = self.forces
         self.forces = None
-        return - force.unsqueeze(0)
+        return -force.reshape_as(X)
 
 
 class ExpMovingAverage:

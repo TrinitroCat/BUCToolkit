@@ -13,24 +13,61 @@ from typing import Literal, Callable, Tuple, Dict, List
 import numpy as np
 import torch as th
 
+from BUCToolkit.Bases.BaseMotion import BaseIO
 
 
-class Frequency:
+class Frequency(BaseIO):
     """
-    Calculate normal mode frequency by finite difference method.
+    Calculate harmonic frequencies and normal modes.
 
     Args:
-        method: 'Coord' for directly calculating 2nd-order deviations, i.e., the Hessian matrix.
-                'Grad' for calculating 1st-order deviations of grad to get Hessian matrix.
+        method: ``EnergyDiff`` for energy finite differences, ``GradDiff`` for
+            gradient finite differences, or ``Autograd`` for automatic
+            differentiation. ``Coord`` and ``Grad`` are compatibility aliases
+            for ``EnergyDiff`` and ``Autograd`` respectively.
         block_size: block size to calculate Hessian. `block_size`*N rows would be input at once.
                     `None` for input all (3*N)**2 rows coords at once, which requires enough memory.
         delta: finite difference delta.
+        output_file: optional canonical array-dump path.
+        dump_hessian: whether the optional ``hessian`` column is written with
+            ``frequencies`` and ``normal_mode``.
     """
-    def __init__(self, method: Literal['Coord', 'Grad'] = 'Coord', block_size: None | int = None, delta: float = 1e-2):
+    def __init__(
+            self,
+            method: Literal[
+                'EnergyDiff', 'GradDiff', 'Autograd', 'Coord', 'Grad'
+            ] = 'EnergyDiff',
+            block_size: None | int = None,
+            delta: float = 1e-2,
+            output_file: str | None = None,
+            dump_hessian: bool = False,
+    ):
+        super().__init__(output_file)
+        method_aliases = {
+            'Coord': 'EnergyDiff',
+            'Grad': 'Autograd',
+            'EnergyDiff': 'EnergyDiff',
+            'GradDiff': 'GradDiff',
+            'Autograd': 'Autograd',
+        }
+        if method not in method_aliases:
+            raise ValueError(
+                '`method` must be one of EnergyDiff, GradDiff, Autograd, '
+                f'Coord, or Grad, but got {method!r}.'
+            )
+        if block_size is not None and (
+                not isinstance(block_size, int) or block_size <= 0
+        ):
+            raise ValueError(
+                f'`block_size` must be a positive integer or None, but got {block_size!r}.'
+            )
+        if not isinstance(delta, (int, float)) or delta <= 0.:
+            raise ValueError(f'`delta` must be positive, but got {delta!r}.')
         self.hessian = None
-        self.method = method
+        self.method = method_aliases[method]
         self.block_size = block_size
-        self.delta = delta
+        self.delta = float(delta)
+        self.dump_hessian = bool(dump_hessian)
 
     class _func_wrapper:
         """
@@ -61,6 +98,15 @@ class Frequency:
             positive_difference, negative_difference, origin_point: (3 N, N, 3), (3 N, N, 3), (1, N, 3)
         """
 
+        if coords.dim() != 2 or coords.size(-1) != 3:
+            raise ValueError(
+                f'Expected `coords` to have shape (N, 3), but got {coords.shape}.'
+            )
+        if fixed_atom_tensor is None:
+            fixed_atom_tensor = th.arange(coords.size(0), device=coords.device)
+        fixed_atom_tensor = fixed_atom_tensor.to(
+            device=coords.device, dtype=th.long
+        )
         coords_free = coords[fixed_atom_tensor]
         N = coords_free.shape[0]
         coords_out = coords.unsqueeze(0).expand(3*N, -1, -1)
@@ -94,7 +140,7 @@ class Frequency:
 
         return diff_pos_out, diff_neg_out, origin
 
-    def create_hessian(
+    def hessian_by_energy_finite_diff(
             self,
             func: Callable,
             coords: th.Tensor,
@@ -103,18 +149,18 @@ class Frequency:
             save_hessian: bool = False,
             fixed_atom_tensor: th.Tensor | None = None,
     ) -> th.Tensor:
-        """
-        To calculate Hessian matrix in blocks via finite difference
+        """Calculate a Hessian from central finite differences of energy.
+
         Args:
-            func:
-            coords: (N, 3) shape Tensor
-            func_args: other input arguments of `func`.
-            func_kwargs: other input keyword arguments of `func`.
-            save_hessian: whether save calculated hessian as an attribute.
-            fixed_atom_tensor: the indices of X that fixed, i.e., not performing vibration calculation.
+            func: Batched potential-energy function.
+            coords: Atomic coordinates with shape ``[N, 3]``.
+            func_args: Additional positional arguments for ``func``.
+            func_kwargs: Additional keyword arguments for ``func``.
+            save_hessian: Whether to retain the Hessian on this instance.
+            fixed_atom_tensor: Indices of atoms included in the calculation.
 
         Returns:
-
+            Hessian with shape ``[3*N_free, 3*N_free]``.
         """
         if func_kwargs is None:
             func_kwargs = dict()
@@ -130,33 +176,97 @@ class Frequency:
 
         # reformat as batch dimension
         n_free = len(diff_pos)
-        n_atom = n_free // 3
         all_batch = len(pp)**2
         block_size = all_batch if self.block_size is None else self.block_size
-        n_int_block = pp.flatten(0, 1).shape[0] // block_size
-        n_rest = pp.flatten(0, 1).shape[0] % block_size
-        real_block_size = [block_size] * n_int_block
-        if n_rest > 0: real_block_size = real_block_size + [n_rest]  # manage the problem that all_batch could not be divided by given block_size.
-        pp = th.split(pp.flatten(0, 1), real_block_size)  # (9N**2, N ,3)
-        np_ = th.split(np_.flatten(0, 1), real_block_size)
-        pn = th.split(pn.flatten(0, 1), real_block_size)
-        nn = th.split(nn.flatten(0, 1), real_block_size)
-        num_block = len(pp)
-
-        # split blocks
-        start = 0
+        pp = pp.flatten(0, 1)
+        np_ = np_.flatten(0, 1)
+        pn = pn.flatten(0, 1)
+        nn = nn.flatten(0, 1)
         hessian = th.empty(all_batch, device=device, dtype=dtype)
-        for _indx in range(num_block):
-            end = start + block_size
+        for start in range(0, all_batch, block_size):
+            end = min(start + block_size, all_batch)
             hessian[start:end] = (
-                                         func_(pp[_indx]) - func_(np_[_indx]) - func_(pn[_indx]) + func_(nn[_indx])
+                                         func_(pp[start:end]) - func_(np_[start:end])
+                                         - func_(pn[start:end]) + func_(nn[start:end])
                                  ) / (4 * self.delta ** 2)  # (3N * 3N)
-            start = end
         hessian = hessian.reshape(n_free, n_free)
         if save_hessian:
             self.hessian = hessian
 
         return hessian.squeeze(0)
+
+    def hessian_by_grad_finite_diff(
+            self,
+            grad_func: Callable,
+            coords: th.Tensor,
+            grad_func_args: Tuple = tuple(),
+            grad_func_kwargs: Dict | None = None,
+            fixed_atom_tensor: th.Tensor | None = None,
+            save_hessian: bool = False,
+    ) -> th.Tensor:
+        """Calculate a Hessian from central finite differences of a gradient.
+
+        Args:
+            grad_func: Function returning one energy-gradient value per input
+                coordinate.
+            coords: Atomic coordinates with shape ``[N, 3]``.
+            grad_func_args: Additional positional arguments for ``grad_func``.
+            grad_func_kwargs: Additional keyword arguments for ``grad_func``.
+            fixed_atom_tensor: Indices of atoms included in the calculation.
+            save_hessian: Whether to retain the Hessian on this instance.
+
+        Returns:
+            Symmetric Hessian with shape ``[3*N_free, 3*N_free]``.
+        """
+        if grad_func is None:
+            raise ValueError('`grad_func` is required for `GradDiff`.')
+        if grad_func_kwargs is None:
+            grad_func_kwargs = dict()
+        diff_pos, diff_neg, _ = self._create_finite_diff_tensor(
+            coords, fixed_atom_tensor
+        )
+        if fixed_atom_tensor is None:
+            fixed_atom_tensor = th.arange(coords.size(0), device=coords.device)
+        fixed_atom_tensor = fixed_atom_tensor.to(
+            device=coords.device, dtype=th.long
+        )
+        free_coord_indices = (
+            fixed_atom_tensor.unsqueeze(-1) * coords.size(-1)
+            + th.arange(coords.size(-1), device=coords.device)
+        ).reshape(-1)
+
+        def evaluate_gradient(batch_coords: th.Tensor) -> th.Tensor:
+            gradient = grad_func(
+                batch_coords, *grad_func_args, **grad_func_kwargs
+            )
+            if not isinstance(gradient, th.Tensor):
+                raise TypeError(
+                    '`grad_func` must return a torch.Tensor, but returned '
+                    f'{type(gradient)}.'
+                )
+            if gradient.numel() != batch_coords.numel():
+                raise ValueError(
+                    '`grad_func` must return one value per coordinate, but got '
+                    f'{gradient.shape} for input shape {batch_coords.shape}.'
+                )
+            return gradient.reshape_as(batch_coords)
+
+        n_dof = diff_pos.size(0)
+        block_size = n_dof if self.block_size is None else self.block_size
+        hessian = th.empty(
+            n_dof, n_dof, device=coords.device, dtype=coords.dtype
+        )
+        for start in range(0, n_dof, block_size):
+            end = min(start + block_size, n_dof)
+            gradient_diff = (
+                evaluate_gradient(diff_pos[start:end])
+                - evaluate_gradient(diff_neg[start:end])
+            ).reshape(end - start, -1)[:, free_coord_indices]
+            hessian[:, start:end] = gradient_diff.mT / (2. * self.delta)
+        hessian = 0.5 * (hessian + hessian.mT)
+        if save_hessian:
+            self.hessian = hessian
+        return hessian
 
     def hessian_by_autograd(
             self,
@@ -166,7 +276,22 @@ class Frequency:
             grad_func_kwargs: Dict | None = None,
             fixed_atom_tensor: th.Tensor | None = None,
             save_hessian: bool = False
-    ):
+    ) -> th.Tensor:
+        """Calculate a Hessian by differentiating an energy gradient.
+
+        Args:
+            grad_func: Differentiable function returning one energy-gradient
+                value per input coordinate.
+            X: Coordinates with shape ``[N, 3]`` or ``[B, N, 3]``.
+            grad_func_args: Additional positional arguments for ``grad_func``.
+            grad_func_kwargs: Additional keyword arguments for ``grad_func``.
+            fixed_atom_tensor: Flattened indices of included coordinates.
+            save_hessian: Whether to retain the Hessian on this instance.
+
+        Returns:
+            Hessian with shape ``[N_free, N_free]`` for a single structure or
+            ``[B, N_free, N_free]`` for a batch.
+        """
         if grad_func_kwargs is None:
             grad_func_kwargs = dict()
 
@@ -176,7 +301,13 @@ class Frequency:
             raise ValueError(f'Expected X has 2 or 3 dimensions, but got {X.shape}')
         X_flat = X.flatten(-2, -1)
         if fixed_atom_tensor is None:
-            fixed_atom_tensor = th.arange(X_flat.size(1), dtype=X.dtype, device=X.device)
+            fixed_atom_tensor = th.arange(
+                X_flat.size(1), dtype=th.long, device=X.device
+            )
+        else:
+            fixed_atom_tensor = fixed_atom_tensor.to(
+                device=X.device, dtype=th.long
+            )
 
         n_batch, n_atom, n_dim = X.shape
         n_free_atom = len(fixed_atom_tensor)
@@ -188,8 +319,14 @@ class Frequency:
             g: th.Tensor = grad_func(X_, *grad_func_args, **grad_func_kwargs)
             g = g.reshape(n_batch, n_atom * n_dim)
             # Hessian
-            hessian = th.zeros((n_batch, n_free_atom, n_free_atom), device=X.device)
-            hess_mask = th.zeros(n_batch, n_atom * n_dim, device=X.device)
+            hessian = th.zeros(
+                (n_batch, n_free_atom, n_free_atom),
+                device=X.device,
+                dtype=X.dtype,
+            )
+            hess_mask = th.zeros(
+                n_batch, n_atom * n_dim, device=X.device, dtype=X.dtype
+            )
             for i, indx in enumerate(fixed_atom_list):
                 hess_mask[:, indx] = 1.
                 H_line = th.autograd.grad(g, X_flat, hess_mask, retain_graph=True)[0]  # (n_batch, n_atom*n_dim, 1)
@@ -223,16 +360,23 @@ class Frequency:
             masses: atomic masses tensor with shape (N, 3) or (N, ). `None` for tensor filled with 1.
             func_args: other input arguments of `func`.
             func_kwargs: other input keyword arguments of `func`.
-            grad_func: gradient function, only used for self.method = 'Grad'.
+            grad_func: gradient function used by ``GradDiff`` and ``Autograd``.
             grad_func_args: other input arguments of `grad_func`.
             grad_func_kwargs: other input keyword arguments of `grad_func`.
             fixed_atom_tensor: (N, ) or (N, 3), the indices of X that fixed, i.e., not performing vibration calculation.
                                Only the 1st dimension will be read. Fixing partial degrees of freedom for an atom is not supported.
-            save_hessian: whether save calculated hessian as an attribute.
+            save_hessian: Whether to retain the calculated Hessian as an
+                attribute. Dumping is controlled independently by the
+                constructor's ``dump_hessian`` argument.
 
         Returns:
             normal mode frequencies: (3N, ) shape Tensor
             normal mode coordinates: (3N, N, 3) shape Tensor
+
+        Notes:
+            When ``output_file`` is configured, each call writes one
+            single-cycle group containing ``frequencies`` and ``normal_mode``;
+            ``hessian`` is included when ``dump_hessian`` is true.
         """
         # check
         with th.no_grad():
@@ -262,9 +406,25 @@ class Frequency:
             flat_masses = masses.flatten(0, 1)
             hess_weights = th.sqrt(flat_masses.unsqueeze(-1) * flat_masses.unsqueeze(0))
             # calc hessian
-            if self.method == 'Coord':
-                hessian = self.create_hessian(func, coords, func_args, func_kwargs, fixed_atom_tensor=fixed_atom_tensor_indx)
+            if self.method == 'EnergyDiff':
+                hessian = self.hessian_by_energy_finite_diff(
+                    func,
+                    coords,
+                    func_args,
+                    func_kwargs,
+                    fixed_atom_tensor=fixed_atom_tensor_indx,
+                )
+            elif self.method == 'GradDiff':
+                hessian = self.hessian_by_grad_finite_diff(
+                    grad_func,
+                    coords,
+                    grad_func_args,
+                    grad_func_kwargs,
+                    fixed_atom_tensor=fixed_atom_tensor_indx,
+                )
             else:
+                if grad_func is None:
+                    raise ValueError('`grad_func` is required for `Autograd`.')
                 hessian = self.hessian_by_autograd(grad_func, coords, grad_func_args, grad_func_kwargs, fixed_atom_tensor=fixed_atom_tensor_ex)
             weighted_hessian = hessian/hess_weights
             norm_freq_square, weighted_norm_mode = th.linalg.eigh(weighted_hessian)
@@ -274,6 +434,19 @@ class Frequency:
             norm_mode = (weighted_norm_mode/flat_masses).reshape(norm_freq_square.size(-1), -1, 3)
             if save_hessian:
                 self.hessian = hessian
+
+            dump_arrays = [
+                norm_freq.numpy(force=True),
+                norm_mode.numpy(force=True),
+            ]
+            dump_names = ['frequencies', 'normal_mode']
+            if self.dump_hessian:
+                dump_arrays.append(hessian.numpy(force=True))
+                dump_names.append('hessian')
+            self.dumper.start_from_arrays(
+                1, *dump_arrays, names=dump_names
+            )
+            self.dumper.step(*dump_arrays)
 
             return norm_freq, norm_mode
 
@@ -493,4 +666,3 @@ if __name__ == '__main__' and False:
     freq2 = Frequency('Grad')
     ei2, ej2 = freq2.normal_mode(f, x0, grad_func=grad_f, save_hessian=True, fixed_atom_tensor=th.tensor([0, 1]))
     pass
-

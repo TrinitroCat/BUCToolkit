@@ -343,8 +343,8 @@ relative to the directory where the command is invoked.
 Each one-line task requires `OUTPUT_ROOT` (the legacy `OUTPUT_PATH` is used as
 the root when `OUTPUT_ROOT` is absent). A missing root is created; an existing
 root must be an empty, non-symbolic-link directory. Logs default to
-`OUTPUT_ROOT/logs`, results to `OUTPUT_ROOT/results/result` (or `result.pt` for
-VIB), and training checkpoints to `OUTPUT_ROOT/chk`. Explicit `OUTPUT_PATH`,
+`OUTPUT_ROOT/logs`, results to `OUTPUT_ROOT/results/result`, and training
+checkpoints to `OUTPUT_ROOT/chk`. Explicit `OUTPUT_PATH`,
 `PREDICTIONS_SAVE_FILE`, and `TRAIN.CHK_SAVE_PATH` values take precedence.
 
 An interactive command-line interface can be used as well by inputting no argument:
@@ -504,9 +504,10 @@ TRANSITION_STATE:
 
 # vibration analyses (harmonic)
 VIBRATION:
-  METHOD: !!str 'Coord'  # Coord/Grad corresponding to finite difference and auto-grad scheme.
+  METHOD: !!str 'EnergyDiff'  # EnergyDiff / GradDiff / Autograd.
   BLOCK_SIZE: !!int 1    # block-size of tensor/vectorize parallelization
   DELTA: !!float 1e-2    # length for finite difference to calc. Hessian-vector prod.
+  SAVE_HESSIAN: !!bool false  # dump the Hessian with frequencies and normal modes
 
 # NEB transition state
 NEB:

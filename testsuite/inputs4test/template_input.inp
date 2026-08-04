@@ -103,9 +103,10 @@ TRANSITION_STATE:
 
 # vibration analyses (harmonic)
 VIBRATION:
-  METHOD: !!str 'Coord'  # Coord/Grad corresponding to finite difference and auto-grad scheme.
+  METHOD: !!str 'EnergyDiff'  # EnergyDiff / GradDiff / Autograd.
   BLOCK_SIZE: !!int 1    # block-size of tensor/vectorize parallelization
   DELTA: !!float 1e-2    # length for finite difference to calc. Hessian-vector prod.
+  SAVE_HESSIAN: !!bool false
 
 # NEB transition state
 NEB:

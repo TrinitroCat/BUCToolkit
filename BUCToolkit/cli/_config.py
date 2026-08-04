@@ -158,11 +158,9 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
         return config
 
     config.setdefault("OUTPUT_PATH", os.path.join(output_root, "logs"))
-    task = config.get("TASK", "").upper()
-    result_name = "result.pt" if task in {"VIB", "VIBRATIONAL_ANALYSIS"} else "result"
     config.setdefault(
         "PREDICTIONS_SAVE_FILE",
-        os.path.join(output_root, "results", result_name),
+        os.path.join(output_root, "results", "result"),
     )
     train_config = config.get("TRAIN")
     if isinstance(train_config, dict):
