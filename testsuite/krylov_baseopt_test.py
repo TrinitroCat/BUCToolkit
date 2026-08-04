@@ -5,11 +5,11 @@ from BUCToolkit.BatchOptim.TS.Krylov import (
     KrylovDynamics as LegacyKrylovDynamics,
     KrylovNewton as LegacyKrylovNewton,
 )
-from BUCToolkit.BatchOptim.TSBaseOpt.Krylov import (
+from BUCToolkit.BatchOptim.TS.Krylov import (
     KrylovDynamics,
     KrylovNewton,
 )
-from BUCToolkit.BatchOptim.TSBaseOpt._eigen_solver import FindEigen
+from BUCToolkit.BatchOptim.TS._eigen_solver import FindEigen
 from BUCToolkit.BatchOptim._BaseOpt import FLOAT_TYPE
 
 

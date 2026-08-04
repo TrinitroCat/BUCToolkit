@@ -7,7 +7,7 @@ from torch import nn
 
 from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.BatchOptim._BaseOpt import _BaseOpt
-from BUCToolkit.BatchOptim.TSBaseOpt._eigen_solver import FindMinEigen
+from BUCToolkit.BatchOptim.TS._eigen_solver import FindMinEigen
 from BUCToolkit.utils import index_ops
 from BUCToolkit.utils.grad_functions import fin_diff_hvp
 
@@ -24,9 +24,28 @@ class Dimer(_BaseOpt):
             maxiter_rot: int = 10,
             max_steplength: float = 0.5,
             dx: float = 1.e-2,
+            output_file: str | None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2,
     ) -> None:
+        """Initialize a Dimer search using the shared optimizer lifecycle.
+
+        Args:
+            E_threshold: Energy-change convergence threshold.
+            Torque_thres: Maximum rotational torque threshold.
+            Curvature_thres: Curvature threshold for rotation convergence.
+            F_threshold: Maximum force convergence threshold.
+            maxiter_trans: Maximum number of translation iterations.
+            maxiter_rot: Maximum rotations per translation iteration.
+            max_steplength: Maximum translation step length.
+            dx: Finite-difference displacement used by the eigen solver.
+            output_file: Optional canonical optimizer trajectory path.
+            device: Torch device used by the search.
+            verbose: Logging verbosity.
+
+        Returns:
+            None.
+        """
         self.Torque_thres = float(Torque_thres)
         self.Curvature_thres = float(Curvature_thres)
         if not isinstance(maxiter_rot, int) or maxiter_rot <= 0:
@@ -44,6 +63,7 @@ class Dimer(_BaseOpt):
             linesearch='None',
             steplength=1.,
             use_bb=False,
+            output_file=output_file,
             device=device,
             verbose=verbose,
         )

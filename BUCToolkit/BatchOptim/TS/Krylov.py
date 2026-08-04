@@ -16,7 +16,7 @@ from torch import nn
 
 from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.BatchOptim._BaseOpt import _BaseOpt
-from BUCToolkit.BatchOptim.TSBaseOpt._eigen_solver import FindEigen
+from BUCToolkit.BatchOptim.TS._eigen_solver import FindEigen
 from BUCToolkit.utils import index_ops
 from BUCToolkit.utils.exceptions import IterationStuckError
 from BUCToolkit.utils.grad_functions import fin_diff_hvp
@@ -41,12 +41,13 @@ class _KrylovBase(_BaseOpt):
             maxiter_trans: int,
             maxiter_eig: int,
             steplength: float,
-            dx: float,
-            device: str | th.device,
-            verbose: int,
-            morse_index: int,
-            neg_spectra_cutoff: float,
-            pos_spectra_cutoff: float,
+            dx: float = 0.01,
+            output_file: str | None = None,
+            device: str | th.device = 'cpu',
+            verbose: int = 1,
+            morse_index: int = 1,
+            neg_spectra_cutoff: float = -0.1,
+            pos_spectra_cutoff: float = 0.1,
     ) -> None:
         self.Torque_thres = abs(float(Torque_thres))
         self.Eigen_thres = abs(float(Eigen_thres))
@@ -75,6 +76,7 @@ class _KrylovBase(_BaseOpt):
             maxiter=self.maxiter_trans,
             linesearch='None',
             steplength=float(steplength),
+            output_file=output_file,
             use_bb=False,
             device=device,
             verbose=verbose,
@@ -369,6 +371,7 @@ class KrylovNewton(_KrylovBase):
             steplength_sheme: Literal['trust_region', 'line_newton', 'line_search'] = 'trust_region',
             dx: float = 1.e-2,
             device: str | th.device = 'cpu',
+            output_file: str | None = None,
             verbose: int = 2,
             morse_index: int = 1,
             neg_spectra_cutoff: float = 0.01,
@@ -377,7 +380,9 @@ class KrylovNewton(_KrylovBase):
         super().__init__(
             'KrylovNewton',
             E_threshold, Torque_thres, Eigen_thres, F_threshold,
-            maxiter_trans, maxiter_eig, steplength, dx, device, verbose,
+            maxiter_trans, maxiter_eig, steplength, dx,
+            output_file,
+            device, verbose,
             morse_index, neg_spectra_cutoff, pos_spectra_cutoff,
         )
         self.steplength_sheme = steplength_sheme

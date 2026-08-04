@@ -2,7 +2,7 @@ import pytest
 import torch as th
 
 from BUCToolkit.BatchOptim.TS.Dimer import Dimer as LegacyDimer
-from BUCToolkit.BatchOptim.TSBaseOpt.Dimer import Dimer
+from BUCToolkit.BatchOptim.TS.Dimer import Dimer
 
 
 def _energy(X, counts, scales):
