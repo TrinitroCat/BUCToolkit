@@ -9,12 +9,14 @@
 
 import random
 from typing import Any, Dict, List, Self, Tuple, Literal, Sequence
+from collections.abc import Mapping
 
 import numpy as np
 import torch as th
 
 from BUCToolkit.utils._CheckModules import check_module
 from BUCToolkit.BatchStructures import Batch
+from BUCToolkit.utils.model_wrappers.MACE_model_wrapper import _require_mace
 
 # check modules
 _pyg = check_module('torch_geometric.data')
@@ -315,6 +317,190 @@ class ISFSPyGDataLoader:
             dataFS = self.dataFS[self._index * self.batchsize: (self._index + 1) * self.batchsize]
             dataFS = pygBatch.from_data_list(dataFS)
             dataFS = dataFS.to(self.device)  # type: ignore
+
+            self._index += 1
+            return dataIS, dataFS
+        else:
+            raise StopIteration
+
+class MACEDataLoader:
+    """Form in-memory batches from MACE ``AtomicData`` objects.
+
+    Args:
+        data: Mapping containing a ``data`` list and, during training, a
+            ``labels`` mapping with per-structure ``energy`` and optional
+            per-atom ``forces`` values.
+        batch_size: Number of structures in each batch.
+        device: Device receiving the MACE batch and labels.
+        shuffle: Whether to shuffle structures and labels together.
+        is_train: Whether the loader should return training labels.
+        data_names: Optional structure names returned when ``is_train`` is false.
+
+    Yields:
+        A MACE Batch paired with training labels, structure names, or ``None``.
+
+    Notes:
+        This mirrors ``BUCToolkit.api.DataLoaders.PyGDataLoader`` but deliberately
+        uses MACE's vendored Batch implementation. MACE ``AtomicData`` inherits
+        from MACE's vendored Data class, while external PyG may dynamically call
+        ``AtomicData()`` without its required constructor fields during batching.
+    """
+
+    def __init__(
+            self,
+            data: Dict[Literal['data', 'labels'] | Literal['data', 'names'], Any],
+            batch_size: int,
+            device: str | th.device = 'cpu',
+            shuffle: bool = True,
+            is_train: bool = True,
+            data_names: Sequence[str] | None = None
+    ) -> None:
+
+        self._batch_class = _require_mace()['Batch']
+        self.data: List = data['data']
+        self.is_train = is_train
+        if is_train:
+            self.energy: Any = data['labels']['energy']
+            self.forces: Any = data['labels'].get('forces', None)
+            if shuffle: self.shuffle()
+            if not isinstance(self.energy, th.Tensor):
+                self.energy_ = th.from_numpy(np.array(self.energy, dtype=np.float32))
+        self.data_names = data_names
+        self.batchsize = batch_size
+        self._n_samp = len(self.data)
+        self._index = 0
+        self.device = device
+        # set the flag
+        self._LOADER_TYPE = 'Train'
+
+    def shuffle(self, ):
+        _seed = random.randint(0, 2147483647)
+        random.seed(_seed)
+        random.shuffle(self.data)
+        random.seed(_seed)
+        random.shuffle(self.energy)
+        if self.forces is not None:
+            random.seed(_seed)
+            random.shuffle(self.forces)
+
+    def __iter__(self, ) -> Self:
+        return self
+
+    def __next__(self, ) -> Tuple[Any, Dict[Literal['energy', 'forces'], th.Tensor] | None]:
+        if self._index * self.batchsize < self._n_samp:
+            data_list = self.data[self._index * self.batchsize: (self._index + 1) * self.batchsize]
+            data = self._batch_class.from_data_list(data_list)
+            data = data.to(self.device)
+            # MACE's vendored Batch exposes ``num_graphs`` but omits the
+            # ``batch_size`` and ``idx`` attributes required by BUCToolkit's
+            # Trainer contract. Keep these compatibility attributes at the
+            # loader boundary instead of modifying either implementation.
+            data.batch_size = data.num_graphs
+            data.idx = [
+                structure.get('idx') if isinstance(structure, Mapping)
+                else getattr(structure, 'idx', None)
+                for structure in data_list
+            ]
+
+            if self.is_train:
+                energy = self.energy_[self._index * self.batchsize: (self._index + 1) * self.batchsize]
+                energy = energy.to(self.device)
+
+                if self.forces is not None:
+                    force = self.forces[self._index * self.batchsize: (self._index + 1) * self.batchsize]
+                    force = th.from_numpy(np.concatenate(force)).to(self.device)
+                    label: Dict[Literal['energy', 'forces'], th.Tensor] | None = {'energy': energy, 'forces': force}
+                else:
+                    label: Dict[Literal['energy'], th.Tensor] | None = {'energy': energy}
+
+            elif self.data_names is not None:
+                label: Sequence[str] = self.data_names[self._index * self.batchsize: (self._index + 1) * self.batchsize]
+
+            else:
+                label = None
+
+            self._index += 1
+            return data, label
+        else:
+            raise StopIteration
+
+
+class ISFSMACEDataLoader:
+    """
+    A Data loader to form pygData IN MEMORY.
+    This Data loader yields Tuple(pygData1, pygData2) instead of (pygData, label).
+    Wherein, pygData1 and pygData2 are corresponding to the initial state and finale state of structures.
+
+    Args:
+        data: Dict: {'dataIS': D1, 'dataFS': D2}, where
+            D1 and D2 are 2 Lists of pyg.Data that contain attributes `pos`, `cell`, `atomic_numbers`, `natoms`, `tags`, `fixed`, `pbc`, `idx`.
+              `pos`: Tensor, atom coordinates.
+              `cell`: Tensor, cell vectors.
+              `atomic_numbers`: Tensor, atomic numbers, corresponding to `pos` one by one.
+              `natoms`: int, number of atoms.
+              `tags`: Tensor, to be compatible with 'FAIR-CHEM' (https://fair-chem.github.io/),
+                      which fixed slab part is set to 0, free slab part is 1, adsorbate is 2.
+              `fixed`: Tensor, fixed tag, which fixed atoms are 0, free atoms are 1.
+              `pbc`: List[bool, bool, bool], where to be periodic at x, y, z directions.
+              `idx`: str, the name of this structure.
+        batch_size: batch size.
+        device: the device that data put on.
+        data_names: if `data_names` is not None, it should be a Sequence(data names) with the same order as data,
+                and the returned `labels` [i.e., next(iter(dataloader))] would be data_names instead of "energy" or "forces",
+                else `labels` would be None.
+
+    Yields:
+            (pyg.Data, pyg.Data)
+
+    """
+    def __init__(
+            self,
+            data: Dict[Literal['dataIS', 'dataFS'], Any],
+            batch_size: int,
+            device: str | th.device = 'cpu',
+            data_names: Sequence[str] | None = None
+    ) -> None:
+
+        # check module
+        self._batch_class = _require_mace()['Batch']
+        self.dataIS: List = data['dataIS']
+        self.dataFS: List = data['dataFS']
+        self.data_names = data_names
+        self.batchsize = batch_size
+        self._n_samp = len(self.dataIS)
+        _n_samp_check = len(self.dataFS)
+        if _n_samp_check != self._n_samp:
+            raise RuntimeError(
+                f"The number of samples in `dataIS` and `dataFS` do not match. Number of IS: {self._n_samp} & number of FS: {_n_samp_check}."
+            )
+        self._index = 0
+        self.device = device
+        # set the flag
+        self._LOADER_TYPE = 'ISFS'  # initial state & finale state
+
+    def __iter__(self, ) -> Self:
+        return self
+
+    def __next__(self, ) -> Tuple[pygBatch, pygBatch]:
+        if self._index * self.batchsize < self._n_samp:
+            dataIS_list = self.dataIS[self._index * self.batchsize: (self._index + 1) * self.batchsize]
+            dataIS = self._batch_class.from_data_list(dataIS_list)
+            dataIS = dataIS.to(self.device)  # type: ignore
+            dataFS_list = self.dataFS[self._index * self.batchsize: (self._index + 1) * self.batchsize]
+            dataFS = self._batch_class.from_data_list(dataFS_list)
+            dataFS = dataFS.to(self.device)  # type: ignore
+            dataIS.batch_size = dataIS.num_graphs
+            dataIS.idx = [
+                structure.get('idx') if isinstance(structure, Mapping)
+                else getattr(structure, 'idx', None)
+                for structure in dataIS_list
+            ]
+            dataFS.batch_size = dataFS.num_graphs
+            dataFS.idx = [
+                structure.get('idx') if isinstance(structure, Mapping)
+                else getattr(structure, 'idx', None)
+                for structure in dataFS_list
+            ]
 
             self._index += 1
             return dataIS, dataFS
