@@ -379,11 +379,20 @@ class KrylovNewton(_KrylovBase):
     ) -> None:
         super().__init__(
             'KrylovNewton',
-            E_threshold, Torque_thres, Eigen_thres, F_threshold,
-            maxiter_trans, maxiter_eig, steplength, dx,
-            output_file,
-            device, verbose,
-            morse_index, neg_spectra_cutoff, pos_spectra_cutoff,
+            E_threshold=E_threshold,
+            Torque_thres=Torque_thres,
+            Eigen_thres=Eigen_thres,
+            F_threshold=F_threshold,
+            maxiter_trans=maxiter_trans,
+            maxiter_eig=maxiter_eig,
+            steplength=steplength,
+            dx=dx,
+            output_file=output_file,
+            device=device,
+            verbose=verbose,
+            morse_index=morse_index,
+            neg_spectra_cutoff=neg_spectra_cutoff,
+            pos_spectra_cutoff=pos_spectra_cutoff,
         )
         self.steplength_sheme = steplength_sheme
         self._trust_reg_rad_max = 5. * self.steplength
@@ -922,6 +931,7 @@ class KrylovDynamics(_KrylovBase):
             steplength: float = 0.5,
             steplength_sheme: Literal['trust_region', 'line_newton', 'line_search'] = 'trust_region',
             dx: float = 1.e-2,
+            output_file: str | None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2,
             morse_index: int = 1,
@@ -935,9 +945,20 @@ class KrylovDynamics(_KrylovBase):
     ) -> None:
         super().__init__(
             'KrylovDynamics',
-            E_threshold, Torque_thres, Eigen_thres, F_threshold,
-            maxiter_trans, maxiter_eig, steplength, dx, device, verbose,
-            morse_index, neg_spectra_cutoff, pos_spectra_cutoff,
+            E_threshold=E_threshold,
+            Torque_thres=Torque_thres,
+            Eigen_thres=Eigen_thres,
+            F_threshold=F_threshold,
+            maxiter_trans=maxiter_trans,
+            maxiter_eig=maxiter_eig,
+            steplength=steplength,
+            dx=dx,
+            output_file=output_file,
+            device=device,
+            verbose=verbose,
+            morse_index=morse_index,
+            neg_spectra_cutoff=neg_spectra_cutoff,
+            pos_spectra_cutoff=pos_spectra_cutoff,
         )
         self.steplength_sheme = steplength_sheme
         self.max_steplength = float(steplength) * 5.

@@ -6,9 +6,9 @@ import torch as th
 from BUCToolkit.BatchStructures import Batch, Data
 from BUCToolkit.utils.model_wrappers import (
     MACEDataAdapter,
-    MACEDataLoader,
     MACEWrapper,
 )
+from BUCToolkit.api.DataLoaders import MACEDataLoader
 
 
 class MACEModelWrapperTest(unittest.TestCase):
