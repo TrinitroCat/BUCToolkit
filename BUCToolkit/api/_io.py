@@ -697,58 +697,51 @@ class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
 
 
 class ExpMovingAverage:
-    """
-    Applying exponential moving average for training models.
-    """
-    def __init__(self, model:nn.Module, decay:float=0.999):
-        """
+    """Apply an exponential moving average to model parameters."""
 
-        Args:
-            model: The torch model of nn.Module
-            decay: The decay coefficient.
-        """
+    def __init__(self, model: nn.Module, decay: float = 0.999):
         self.model = model
         self.decay = decay
-        self.shadow: Dict[str, th.Tensor] = dict()
-        self.backup = dict()
-        # initialize
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.detach().clone()
+        self.shadow: Dict[str, th.Tensor] = {}
+        self.backup: Dict[str, th.Tensor] = {}
 
+        with th.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name] = param.detach().clone()
+
+    @th.no_grad()
     def step(self):
-        """
-        Applying ema 1 time.
-        """
+        """Update EMA after an optimizer step."""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 assert name in self.shadow
-                self.shadow[name].mul_(self.decay).add_(param.data.detach(), alpha=1-self.decay)
+                self.shadow[name].lerp_(param.detach(), 1.0 - self.decay)
 
+    @th.no_grad()
     def apply(self):
-        """
-        Applying ema shadow parameters to the trained model, and the original parameters of trained model will be stored in `self.backup`.
-        """
+        """Replace model parameters with EMA parameters for evaluation."""
+        if self.backup:
+            raise RuntimeError("EMA parameters have already been applied.")
+
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 assert name in self.shadow
-                self.backup[name] = param.data.detach().clone()
+                self.backup[name] = param.detach().clone()
                 param.copy_(self.shadow[name])
 
+    @th.no_grad()
     def restore(self):
-        """
-        Restore backup of original parameters of model from `self.backup` to continue training.
-        """
+        """Restore the model parameters saved by apply()."""
         try:
-            if len(self.backup) != 0:
-                for name, param in self.model.named_parameters():
-                    if param.requires_grad:
-                        assert name in self.backup, f'Parameter {name} is not in backup!'
-                        param.copy_(self.backup[name])
-            else:
-                pass
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    if name not in self.backup:
+                        warnings.warn(f"Parameter {name} is not in backup!")
+                        continue
+                    param.copy_(self.backup[name])
         finally:
-            self.backup = dict()
+            self.backup.clear()
 
 
 class DumpStructures:
