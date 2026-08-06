@@ -1092,7 +1092,7 @@ ARGS_CMD = """
 MD:
   ENSEMBLE: !!str NVT
   CONSTR_MD_SCHEME: !!str BLUE_MOON
-  NIMAGE: !!int 3
+  NIMAGE: !!int 3  # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies
   THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
   THERMOSTAT_CONFIG:
     DAMPING_COEFF: !!float 0.01
@@ -1105,6 +1105,7 @@ MD:
   # Optional: constraints
   CONSTRAINTS_FILE: !!str ./constraints.py
   CONSTRAINTS_FUNC: !!str func
+  CONSTRAINTS_VAL_FUNC: null  # optional constr_val(t) in CONSTRAINTS_FILE
 """
 
 ARGS_MC = """

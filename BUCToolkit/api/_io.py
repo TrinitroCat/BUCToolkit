@@ -426,6 +426,13 @@ class _CONFIGS(object):
         # load config file
         config_file_path = self.config_file if config_file_path is None else config_file_path
         self.config = load_input_config(config_file_path)
+        md_config = self.config.get('MD')
+        if isinstance(md_config, dict):
+            thermostat_config = md_config.get('THERMOSTAT_CONFIG')
+            if isinstance(thermostat_config, dict):
+                md_config['THERMOSTAT_CONFIG'] = {
+                    str(key).lower(): value for key, value in thermostat_config.items()
+                }
 
         # global information
         self.START = self.config.get('START', 0)

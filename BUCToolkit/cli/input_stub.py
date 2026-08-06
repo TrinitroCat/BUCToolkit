@@ -120,7 +120,7 @@ CONFIG_STUB = {
     "MD": {
         "ENSEMBLE": ("NVT", str, "MD ensemble. Options: NVE, NVT"),
         "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
-        "NIMAGE": (3, int, "number of interpolation images for BLUE_MOON constrained MD"),
+        "NIMAGE": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
         "THERMOSTAT": ("CSVR", str, "thermostat for NVT ensemble. Options: Langevin, VR, Nose-Hoover, CSVR"),
         "THERMOSTAT_CONFIG": {
             "DAMPING_COEFF": (0.01, float, "damping coefficient for Langevin thermostat. Unit: fs^-1"),
@@ -132,6 +132,7 @@ CONFIG_STUB = {
         "OUTPUT_COORDS_PER_STEP": (1, int, "frequency of outputting atom coordinates. If verbose=3, velocities also output"),
         "CONSTRAINTS_FILE": ("./constraints.py", str, "path to constraints function file"),
         "CONSTRAINTS_FUNC": ("func", str, "name of constraints function in CONSTRAINTS_FILE"),
+        "CONSTRAINTS_VAL_FUNC": (None, str, "optional name of constr_val(t) in CONSTRAINTS_FILE; null keeps the initial-value default"),
         "REQUIRE_GRAD": (False, bool, "whether to toggle on auto-gradient during calculation"),
     },
 

@@ -381,6 +381,31 @@ class NonInteractiveCLICommandTests(unittest.TestCase):
         )
         self._assert_basic_structure_data(result)
 
+    def test_cmd_slow_growth_command(self) -> None:
+        """Run a one-step SLOW_GROWTH CMD command without a final-state file."""
+        result = self._run_task(
+            "CONSTR_MD",
+            {
+                "DATA_TYPE": "BS",
+                "DATA_PATH": self.input_bs,
+                "MD": {
+                    "ENSEMBLE": "NVE",
+                    "CONSTR_MD_SCHEME": "SLOW_GROWTH",
+                    "NIMAGE": 1,
+                    "TIME_STEP": 0.1,
+                    "MAX_STEP": 1,
+                    "T_INIT": 10.0,
+                    "OUTPUT_COORDS_PER_STEP": 1,
+                    "MOVE_TO_CENTER_FREQ": -1,
+                    "CONSTRAINTS_FILE": _CONSTRAINTS_FILE,
+                    "CONSTRAINTS_FUNC": "first_pair_distance",
+                    "CONSTRAINTS_VAL_FUNC": "first_pair_distance_target",
+                },
+            },
+            read_md_traj,
+        )
+        self._assert_basic_structure_data(result)
+
 
 if __name__ == "__main__":
     unittest.main()

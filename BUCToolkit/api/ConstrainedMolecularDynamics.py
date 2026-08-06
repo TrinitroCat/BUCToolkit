@@ -34,7 +34,8 @@ class ConstrainedMolecularDynamics(_CONFIGS):
     Input file parameters: (Under the section `MD` in input files)
         ENSEMBLE: Literal[NVE, NVT], the ensemble for MD.
         CONSTR_MD_SCHEME: Literal[BLUE_MOON, SLOW_GROWTH], the scheme of constrained MD.
-        NIMAGE: int, the number of images in BLUE_MOON MD. SLOW_GROWTH will ignore it.
+        NIMAGE: int, the number of images in BLUE_MOON MD. SLOW_GROWTH uses it
+                for parallel copies of the initial structure; use 1 for one trajectory.
         THERMOSTAT: Literal[Langevin, VR, CSVR, Nose-Hoover], the thermostat type. only used for ENSEMBLE=NVT.
                     'VR' is Velocity Rescaling and 'CSVR' is Canonical Sampling Velocity Rescaling by Bussi et al. [1].
         THERMOSTAT_CONFIG: Dict, the configs of thermostat.
@@ -352,12 +353,14 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 mole_dynam.run(
                     model_wrap.Energy, X_init_,
                     [origin_elem_list] * self.NIMAGE,
+                    Cell_vector=np.repeat(_cell, self.NIMAGE, axis=0),
                     V_init=get_init_veloc(dataIS),
                     grad_func=model_wrap.Grad,
                     func_args=(dataIS,), grad_func_args=(dataIS,),
                     is_grad_func_contain_y=False,
                     require_grad=self.require_grad,
                     fixed_atom_tensor=fixed_mask,
+                    move_to_center_freq=int(self.MD.get('MOVE_TO_CENTER_FREQ', -1)),
                 )
 
                 if self.VERBOSE > 0:
@@ -423,12 +426,14 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 mole_dynam.run(  #  Model not support the regular batch, although our code do.
                     model_wrap.Energy, X_init_,
                     [origin_elem_list] * self.NIMAGE,
+                    Cell_vector=np.repeat(_cell, self.NIMAGE, axis=0),
                     V_init=get_init_veloc(dataIS),
                     grad_func=model_wrap.Grad,
                     func_args=(dataIS,), grad_func_args=(dataIS,),
                     is_grad_func_contain_y=False,
                     require_grad=self.require_grad,
                     fixed_atom_tensor=fixed_mask,
+                    move_to_center_freq=int(self.MD.get('MOVE_TO_CENTER_FREQ', -1)),
                 )
 
                 if self.VERBOSE > 0:

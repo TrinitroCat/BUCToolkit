@@ -125,7 +125,7 @@ NEB:
 MD:
   ENSEMBLE: !!str NVT     # MD ensemble. options: NVE, NVT
   CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH
-  NIMAGE: !!int 3         # CMD interpolation images
+  NIMAGE: !!int 3         # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies
   THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # thermostat configs
     DAMPING_COEFF: !!float 0.01  # damping coefficient for Langevin thermostat. unit: fs^-1
@@ -138,6 +138,7 @@ MD:
   # Optional: constraints
   CONSTRAINTS_FILE: !!str ./constraints.py  # function file path of constraints. This function should receive torch.Tensors and support auto-grad.
   CONSTRAINTS_FUNC: !!str func              # the specific function name in `CONSTRAINTS_FILE`
+  CONSTRAINTS_VAL_FUNC: null                # optional constr_val(t) in CONSTRAINTS_FILE
   REQUIRE_GRAD: !!bool False  # see above
 
 # Monte Carlo

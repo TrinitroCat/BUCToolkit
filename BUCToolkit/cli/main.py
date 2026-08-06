@@ -217,6 +217,7 @@ def parse_center_input_file(path: str):
     selected_indices = _selected_sample_indices(source_data, data_selector)
     data = source_data[selected_indices]
     is_shuffle = config.get('IS_SHUFFLE', False)
+    cmd_scheme = config.get('MD', {}).get('CONSTR_MD_SCHEME', 'BLUE_MOON') if task_type == 'CMD' else None
 
     if task_type == 'TRAIN':
         # handle the validation set data
@@ -259,7 +260,7 @@ def parse_center_input_file(path: str):
         valid_data = {'data': val_data_list, 'labels': {'energy': val_ener, 'forces': val_forc}}
         dataset_args = (train_data, valid_data)
 
-    elif task_type == 'NEB' or task_type == 'CMD':  # They use ISFSDataLoader
+    elif task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):
         if is_shuffle:
             raise ValueError(f"`IS_SHUFFLE` must be false for paired task `{task_type}`.")
         # handle the final state configuration data
@@ -274,6 +275,11 @@ def parse_center_input_file(path: str):
         is_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
         fs_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(fs_data, n_core=1)
         run_data = {'dataIS': is_data_list, 'dataFS': fs_data_list}
+        dataset_args = (run_data,)
+
+    elif task_type == 'CMD':
+        data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
+        run_data = {'data': data_list, 'labels': None}
         dataset_args = (run_data,)
 
     elif task_type == 'TS':  # Need a dimer initial guess
@@ -322,7 +328,7 @@ def parse_center_input_file(path: str):
         dataset_args = (run_data,)
 
     # dataloader
-    if task_type == 'NEB' or task_type == 'CMD':
+    if task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):
         dataloader = ISFSPyGDataLoader
     else:
         dataloader = PyGDataLoader
@@ -330,7 +336,12 @@ def parse_center_input_file(path: str):
     # set runner
     runner = TASKS_TYPE[task_type](path, 'pyg')
     runner.set_dataset(*dataset_args, )  # type: ignore
-    dataloader_config = {} if task_type in {'NEB', 'CMD'} else {'shuffle': is_shuffle}
+    if dataloader is ISFSPyGDataLoader:
+        dataloader_config = {}
+    elif task_type == 'CMD':
+        dataloader_config = {'shuffle': False}
+    else:
+        dataloader_config = {'shuffle': is_shuffle}
     runner.set_dataloader(dataloader, dataloader_config)
     # set constraints function
     if task_type == 'CMD':
@@ -350,6 +361,10 @@ def parse_center_input_file(path: str):
             raise ValueError(f"`CONSTRAINTS_FUNC` must be specified.")
         constr_func = load_model(constr_file, constr_name)
         runner.set_constr_func(constr_func)
+        constr_val_name = md_config.get('CONSTRAINTS_VAL_FUNC', None)
+        if constr_val_name is not None:
+            constr_val = load_model(constr_file, constr_val_name)
+            runner.set_constr_val(constr_val)
 
     return task_type, runner, udf_model
 

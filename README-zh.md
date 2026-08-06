@@ -506,7 +506,7 @@ NEB:
 MD:
   ENSEMBLE: !!str NVT     # MD 系综，可选：NVE, NVT
   CONSTR_MD_SCHEME: !!str BLUE_MOON  # 仅 CMD：BLUE_MOON 或 SLOW_GROWTH
-  NIMAGE: !!int 3         # CMD 插值镜像数
+  NIMAGE: !!int 3         # BLUE_MOON 插值镜像数；SLOW_GROWTH 为并行副本数（单条轨迹设为 1）
   THERMOSTAT: !!str CSVR  # 仅当 ENSEMBLE=NVT 时有效，可选：'Langevin', 'VR', 'Nose‑Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # 热浴参数
     DAMPING_COEFF: !!float 0.01  # Langevin 热浴的阻尼系数，单位：fs⁻¹
@@ -519,6 +519,7 @@ MD:
   # 可选：约束
   CONSTRAINTS_FILE: !!str ./constraints.py  # 约束函数的文件路径，函数应接收 torch.Tensor 并支持自动梯度
   CONSTRAINTS_FUNC: !!str func              # CONSTRAINTS_FILE 中具体的函数名称
+  CONSTRAINTS_VAL_FUNC: null                # 可选的时间约束目标 constr_val(t)，从 CONSTRAINTS_FILE 加载；null 保持初始值默认行为
   REQUIRE_GRAD: !!bool False  # 同上
 
 # 蒙特卡洛
