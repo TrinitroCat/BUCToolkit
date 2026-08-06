@@ -391,7 +391,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     if self.VERBOSE: self.logger.info('Empty batch. Skipped.')
                     continue
                 elif n_images > 1:
-                    __err_msg = ('BLUE_MOON does not support batched calculation yet. '
+                    __err_msg = ('SLOW_GROWTH does not support batched calculation yet. '
                                  'Set BATCH_SIZE to 1.')
                     if self.VERBOSE: self.logger.error(__err_msg)
                     raise RuntimeError(__err_msg)
