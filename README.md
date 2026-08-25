@@ -525,8 +525,6 @@ NEB:
 # molecular dynamics
 MD:
   ENSEMBLE: !!str NVT     # MD ensemble. options: NVE, NVT
-  CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH
-  NIMAGE: !!int 3         # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies (use 1 for one trajectory)
   THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # thermostat configs
     DAMPING_COEFF: !!float 0.01  # damping coefficient for Langevin thermostat. unit: fs^-1
@@ -536,6 +534,12 @@ MD:
   T_INIT: !!float 298.15  # Initial Temperature, Unit: K. For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist.
   OUTPUT_COORDS_PER_STEP: !!int 1  # To control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted.
   MOVE_TO_CENTER_FREQ: !!int 20   # how many steps that move atoms to the barycenter and zeroize the bulk velocities
+  
+  # Followings are Constrained MD only  <<<
+  CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH. For SLOW_GROWTH, if not set the constr_val function, it will be a trivial CMD.
+  N_IMAGES: !!int 3         # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies (use 1 for one trajectory)
+  CONSTR_THRESHOLD: !!float 1.e-5
+  REQUIRE_FIXMAN: !!str auto  # `auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually.
   # Optional: constraints
   CONSTRAINTS_FILE: !!str ./constraints.py  # function file path of constraints. This function should receive torch.Tensors and support auto-grad.
   CONSTRAINTS_FUNC: !!str func              # the specific function name in `CONSTRAINTS_FILE`

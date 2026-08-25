@@ -115,22 +115,25 @@ CLI 使用 `buctoolkit -i input.yml` 读取 YAML。标注了任务的字段只�
 
 ### `MD` 与 CMD
 
-| 参数 | 取值/类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `ENSEMBLE` | `NVE`、`NVT` | `NVT` | MD 系综。[MD](examples-zh.md#molecular-dynamics-with-the-api) |
-| `CONSTR_MD_SCHEME` | `SLOW_GROWTH`、`BLUE_MOON` | 模板值 | CMD 模式。 |
-| `NIMAGE` | 正整数 | `1` 或模板值 | Blue-Moon 插值镜像数；Slow-growth 并行副本数。单条轨迹设为 `1`。[Slow-growth](examples-zh.md#slow-growth-cmd) |
-| `THERMOSTAT` | `Langevin`、`VR`、`Nose-Hoover`、`CSVR` | `CSVR` | NVT 热浴。 |
-| `THERMOSTAT_CONFIG` | 映射 | `{}` | 根据热浴使用 `damping_coeff`、`time_const` 或 `virt_mass`；输入解析兼容大小写。 |
-| `TIME_STEP` | 正浮点数，fs | `1` | 积分时间步长。 |
-| `MAX_STEP` | 正整数 | 实现默认值 | 积分步数。 |
-| `T_INIT` | 正浮点数，K | `298.15` | 初始/目标温度。 |
-| `OUTPUT_COORDS_PER_STEP` | 正整数 | `1` | 坐标输出间隔。 |
-| `MOVE_TO_CENTER_FREQ` | 整数 | low-level 为 `-1` | 质心平移和整体速度清零的周期；非正数关闭。 |
-| `CONSTRAINTS_FILE` | 路径 | 无 | 约束函数所在 Python 文件。 |
-| `CONSTRAINTS_FUNC` | 函数名 | 无 | 文件中的约束函数。 |
-| `CONSTRAINTS_VAL_FUNC` | 函数名或 `null` | `null` | 同文件中的可选时间目标函数；`null` 保持初始值行为。[约束函数](examples-zh.md#constraint-functions) |
-| `REQUIRE_GRAD` | 布尔值 | `false` | 是否开启自动梯度。 |
+| 参数                     | 取值/类型                               | 默认值             | 说明                                                                                                          |
+|--------------------------|-----------------------------------------|--------------------|---------------------------------------------------------------------------------------------------------------|
+| `ENSEMBLE`               | `NVE`、`NVT`                            | `NVT`              | MD 系综。[MD](examples-zh.md#molecular-dynamics-with-the-api)                                                 |
+| `THERMOSTAT`             | `Langevin`、`VR`、`Nose-Hoover`、`CSVR` | `CSVR`             | NVT 热浴。                                                                                                    |
+| `THERMOSTAT_CONFIG`      | 映射                                    | `{}`               | 根据热浴使用 `damping_coeff`、`time_const` 或 `virt_mass`；输入解析兼容大小写。                               |
+| `TIME_STEP`              | 正浮点数，fs                            | `1`                | 积分时间步长。                                                                                                |
+| `MAX_STEP`               | 正整数                                  | 实现默认值         | 积分步数。                                                                                                    |
+| `T_INIT`                 | 正浮点数，K                             | `298.15`           | 初始/目标温度。                                                                                               |
+| `OUTPUT_COORDS_PER_STEP` | 正整数                                  | `1`                | 坐标输出间隔。                                                                                                |
+| `MOVE_TO_CENTER_FREQ`    | 整数                                    | low-level 为 `-1`  | 质心平移和整体速度清零的周期；非正数关闭。                                                                    |
+| `CONSTRAINTS_FILE`       | 路径                                    | 无                 | 约束函数所在 Python 文件。                                                                                    |
+| `CONSTRAINTS_FUNC`       | 函数名                                  | 无                 | 文件中的约束函数。                                                                                            |
+| `CONSTRAINTS_VAL_FUNC`   | 函数名或 `null`                         | `null`             | 同文件中的可选时间目标函数；`null` 保持初始值行为。[约束函数](examples-zh.md#constraint-functions)            |
+| `REQUIRE_GRAD`           | 布尔值                                  | `false`            | 是否开启自动梯度。                                                                                            |
+| `CONSTR_MD_SCHEME`       | `SLOW_GROWTH`、`BLUE_MOON`              | 模板值             | CMD 模式。                                                                                                    |
+| `N_IMAGES`               | 正整数                                  | `1` 或模板值       | Blue-Moon 插值镜像数；Slow-growth 并行副本数。单条轨迹设为 `1`。[Slow-growth](examples-zh.md#slow-growth-cmd) |
+| `CONSTR_THRESHOLD`       | 正浮点数                                | `1.e-5`            | 约束收敛限, 单位与具体约束的广义坐标相同.                                                                     |
+| `REQUIRE_FIXMAN`         | 布尔值 or "auto"                        | `"auto"`           | `auto` 意为 `BLUE_MOON` 设为 True, `SLOW_GROWTH` 设为False. 可手动设置 True/False.                            |
+
 
 CLI 的 `BLUE_MOON` 从 `DATA_PATH`/`FSDATA_PATH` 读取成对结构并使用
 `ISFSPyGDataLoader`；`SLOW_GROWTH` 只读取 `DATA_PATH` 并使用

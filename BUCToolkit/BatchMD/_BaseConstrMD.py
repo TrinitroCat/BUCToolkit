@@ -197,6 +197,8 @@ class _BaseConstrMD(_BaseMD):
             fixed_atom_tensor=fixed_atom_tensor,
             is_fix_mass_center=is_fix_mass_center,
         )
+        # re-initialise the `time_new` to ensure the constr value correct when calling `run` more than one time.
+        self.time_now = th.scalar_tensor(0., device=self.device)
         # Register selected constraint fields with correctly shaped prototypes.
         # Ordered dictionaries update repeated names without duplicating them.
         _n_batch = X.shape[0]

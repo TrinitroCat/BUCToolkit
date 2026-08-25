@@ -134,22 +134,25 @@ finite-difference settings. `REQUIRE_GRAD` has the usual meaning. See
 
 ### `MD` and constrained MD
 
-| Field | Values / type | Default | Meaning |
-| --- | --- | --- | --- |
-| `ENSEMBLE` | `NVE`, `NVT` | `NVT` | MD ensemble. [MD](examples.md#molecular-dynamics-with-the-api) |
-| `CONSTR_MD_SCHEME` | `SLOW_GROWTH`, `BLUE_MOON` | template value | CMD scheme. |
-| `NIMAGE` | positive integer | `1` or template value | Blue-Moon interpolation images; Slow-growth parallel copies. Use `1` for one trajectory. [Slow growth](examples.md#slow-growth-cmd) |
-| `THERMOSTAT` | `Langevin`, `VR`, `Nose-Hoover`, `CSVR` | `CSVR` | NVT thermostat. |
-| `THERMOSTAT_CONFIG` | mapping | `{}` | Use `damping_coeff`, `time_const`, or `virt_mass`; input parsing accepts case variants. |
-| `TIME_STEP` | positive float, fs | `1` | Integration time step. |
-| `MAX_STEP` | positive integer | implementation default | Integration steps. |
-| `T_INIT` | positive float, K | `298.15` | Initial/target temperature. |
-| `OUTPUT_COORDS_PER_STEP` | positive integer | `1` | Coordinate dump interval. |
-| `MOVE_TO_CENTER_FREQ` | integer | `-1` low-level | Centering interval; non-positive disables it. |
-| `CONSTRAINTS_FILE` | path | absent | Python file containing constraints. |
-| `CONSTRAINTS_FUNC` | function name | absent | Constraint function in that file. |
-| `CONSTRAINTS_VAL_FUNC` | function name or `null` | `null` | Optional time-dependent target from that file; `null` preserves the initial-value behavior. [Constraint functions](examples.md#constraint-functions) |
-| `REQUIRE_GRAD` | boolean | `false` | Enable autograd. |
+| Field                    | Values / type                           | Default                | Meaning                                                                                                                                               |
+|--------------------------|-----------------------------------------|------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ENSEMBLE`               | `NVE`, `NVT`                            | `NVT`                  | MD ensemble. [MD](examples.md#molecular-dynamics-with-the-api)                                                                                        |
+| `THERMOSTAT`             | `Langevin`, `VR`, `Nose-Hoover`, `CSVR` | `CSVR`                 | NVT thermostat.                                                                                                                                       |
+| `THERMOSTAT_CONFIG`      | mapping                                 | `{}`                   | Use `damping_coeff`, `time_const`, or `virt_mass`; input parsing accepts case variants.                                                               |
+| `TIME_STEP`              | positive float, fs                      | `1`                    | Integration time step.                                                                                                                                |
+| `MAX_STEP`               | positive integer                        | implementation default | Integration steps.                                                                                                                                    |
+| `T_INIT`                 | positive float, K                       | `298.15`               | Initial/target temperature.                                                                                                                           |
+| `OUTPUT_COORDS_PER_STEP` | positive integer                        | `1`                    | Coordinate dump interval.                                                                                                                             |
+| `MOVE_TO_CENTER_FREQ`    | integer                                 | `-1` low-level         | Centering interval; non-positive disables it.                                                                                                         |
+| `CONSTRAINTS_FILE`       | path                                    | absent                 | Python file containing constraints.                                                                                                                   |
+| `CONSTRAINTS_FUNC`       | function name                           | absent                 | Constraint function in that file.                                                                                                                     |
+| `CONSTRAINTS_VAL_FUNC`   | function name or `null`                 | `null`                 | Optional time-dependent target from that file; `null` preserves the initial-value behaviour. [Constraint functions](examples.md#constraint-functions) |
+| `REQUIRE_GRAD`           | boolean                                 | `false`                | Enable autograd.                                                                                                                                      |
+| `CONSTR_MD_SCHEME`       | `SLOW_GROWTH`, `BLUE_MOON`              | template value         | CMD scheme.                                                                                                                                           |
+| `N_IMAGES`               | positive integer                        | `1` or template value  | Blue-Moon interpolation images; Slow-growth parallel copies. Use `1` for one trajectory. [Slow growth](examples.md#slow-growth-cmd)                   |
+| `CONSTR_THRESHOLD`       | positive float                          | `1.e-5`                | Constraints convergence threshold. Units are determined by specific constraints formulae                                                              |
+| `REQUIRE_FIXMAN`         | boolean or "auto"                       | `"auto"`               | # `auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually.                                              |
+
 
 For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` and uses
 `ISFSPyGDataLoader`; `SLOW_GROWTH` reads only `DATA_PATH` and uses
@@ -157,18 +160,18 @@ For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` and uses
 
 ### `MC`
 
-| Field | Values / type | Default | Meaning |
-| --- | --- | --- | --- |
-| `TYPE` | `Metropolis` | `Metropolis` | Monte Carlo engine. |
-| `ITER_SCHEME` | `Gaussian`, `Cauchy`, `Uniform` | `Gaussian` | Coordinate perturbation distribution. [MC](examples.md#metropolis-monte-carlo) |
-| `COORDINATE_UPDATE_PARAM` | positive float | `0.2` | Distribution scale/range. |
-| `MAXITER` | positive integer | `10000` | MC steps. |
-| `T_INIT` | positive float, K | `298.15` | Initial temperature. |
-| `T_SCHEME` | `constant`, `linear`, `exponential`, `log`, `fast` | `constant` | Temperature schedule. |
-| `T_UPDATE_FREQ` | positive integer | `1` | Temperature update interval. |
-| `T_SCHEME_PARAM` | float | scheme-dependent | Schedule parameter. |
-| `OUTPUT_COORDS_PER_STEP` | positive integer | `1` | Output interval. |
-| `MOVE_TO_CENTER_FREQ` | integer | `-1` | Centering interval; non-positive disables it. |
+| Field                     | Values / type                                      | Default          | Meaning                                                                        |
+|---------------------------|----------------------------------------------------|------------------|--------------------------------------------------------------------------------|
+| `TYPE`                    | `Metropolis`                                       | `Metropolis`     | Monte Carlo engine.                                                            |
+| `ITER_SCHEME`             | `Gaussian`, `Cauchy`, `Uniform`                    | `Gaussian`       | Coordinate perturbation distribution. [MC](examples.md#metropolis-monte-carlo) |
+| `COORDINATE_UPDATE_PARAM` | positive float                                     | `0.2`            | Distribution scale/range.                                                      |
+| `MAXITER`                 | positive integer                                   | `10000`          | MC steps.                                                                      |
+| `T_INIT`                  | positive float, K                                  | `298.15`         | Initial temperature.                                                           |
+| `T_SCHEME`                | `constant`, `linear`, `exponential`, `log`, `fast` | `constant`       | Temperature schedule.                                                          |
+| `T_UPDATE_FREQ`           | positive integer                                   | `1`              | Temperature update interval.                                                   |
+| `T_SCHEME_PARAM`          | float                                              | scheme-dependent | Schedule parameter.                                                            |
+| `OUTPUT_COORDS_PER_STEP`  | positive integer                                   | `1`              | Output interval.                                                               |
+| `MOVE_TO_CENTER_FREQ`     | integer                                            | `-1`             | Centering interval; non-positive disables it.                                  |
 
 ### Model fields
 

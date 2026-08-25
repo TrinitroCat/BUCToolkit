@@ -505,8 +505,6 @@ NEB:
 # 分子动力学
 MD:
   ENSEMBLE: !!str NVT     # MD 系综，可选：NVE, NVT
-  CONSTR_MD_SCHEME: !!str BLUE_MOON  # 仅 CMD：BLUE_MOON 或 SLOW_GROWTH
-  NIMAGE: !!int 3         # BLUE_MOON 插值镜像数；SLOW_GROWTH 为并行副本数（单条轨迹设为 1）
   THERMOSTAT: !!str CSVR  # 仅当 ENSEMBLE=NVT 时有效，可选：'Langevin', 'VR', 'Nose‑Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # 热浴参数
     DAMPING_COEFF: !!float 0.01  # Langevin 热浴的阻尼系数，单位：fs⁻¹
@@ -516,6 +514,11 @@ MD:
   T_INIT: !!float 298.15  # 初始温度（K）。对于 NVE 系综，仅用于按玻尔兹曼分布生成随机初始速度
   OUTPUT_COORDS_PER_STEP: !!int 1  # 控制输出原子坐标的频率。若 verbose=3，还会输出原子速度
   MOVE_TO_CENTER_FREQ: !!int 20   # 每多少步将原子平移到质心并将整体速度置零
+  # 以下设置仅对 Constrained MD 生效  <<<
+  CONSTR_MD_SCHEME: !!str BLUE_MOON  # 仅 CMD：BLUE_MOON 或 SLOW_GROWTH. 对SLOW_GROWTH, 若不设置约束值函数, 则为普通约束MD.
+  N_IMAGES: !!int 3         # BLUE_MOON 插值镜像数；SLOW_GROWTH 为并行副本数（单条轨迹设为 1）
+  CONSTR_THRESHOLD: !!float 1.e-5  # 约束收敛限, 单位与具体约束的广义坐标相同.
+  REQUIRE_FIXMAN: !!str auto  # `auto` 意为 `BLUE_MOON` 设为 True, `SLOW_GROWTH` 设为False. 可手动设置 True/False.
   # 可选：约束
   CONSTRAINTS_FILE: !!str ./constraints.py  # 约束函数的文件路径，函数应接收 torch.Tensor 并支持自动梯度
   CONSTRAINTS_FUNC: !!str func              # CONSTRAINTS_FILE 中具体的函数名称
