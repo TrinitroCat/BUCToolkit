@@ -180,7 +180,7 @@ def constr_func(X: torch.Tensor) -> torch.Tensor:
     return torch.linalg.vector_norm(X[0] - X[1]).reshape(1)
 
 def constr_val(t: torch.Tensor) -> torch.Tensor:
-    # Slow growth target: (NIMAGE, n_constraint).
+    # Slow growth target: (N_IMAGES, n_constraint).
     return (1.5 + 0.001 * t).reshape(1, 1)
 ```
 
@@ -190,7 +190,7 @@ value behavior.
 
 ## Slow-growth CMD
 
-Slow growth starts from one set of structures and makes `NIMAGE` parallel
+Slow growth starts from one set of structures and makes `N_IMAGES` parallel
 copies. The CLI needs only `DATA_PATH`:
 
 ```yaml
@@ -200,7 +200,7 @@ DATA_PATH: ./initial.bs
 MD:
   ENSEMBLE: NVT
   CONSTR_MD_SCHEME: SLOW_GROWTH
-  NIMAGE: 4
+  N_IMAGES: 4
   CONSTRAINTS_FILE: ./constraints.py
   CONSTRAINTS_FUNC: constr_func
   CONSTRAINTS_VAL_FUNC: constr_val
@@ -222,7 +222,7 @@ runner.run(MyModel)
 
 ## Blue-Moon CMD
 
-Blue Moon pairs initial and final structures, interpolates `NIMAGE` images, and
+Blue Moon pairs initial and final structures, interpolates `N_IMAGES` images, and
 uses `ISFSPyGDataLoader`:
 
 ```yaml
@@ -233,7 +233,7 @@ FSDATA_PATH: ./final.bs
 MD:
   ENSEMBLE: NVT
   CONSTR_MD_SCHEME: BLUE_MOON
-  NIMAGE: 8
+  N_IMAGES: 8
   CONSTRAINTS_FILE: ./constraints.py
   CONSTRAINTS_FUNC: constr_func
 ```

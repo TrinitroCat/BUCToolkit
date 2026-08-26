@@ -241,7 +241,7 @@ MD:
   THERMOSTAT_CONFIG:
     TIME_CONST: !!float 120
   CONSTR_MD_SCHEME: !!str SLOW_GROWTH
-  NIMAGE: !!int 5
+  N_IMAGES: !!int 5
   TIME_STEP: !!float 0.5
   MAX_STEP: !!int 100
   T_INIT: !!float 500.0
@@ -275,7 +275,7 @@ MD:
   THERMOSTAT_CONFIG:
     TIME_CONST: !!float 120
   CONSTR_MD_SCHEME: !!str BLUE_MOON
-  NIMAGE: !!int 5
+  N_IMAGES: !!int 5
   TIME_STEP: !!float 0.5
   MAX_STEP: !!int 100
   T_INIT: !!float 500.0

@@ -367,7 +367,7 @@ class NonInteractiveCLICommandTests(unittest.TestCase):
                 "MD": {
                     "ENSEMBLE": "NVE",
                     "CONSTR_MD_SCHEME": "BLUE_MOON",
-                    "NIMAGE": 2,
+                    "N_IMAGES": 2,
                     "TIME_STEP": 0.1,
                     "MAX_STEP": 1,
                     "T_INIT": 10.0,
@@ -391,7 +391,7 @@ class NonInteractiveCLICommandTests(unittest.TestCase):
                 "MD": {
                     "ENSEMBLE": "NVE",
                     "CONSTR_MD_SCHEME": "SLOW_GROWTH",
-                    "NIMAGE": 1,
+                    "N_IMAGES": 1,
                     "TIME_STEP": 0.1,
                     "MAX_STEP": 1,
                     "T_INIT": 10.0,

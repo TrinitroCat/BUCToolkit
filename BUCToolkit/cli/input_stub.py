@@ -120,7 +120,7 @@ CONFIG_STUB = {
     "MD": {
         "ENSEMBLE": ("NVT", str, "MD ensemble. Options: NVE, NVT"),
         "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
-        "NIMAGE": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
+        "N_IMAGES": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
         "THERMOSTAT": ("CSVR", str, "thermostat for NVT ensemble. Options: Langevin, VR, Nose-Hoover, CSVR"),
         "THERMOSTAT_CONFIG": {
             "DAMPING_COEFF": (0.01, float, "damping coefficient for Langevin thermostat. Unit: fs^-1"),

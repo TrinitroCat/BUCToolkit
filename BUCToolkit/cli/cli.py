@@ -1092,7 +1092,7 @@ ARGS_CMD = """
 MD:
   ENSEMBLE: !!str NVT
   CONSTR_MD_SCHEME: !!str BLUE_MOON
-  NIMAGE: !!int 3  # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies
+  N_IMAGES: !!int 3  # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies
   THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
   THERMOSTAT_CONFIG:
     DAMPING_COEFF: !!float 0.01

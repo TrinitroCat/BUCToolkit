@@ -178,7 +178,7 @@ def constr_func(X: torch.Tensor) -> torch.Tensor:
     return torch.linalg.vector_norm(X[0] - X[1]).reshape(1)
 
 def constr_val(t: torch.Tensor) -> torch.Tensor:
-    # slow growth 目标形状：(NIMAGE, n_constraint)。
+    # slow growth 目标形状：(N_IMAGES, n_constraint)。
     return (1.5 + 0.001 * t).reshape(1, 1)
 ```
 
@@ -187,7 +187,7 @@ def constr_val(t: torch.Tensor) -> torch.Tensor:
 
 #### 慢增长约束动力学
 
-Slow-growth 从一组初始结构出发，复制出 `NIMAGE` 个并行副本。CLI 只需要
+Slow-growth 从一组初始结构出发，复制出 `N_IMAGES` 个并行副本。CLI 只需要
 `DATA_PATH`：
 
 ```yaml
@@ -197,7 +197,7 @@ DATA_PATH: ./initial.bs
 MD:
   ENSEMBLE: NVT
   CONSTR_MD_SCHEME: SLOW_GROWTH
-  NIMAGE: 4
+  N_IMAGES: 4
   CONSTRAINTS_FILE: ./constraints.py
   CONSTRAINTS_FUNC: constr_func
   CONSTRAINTS_VAL_FUNC: constr_val
@@ -219,7 +219,7 @@ runner.run(MyModel)
 
 #### Blue-Moon 约束动力学
 
-Blue-Moon 将初态和终态配对，插值生成 `NIMAGE` 个镜像，并使用
+Blue-Moon 将初态和终态配对，插值生成 `N_IMAGES` 个镜像，并使用
 `ISFSPyGDataLoader`：
 
 ```yaml
@@ -230,7 +230,7 @@ FSDATA_PATH: ./final.bs
 MD:
   ENSEMBLE: NVT
   CONSTR_MD_SCHEME: BLUE_MOON
-  NIMAGE: 8
+  N_IMAGES: 8
   CONSTRAINTS_FILE: ./constraints.py
   CONSTRAINTS_FUNC: constr_func
 ```

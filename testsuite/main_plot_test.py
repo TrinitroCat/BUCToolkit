@@ -98,8 +98,8 @@ class MainTestPlot(MainTest):
             spine.set_color("#202020")
         axis.tick_params(
             axis="both",
-            labelsize=16,
-            width=1.6,
+            labelsize=22,
+            width=2,
             length=6,
             color="#202020",
         )
@@ -109,7 +109,7 @@ class MainTestPlot(MainTest):
     @staticmethod
     def _style_colored_axis(axis, side: str, color: str) -> None:
         """Style an auxiliary y-axis using its corresponding curve color."""
-        axis.tick_params(axis="y", labelsize=16, width=1.6, length=6, colors=color)
+        axis.tick_params(axis="y", labelsize=22, width=2, length=6, colors=color)
         axis.yaxis.label.set_color(color)
         axis.spines[side].set_linewidth(2.0)
         axis.spines[side].set_color(color)
@@ -123,7 +123,7 @@ class MainTestPlot(MainTest):
             loc="upper center",
             bbox_to_anchor=(0.5, 0.988),
             ncol=min(3, len(handles)),
-            fontsize=16,
+            fontsize=22,
             frameon=False,
             handlelength=2.6,
             columnspacing=1.2,
@@ -196,10 +196,10 @@ class MainTestPlot(MainTest):
             self._style_main_axis(main_axis)
             main_axis.set_title(
                 f"{title_prefix}: {runner_name}, sample {sample_index + 1}",
-                fontsize=18,
+                fontsize=26,
                 pad=12,
             )
-            main_axis.set_xlabel("Simulation time (fs)", fontsize=18)
+            main_axis.set_xlabel("Simulation time (fs)", fontsize=24)
 
             if use_separate_axes:
                 kinetic_axis = main_axis.twinx()
@@ -215,10 +215,10 @@ class MainTestPlot(MainTest):
                 self._style_colored_axis(kinetic_axis, "left", KINETIC_COLOR)
                 self._style_colored_axis(total_axis, "right", TOTAL_COLOR)
                 self._style_colored_axis(temperature_axis, "right", TEMPERATURE_COLOR)
-                main_axis.set_ylabel("Potential energy (eV)", fontsize=18, color=POTENTIAL_COLOR)
-                kinetic_axis.set_ylabel("Kinetic energy (eV)", fontsize=18, color=KINETIC_COLOR)
-                total_axis.set_ylabel("Total energy (eV)", fontsize=18, color=TOTAL_COLOR)
-                temperature_axis.set_ylabel("Temperature (K)", fontsize=18, color=TEMPERATURE_COLOR)
+                main_axis.set_ylabel("Potential energy (eV)", fontsize=24, color=POTENTIAL_COLOR)
+                kinetic_axis.set_ylabel("Kinetic energy (eV)", fontsize=24, color=KINETIC_COLOR)
+                total_axis.set_ylabel("Total energy (eV)", fontsize=24, color=TOTAL_COLOR)
+                temperature_axis.set_ylabel("Temperature (K)", fontsize=24, color=TEMPERATURE_COLOR)
                 energy_axes = {
                     "potential": main_axis,
                     "kinetic": kinetic_axis,
@@ -237,8 +237,8 @@ class MainTestPlot(MainTest):
             else:
                 temperature_axis = main_axis.twinx()
                 self._style_colored_axis(temperature_axis, "right", TEMPERATURE_COLOR)
-                main_axis.set_ylabel("Energy (eV)", fontsize=18)
-                temperature_axis.set_ylabel("Temperature (K)", fontsize=18, color=TEMPERATURE_COLOR)
+                main_axis.set_ylabel("Energy (eV)", fontsize=24)
+                temperature_axis.set_ylabel("Temperature (K)", fontsize=24, color=TEMPERATURE_COLOR)
                 energy_axes = {
                     "potential": main_axis,
                     "kinetic": main_axis,
@@ -381,11 +381,11 @@ class MainTestPlot(MainTest):
                 violation_floor = max(violation_floor, float(np.min(positive_violations)) * 0.1)
             axis.set_title(
                 f"CMD constraint violations: {runner_name}, sample {sample_index + 1}",
-                fontsize=18,
+                fontsize=26,
                 pad=12,
             )
-            axis.set_xlabel("Simulation time (fs)", fontsize=18)
-            axis.set_ylabel("Absolute constraint violation", fontsize=18)
+            axis.set_xlabel("Simulation time (fs)", fontsize=24)
+            axis.set_ylabel("Absolute constraint violation", fontsize=24)
             axis.set_yscale("log")
             lines = []
             for constraint_index, label in enumerate(constraint_labels):
@@ -475,16 +475,16 @@ class MainTestPlot(MainTest):
             potential = self._series(trajectory.Energies, sample_index, n_samples)
             axis.set_title(
                 f"MC trajectory: {runner_name}, sample {sample_index + 1}",
-                fontsize=18,
+                fontsize=26,
                 pad=12,
             )
-            axis.set_xlabel("Monte Carlo step", fontsize=18)
-            axis.set_ylabel("Potential energy (eV)", fontsize=18)
+            axis.set_xlabel("Monte Carlo step", fontsize=24)
+            axis.set_ylabel("Potential energy (eV)", fontsize=24)
             potential_line = axis.plot(
                 steps,
                 potential,
                 color=POTENTIAL_COLOR,
-                linewidth=2.0,
+                linewidth=3.0,
                 label="Potential energy",
             )[0]
             if "ANNEAL" in runner_name:
@@ -496,7 +496,7 @@ class MainTestPlot(MainTest):
             reference_line = axis.axhline(
                 reference_value,
                 color="#000000",
-                linewidth=1.8,
+                linewidth=3,
                 linestyle=(0, (6, 3)),
                 label=reference_label,
             )

@@ -108,7 +108,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         self.CMD_MODE = self.MD['CONSTR_MD_SCHEME']
         if self.CMD_MODE == 'BLUE_MOON':
             # interp images read & check
-            self.N_IMAGES = self.MD['N_IMAGES']
+            self.N_IMAGES = self.MD.get('N_IMAGES', 1)
             if is_auto_fixman: self.MD_config['require_fixman'] = True # Blue-Moon ensemble require fixman term
         elif self.CMD_MODE == 'SLOW_GROWTH':
             # Slow-growth can use Jarzynski approach, which makes multiple replica

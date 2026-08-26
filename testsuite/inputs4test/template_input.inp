@@ -125,7 +125,7 @@ NEB:
 MD:
   ENSEMBLE: !!str NVT     # MD ensemble. options: NVE, NVT
   CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH
-  NIMAGE: !!int 3         # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies
+  N_IMAGES: !!int 3         # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies
   THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
   THERMOSTAT_CONFIG:      # thermostat configs
     DAMPING_COEFF: !!float 0.01  # damping coefficient for Langevin thermostat. unit: fs^-1
