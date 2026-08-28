@@ -6,12 +6,14 @@
 
 from .pyg_model_wrappers import Model_Wrapper_pyg
 from .VASP_model_wrapper import VASP_Model
+from .VASP_plugin_wrapper import VASP_PluginModel
 from .MACE_model_wrapper import MACEDataAdapter, MACEWrapper
 
 
 __all__ = [
     'Model_Wrapper_pyg',
     'VASP_Model',
+    'VASP_PluginModel',
     'MACEDataAdapter',
     'MACEWrapper',
 ]

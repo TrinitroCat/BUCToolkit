@@ -698,6 +698,14 @@ and presents its energy and forces through the protocol expected by the low-leve
 layer provides convenience only; the numerical engines remain usable without a deep-learning model or a
 specific graph framework.
 
+For a recent VASP build with the official Python plugin support, use
+`VASP_PluginModel`. On its first call it writes `vasp_plugin.py` in the working directory,
+starts one long-lived VASP job through IPC, and keeps subsequent `Energy`/`Grad` requests
+under BUCToolkit's control. It returns the real energy and forces from the VASP `structure`
+plugin, does not parse OUTCAR, and does not create per-step calculation directories. Enable
+`PLUGINS/STRUCTURE = T` in INCAR and install VASP's Python plugin support first. Use the
+traditional `VASP_Model` for standard VASP installations without this plugin interface.
+
 A matching Python call signature alone is not the complete contract. Inputs and outputs must also use the
 expected tensor shapes, dtypes, devices, energy/gradient convention, and batch layout. In particular,
 regular and irregular batches must follow the layouts described in [Batch Parallelism Scheme](#batch-parallelism-scheme),

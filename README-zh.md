@@ -669,6 +669,13 @@ PyG、VASP 及多设备模型 -> utils/model_wrappers ------+-> func / grad_func
 例如，PyG 适配器负责更新图对象中的坐标、执行模型，并通过底层算法所需的协议提供能量和力。
 适配层只负责提供便利；数值引擎本身不依赖深度学习模型或某一种特定的图框架，因而仍可独立使用。
 
+对于支持官方 Python plugin 的新版 VASP，可以使用 `VASP_PluginModel`。
+它在首次调用时于工作目录生成 `vasp_plugin.py`，通过 IPC 启动一个长期存活的 VASP
+作业，并由 BUCToolkit 主进程继续驱动后续 `Energy`/`Grad` 请求。该 wrapper 直接返回
+VASP `structure` plugin 提供的真实能量和力，不读取 OUTCAR，也不会创建逐步计算子目录。
+使用前应在 INCAR 中启用 `PLUGINS/STRUCTURE = T`，并确保 VASP 的 Python plugin
+支持已安装；传统 VASP 或不支持该 plugin 的环境仍使用 `VASP_Model`。
+
 仅具有相同的 Python 调用签名并不代表满足完整协议。输入与输出还必须符合约定的张量形状、
 数据类型、设备、能量/梯度语义和批次布局。特别是，规则与不规则批次必须遵循
 [批量并行方案](#批量并行方案)中描述的布局；除非适配器完成了符号转换，否则 `grad_func`
