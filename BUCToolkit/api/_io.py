@@ -55,6 +55,8 @@ class _CONFIGS(object):
     A base class of loading configs.
     """
 
+    _CURRENT_MODEL_TYPES = frozenset({'pyg', 'vasp', 'custom'})
+
     def __init__(self, config_file: str) -> None:
         self.config_file = config_file
         self.logger = None
@@ -65,9 +67,6 @@ class _CONFIGS(object):
         self._data_loader = None
         self.reload_config(config_file)
         self.reset_logger()
-
-        # Constants
-        self.__CURRENT_MODEL_TYPES = {'pyg', 'vasp', 'custom'}
 
     def set_device(self, device: str | th.device) -> None:
         """ reset the device that model would train on """
@@ -475,9 +474,9 @@ class _CONFIGS(object):
         self.MODEL_CONFIG = self.config.get('MODEL_CONFIG', dict())
         if not isinstance(self.MODEL_CONFIG, Dict): raise ValueError('MODEL_CONFIG must be a dictionary.')
         self.MODEL_TYPE = str(self.config.get('MODEL_TYPE', 'pyg')).lower()
-        if self.MODEL_TYPE not in self.__CURRENT_MODEL_TYPES:
+        if self.MODEL_TYPE not in self._CURRENT_MODEL_TYPES:
             raise ValueError(
-                f"`MODEL_TYPE` must be one of {self.__CURRENT_MODEL_TYPES}, "
+                f"`MODEL_TYPE` must be one of {self._CURRENT_MODEL_TYPES}, "
                 f"but got {self.MODEL_TYPE}."
             )
         self.MODEL_WRAPPER_CONFIG = self.config.get('MODEL_WRAPPER_CONFIG', dict())

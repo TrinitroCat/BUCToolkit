@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 from typing import Any, Sequence
 
 import numpy as np
@@ -29,7 +29,7 @@ _PLUGIN_SOURCE = r'''"""Generated BUCToolkit/VASP FIFO bridge."""
 import os
 import select
 import stat
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 import numpy as np
 
 
@@ -72,6 +72,10 @@ class _Bridge:
         size = 6 * n + 19
         if os.environ["BUCTOOLKIT_VASP_STORAGE"] == "shared_memory":
             self.storage = shared_memory.SharedMemory(name=os.environ["BUCTOOLKIT_VASP_DATA_NAME"])
+            # Python 3.12 tracks attached segments as if this process owned
+            # them. Ownership remains with the controller, so unregister the
+            # plugin copy before its resource tracker can unlink the segment.
+            resource_tracker.unregister(self.storage._name, "shared_memory")
             self.array = np.ndarray((size,), np.float64, buffer=self.storage.buf)
         else:
             self.storage = None
@@ -434,19 +438,35 @@ class _Transport(ABC):
         """Close descriptors and unlink FIFO/data resources.
 
         Returns:
-            None. Repeated calls are safe after owned handles are cleared.
+            None. Every owned resource is attempted even if an earlier cleanup
+            operation fails; the first failure is raised after cleanup.
         """
+        cleanup_error: Exception | None = None
         for name in ("command_fd", "event_fd"):
             fd = getattr(self, name)
             if fd is not None:
-                os.close(fd)
-                setattr(self, name, None)
-        self.close_data()
+                try:
+                    os.close(fd)
+                except Exception as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                finally:
+                    setattr(self, name, None)
+        try:
+            self.close_data()
+        except Exception as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
         for path in (self.command_path, self.event_path):
             try:
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 class _LocalTransport(_Transport):
@@ -511,7 +531,10 @@ class _LocalTransport(_Transport):
                 try:
                     shared.unlink()
                 except FileNotFoundError:
-                    pass
+                    # ``SharedMemory.unlink`` unregisters only after a
+                    # successful POSIX unlink. Clear the controller's tracker
+                    # entry when another process has already removed it.
+                    resource_tracker.unregister(shared._name, "shared_memory")
 
 
 class _SlurmTransport(_Transport):
