@@ -296,10 +296,17 @@ class POSCARs2Feat(BatchStructures):
             in_coord_type = 'C'
         else:
             raise RuntimeError(f'Unknown coordination type "{coord_sys[0][0]}" in file {fileName}')
-        # cell vectors
+        # Apply POSCAR's global scale before exposing cells or Cartesian
+        # coordinates; VASP applies the same factor when reading the file.
+        scale = float(data[1].split()[0])
+        if scale == 0:
+            raise ValueError(f"POSCAR scale factor must be non-zero in {fileName}")
         cell = np.empty((3, 3), dtype=np.float32)
         for i in [2, 3, 4]:
             cell[i - 2] = np.array(data[i].split(), dtype=np.float32)
+        if scale < 0:
+            scale = (abs(scale) / abs(np.linalg.det(cell))) ** (1.0 / 3.0)
+        cell *= scale
         # atoms cartesian coordinates # TODO: fill list first, and convert to array then.
         atom_coord = [['-'*10, '-'*10, '-'*10]] * n_atom
         atom_fixed = [[1, 1, 1]] * n_atom
@@ -316,7 +323,8 @@ class POSCARs2Feat(BatchStructures):
         atom_fixed = np.array(atom_fixed, dtype=np.int8)
 
         if self.Coords_type[0] == in_coord_type:
-            pass
+            if in_coord_type == 'C':
+                atom_coord *= scale
         elif in_coord_type == 'D':
             atom_coord = atom_coord @ cell
         elif in_coord_type == 'C':

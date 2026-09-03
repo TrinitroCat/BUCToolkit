@@ -175,9 +175,13 @@ For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` and uses
 
 ### Model fields
 
-`MODEL_FILE` and `MODEL_NAME` identify the CLI model; `MODEL_CONFIG` is passed
-to its constructor. `START`, `LOAD_CHK_FILE_PATH`, and `STRICT_LOAD` control
-parameter loading. See [model and checkpoint](examples.md#configure-a-model-and-checkpoint).
+`MODEL_TYPE` selects the model protocol (`pyg`, `vasp`, or `custom`). For the
+default PyG protocol, `MODEL_FILE` and `MODEL_NAME` identify the model and
+`MODEL_CONFIG` is passed to its constructor. `MODEL_WRAPPER_CONFIG` configures
+the wrapper; VASP uses it directly and does not read `MODEL_CONFIG`. Custom
+wrappers are loaded from `MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME`.
+`START`, `LOAD_CHK_FILE_PATH`, and `STRICT_LOAD` control parameter loading.
+See [model and checkpoint](examples.md#configure-a-model-and-checkpoint).
 
 ## High-level API Parameters
 

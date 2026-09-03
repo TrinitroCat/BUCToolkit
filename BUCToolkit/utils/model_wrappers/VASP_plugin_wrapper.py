@@ -1,23 +1,18 @@
-"""BUCToolkit-controlled VASP calculator using the built-in Python plugin.
-
-BUCToolkit remains the controller: its numerical core requests one structure,
-then blocks until the long-lived VASP process reports the matching energy and
-forces.  The generated plugin contains only the small callback-side bridge so
-VASP's embedded Python does not need to import the full BUCToolkit package.
-"""
+"""BUCToolkit-controlled VASP Python-plugin wrapper."""
 
 from __future__ import annotations
 
-import base64
 import os
-import socket
+import select
+import signal
+import stat
 import subprocess
 import tempfile
-import threading
 import time
 import uuid
-from multiprocessing.connection import Connection, Listener
-from typing import Any, Callable
+from abc import ABC, abstractmethod
+from multiprocessing import shared_memory
+from typing import Any, Sequence
 
 import numpy as np
 import torch as th
@@ -25,753 +20,999 @@ import torch as th
 from BUCToolkit.utils.function_utils import _BaseWrapper
 
 
-class ConnectionTransport:
-    """Transport VASP plugin requests and results over one authenticated connection.
-
-    This class is intentionally independent of wrapper state and numerical
-    semantics.  A future mmap transport can implement this same interface
-    without changing ``VASP_PluginModel`` or the request/result protocol.
-
-    Args:
-        use_network: Use TCP for a potentially remote Slurm job. Otherwise use
-            a local Unix-domain socket.
-        host: Controller host advertised to a remote plugin. Defaults to the
-            fully qualified local hostname.
-        socket_dir: Directory for a local Unix-domain socket.
-    """
-
-    def __init__(
-            self,
-            *,
-            use_network: bool = False,
-            host: str | None = None,
-            socket_dir: str | None = None,
-    ) -> None:
-        self.use_network = bool(use_network)
-        self.host = host or socket.getfqdn()
-        self.socket_dir = socket_dir or "/tmp"
-        self.listener: Listener | None = None
-        self.connection: Connection | None = None
-        self.family: str | None = None
-        self.address: str | tuple[str, int] | None = None
-        self.authkey: bytes | None = None
-        self._socket_path: str | None = None
-
-    def start(self) -> None:
-        """Create the controller-side listener before VASP is launched.
-
-        Returns:
-            None. Connection settings are exposed by
-            :meth:`plugin_environment` after initialization.
-        """
-        self.authkey = os.urandom(32)
-        if self.use_network:
-            self.family = "AF_INET"
-            # The listening interface and the address visible from a compute
-            # node are different concepts on multi-homed cluster controllers.
-            self.listener = Listener(("0.0.0.0", 0), family=self.family, authkey=self.authkey)
-            self.address = (self.host, self.listener.address[1])
-        else:
-            self.family = "AF_UNIX"
-            self._socket_path = os.path.join(
-                self.socket_dir,
-                f"buctoolkit-vasp-{uuid.uuid4().hex}.sock",
-            )
-            self.listener = Listener(self._socket_path, family=self.family, authkey=self.authkey)
-            self.address = self._socket_path
-
-    def plugin_environment(self) -> dict[str, str]:
-        """Return connection settings for the generated plugin.
-
-        Returns:
-            Environment variables containing the family, address, and encoded
-            authentication key.
-        """
-        if self.listener is None or self.address is None or self.authkey is None:
-            raise RuntimeError("ConnectionTransport.start() must be called first.")
-        if isinstance(self.address, tuple):
-            address = f"{self.address[0]}\0{self.address[1]}"
-        else:
-            address = self.address
-        return {
-            "BUCTOOLKIT_VASP_PLUGIN_FAMILY": self.family or "",
-            "BUCTOOLKIT_VASP_PLUGIN_ADDRESS": address,
-            "BUCTOOLKIT_VASP_PLUGIN_AUTHKEY": base64.b64encode(self.authkey).decode("ascii"),
-        }
-
-    def accept(
-            self,
-            timeout: float | None,
-            is_alive: Callable[[], bool] | None = None,
-    ) -> Connection:
-        """Accept the plugin connection while observing the VASP process.
-
-        Args:
-            timeout: Maximum seconds to wait, or ``None`` for no timeout.
-            is_alive: Optional process-liveness callback checked while waiting.
-
-        Returns:
-            The accepted plugin connection.
-
-        Notes:
-            ``Listener.accept`` has no timeout or child-process awareness. The
-            daemon helper prevents the main thread from waiting forever when
-            VASP exits, is killed, or never loads the plugin.
-        """
-        if self.listener is None:
-            raise RuntimeError("ConnectionTransport.start() must be called first.")
-        listener = self.listener
-        result: list[Connection] = []
-        errors: list[BaseException] = []
-
-        def _accept() -> None:
-            try:
-                result.append(listener.accept())
-            except BaseException as exc:
-                errors.append(exc)
-
-        thread = threading.Thread(target=_accept, daemon=True)
-        thread.start()
-        elapsed = 0.0
-        while thread.is_alive():
-            thread.join(0.1)
-            elapsed += 0.1
-            if is_alive is not None and not is_alive():
-                self.close_listener()
-                thread.join(1.0)
-                raise RuntimeError("VASP exited before the plugin connected.")
-            if timeout is not None and elapsed >= timeout:
-                self.close_listener()
-                thread.join(1.0)
-                raise TimeoutError("Timed out waiting for the VASP plugin connection.")
-        if errors:
-            raise RuntimeError("The VASP plugin listener failed.") from errors[0]
-        if len(result) == 0:
-            raise RuntimeError("The VASP plugin closed before connecting.")
-        self.connection = result[0]
-        return self.connection
-
-    def send(self, message: dict[str, Any]) -> None:
-        """Send one protocol message to the plugin.
-
-        Args:
-            message: Message dictionary containing a string ``type`` field.
-
-        Returns:
-            None.
-        """
-        if self.connection is None:
-            raise RuntimeError("The VASP plugin is not connected.")
-        self.connection.send(message)
-
-    def receive(self, timeout: float | None = None) -> dict[str, Any]:
-        """Receive and validate one protocol message from the plugin.
-
-        Args:
-            timeout: Maximum seconds to wait, or ``None`` to block.
-
-        Returns:
-            The received message dictionary.
-        """
-        if self.connection is None:
-            raise RuntimeError("The VASP plugin is not connected.")
-        if timeout is not None and not self.connection.poll(timeout):
-            raise TimeoutError("Timed out waiting for a VASP plugin event.")
-        try:
-            message = self.connection.recv()
-        except EOFError as exc:
-            raise ConnectionError("The VASP plugin closed the IPC connection.") from exc
-        if not isinstance(message, dict) or not isinstance(message.get("type"), str):
-            raise RuntimeError("Received an invalid VASP plugin message.")
-        return message
-
-    def close_listener(self) -> None:
-        """Close the listener without closing an accepted connection."""
-        if self.listener is not None:
-            self.listener.close()
-            self.listener = None
-
-    def close(self) -> None:
-        """Close all endpoints and remove the local socket path.
-
-        Returns:
-            None. The operation is idempotent.
-        """
-        if self.connection is not None:
-            try:
-                self.connection.close()
-            finally:
-                self.connection = None
-        self.close_listener()
-        if self._socket_path is not None:
-            try:
-                os.unlink(self._socket_path)
-            except FileNotFoundError:
-                pass
-            self._socket_path = None
+# A short fixed cadence keeps graceful VASP shutdown responsive without
+# exposing another lifecycle tuning parameter in the public wrapper API.
+POLL_FREQ_AFTER_STOPCAR = 5.0
 
 
-_PLUGIN_SOURCE = r'''"""Generated BUCToolkit VASP plugin bridge."""
-import base64
+_PLUGIN_SOURCE = r'''"""Generated BUCToolkit/VASP FIFO bridge."""
 import os
+import select
+import stat
+from multiprocessing import shared_memory
 import numpy as np
-from multiprocessing.connection import Client
 
 
-def _connect():
-    """Connect without importing BUCToolkit inside VASP's Python runtime."""
-    family = os.environ["BUCTOOLKIT_VASP_PLUGIN_FAMILY"]
-    address_text = os.environ["BUCTOOLKIT_VASP_PLUGIN_ADDRESS"]
-    authkey = base64.b64decode(os.environ["BUCTOOLKIT_VASP_PLUGIN_AUTHKEY"])
-    if family == "AF_INET":
-        host, port = address_text.split("\0", 1)
-        address = (host, int(port))
-    elif family == "AF_UNIX":
-        address = address_text
-    else:
-        raise RuntimeError(f"Unsupported VASP plugin connection family: {family!r}.")
-    return Client(address, family=family, authkey=authkey)
+# The plugin and controller reconstruct this flat layout independently. The
+# FIFO record is the synchronization boundary for the corresponding array.
+def _views(a, n):
+    """Reconstruct named views over the shared flat float64 array."""
+    offset = 3 * n
+    positions = a[:offset].reshape(n, 3)
+    cell = a[offset:offset + 9].reshape(3, 3)
+    offset += 9
+    energy = a[offset:offset + 1]
+    offset += 1
+    forces = a[offset:offset + 3 * n].reshape(n, 3)
+    offset += 3 * n
+    return positions, cell, energy, forces, a[offset:offset + 9].reshape(3, 3)
 
 
 class _Bridge:
+    """Own plugin-side FIFO and shared-array handles for one VASP process."""
+
     def __init__(self):
-        self.connection = _connect()
-        self.connection.send({"type": "HELLO", "pid": os.getpid()})
+        """Open controller-owned storage and create the two session FIFOs."""
+        n = int(os.environ["BUCTOOLKIT_VASP_NUMBER_ATOMS"])
+        self.tolerance = float(os.environ["BUCTOOLKIT_VASP_POSITION_TOLERANCE"])
+        self.command_path = os.environ["BUCTOOLKIT_VASP_COMMAND_FIFO"]
+        self.event_path = os.environ["BUCTOOLKIT_VASP_EVENT_FIFO"]
+        # The controller creates the FIFOs before launching VASP so startup
+        # cannot wait for the first plugin callback. Keep this fallback for
+        # standalone plugin launches, while rejecting an unrelated file.
+        for path in (self.command_path, self.event_path):
+            try:
+                os.mkfifo(path, 0o600)
+            except FileExistsError:
+                if not stat.S_ISFIFO(os.stat(path).st_mode):
+                    raise
+        # O_RDWR prevents either side from blocking while opening its FIFO.
+        self.command_fd = os.open(self.command_path, os.O_RDWR | os.O_NONBLOCK)
+        self.event_fd = os.open(self.event_path, os.O_RDWR | os.O_NONBLOCK)
+        size = 6 * n + 19
+        if os.environ["BUCTOOLKIT_VASP_STORAGE"] == "shared_memory":
+            self.storage = shared_memory.SharedMemory(name=os.environ["BUCTOOLKIT_VASP_DATA_NAME"])
+            self.array = np.ndarray((size,), np.float64, buffer=self.storage.buf)
+        else:
+            self.storage = None
+            self.array = np.memmap(os.environ["BUCTOOLKIT_VASP_DATA_PATH"], np.float64, mode="r+", shape=(size,))
+        self.positions, self.cell, self.energy, self.forces, self.stress = _views(self.array, n)
+        self.buffer = b""
         self.pending = None
-        self.tolerance = float(os.environ.get("BUCTOOLKIT_VASP_POSITION_TOLERANCE", "1.e-10"))
+        self.awaiting_update = False
+        self.closed = False
+        self.send(f"READY {os.getpid()}")
+
+    def send(self, text):
+        """Write one complete newline-delimited event to the controller."""
+        record = (text + "\n").encode("ascii")
+        if os.write(self.event_fd, record) != len(record):
+            raise RuntimeError("Incomplete VASP plugin event write.")
 
     def request(self):
-        """Wait for the next controller request at a VASP callback boundary."""
-        while True:
-            try:
-                message = self.connection.recv()
-            except EOFError as exc:
-                raise RuntimeError("BUCToolkit closed the VASP plugin connection.") from exc
-            if not isinstance(message, dict):
-                raise RuntimeError("Invalid message received from BUCToolkit.")
-            kind = message.get("type")
-            if kind == "ACK":
-                continue
-            if kind == "CLOSE":
-                self.connection.send({"type": "GOODBYE"})
-                raise SystemExit(0)
-            if kind != "STRUCTURE_REQUEST":
-                raise RuntimeError(f"Unexpected BUCToolkit message: {kind!r}.")
-            return message
+        """Block until the controller publishes the next generation request."""
+        while b"\n" not in self.buffer:
+            select.select([self.command_fd], [], [])
+            chunk = os.read(self.command_fd, 4096)
+            if len(chunk) == 0:
+                raise RuntimeError("BUCToolkit command FIFO was closed.")
+            self.buffer += chunk
+        line, self.buffer = self.buffer.split(b"\n", 1)
+        fields = line.decode("ascii").split()
+        if fields == ["STOP"]:
+            return None
+        if len(fields) != 3 or fields[0] != "EVALUATE":
+            raise RuntimeError("Invalid BUCToolkit VASP command.")
+        return int(fields[1]), fields[2] == "1"
 
-    def ensure_request(self):
-        """Retain one request until VASP reports that exact structure."""
-        if self.pending is None:
-            self.pending = self.request()
-        return self.pending
+    def close(self):
+        """Release plugin-side FIFO descriptors and shared-array handles."""
+        if self.closed:
+            return
+        self.closed = True
+        for name in ("command_fd", "event_fd"):
+            fd = getattr(self, name, None)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+        self.positions = self.cell = self.energy = self.forces = self.stress = None
+        array = self.array
+        self.array = None
+        if isinstance(array, np.memmap):
+            array.flush()
+            if array._mmap is not None:
+                array._mmap.close()
+        if self.storage is not None:
+            self.storage.close()
+            self.storage = None
 
 
 _bridge = None
 
 
-def _get_bridge():
-    """Create one connection for the complete lifetime of this VASP process."""
+def structure(constants, additions):
+    """Update VASP-owned additions in place, then publish real results.
+
+    The callback keeps a request pending across VASP callback invocations. The
+    first invocation applies displacements; a later invocation, after VASP has
+    accepted them, copies ``constants.total_energy`` and ``constants.forces``
+    into shared memory and emits ``RESULT``.
+    """
     global _bridge
     if _bridge is None:
         _bridge = _Bridge()
-    return _bridge
-
-
-def structure(constants, additions):
-    """Apply a requested structure or publish its completed VASP result."""
-    bridge = _get_bridge()
     try:
-        request = bridge.ensure_request()
-        target_positions = np.asarray(request["positions"], dtype=np.float64)
-        current_positions = np.asarray(constants.positions, dtype=np.float64)
-        positions_match = np.allclose(
-            current_positions,
-            target_positions,
-            rtol=0.0,
-            atol=bridge.tolerance,
-        )
-
-        target_cell = request.get("cell")
-        cell_match = True
-        if target_cell is not None:
-            target_cell = np.asarray(target_cell, dtype=np.float64)
-            current_cell = np.asarray(constants.lattice_vectors, dtype=np.float64)
-            cell_match = np.allclose(current_cell, target_cell, rtol=0.0, atol=bridge.tolerance)
-
-        # VASP additions are displacements. Writing through ``out`` preserves
-        # the VASP-owned array object and its underlying memory address.
-        if not positions_match:
-            np.subtract(target_positions, current_positions, out=additions.positions)
-        if target_cell is not None and not cell_match:
-            np.subtract(target_cell, current_cell, out=additions.lattice_vectors)
-
-        # Energy and forces belong to the current constants only after VASP has
-        # entered the callback with the requested coordinates and lattice.
-        if positions_match and cell_match:
-            bridge.connection.send({
-                "type": "RESULT",
-                "evaluation_id": request["evaluation_id"],
-                "energy": float(constants.total_energy),
-                "forces": np.array(constants.forces, dtype=np.float64, copy=True),
-                "stress": np.array(constants.stress, dtype=np.float64, copy=True),
-            })
-            bridge.pending = None
-    except SystemExit:
-        raise
+        while True:
+            if _bridge.pending is None:
+                _bridge.pending = _bridge.request()
+                _bridge.awaiting_update = False
+            if _bridge.pending is None:
+                _bridge.send("STOPPED")
+                _bridge.close()
+                return
+            generation, has_cell = _bridge.pending
+            positions_match = np.allclose(
+                constants.positions,
+                _bridge.positions,
+                rtol=_bridge.tolerance,
+                atol=1.e-7,
+            )
+            cell_match = True
+            if has_cell:
+                cell_match = np.allclose(
+                    constants.lattice_vectors,
+                    _bridge.cell,
+                    rtol=_bridge.tolerance,
+                    atol=1.e-7,
+                )
+            if not positions_match:
+                if generation == 1:
+                    raise RuntimeError("VASP initial coordinates differ from the requested structure")
+                if _bridge.awaiting_update:
+                    raise RuntimeError("VASP coordinates did not reach the requested structure")
+                np.subtract(_bridge.positions, constants.positions, out=additions.positions)
+            if has_cell and not cell_match:
+                if generation == 1:
+                    raise RuntimeError("VASP initial cell differs from the requested structure")
+                if _bridge.awaiting_update:
+                    raise RuntimeError("VASP lattice did not reach the requested structure")
+                np.subtract(_bridge.cell, constants.lattice_vectors, out=additions.lattice_vectors)
+            if not positions_match or not cell_match:
+                _bridge.awaiting_update = True
+                return
+            _bridge.energy[0] = float(constants.total_energy)
+            np.copyto(_bridge.forces, constants.forces)
+            np.copyto(_bridge.stress, constants.stress)
+            if isinstance(_bridge.array, np.memmap):
+                _bridge.array.flush()
+            _bridge.send(f"RESULT {generation}")
+            _bridge.awaiting_update = False
+            # Keep VASP inside this callback until BUCToolkit has either
+            # supplied the next structure or requested shutdown. Returning
+            # immediately would trigger a redundant SCF on old coordinates.
+            _bridge.pending = _bridge.request()
+            if _bridge.pending is None:
+                _bridge.send("STOPPED")
+                _bridge.close()
+                return
     except Exception as exc:
         try:
-            bridge.connection.send({"type": "ERROR", "error": repr(exc)})
+            _bridge.send(f"ERROR {repr(exc).encode('utf-8').hex()}")
         except Exception:
             pass
+        _bridge.close()
         raise
 '''
 
 
-class VASP_PluginModel(_BaseWrapper):
-    """Use a long-lived VASP Python plugin as an energy/force calculator.
+def _views(array: np.ndarray, n_atom: int) -> dict[str, np.ndarray]:
+    """Return views for the fixed positions/cell/result memory layout."""
+    offset = 3 * n_atom
+    views = {"positions": array[:offset].reshape(n_atom, 3)}
+    views["cell"] = array[offset:offset + 9].reshape(3, 3)
+    offset += 9
+    views["energy"] = array[offset:offset + 1]
+    offset += 1
+    views["forces"] = array[offset:offset + 3 * n_atom].reshape(n_atom, 3)
+    offset += 3 * n_atom
+    views["stress"] = array[offset:offset + 9].reshape(3, 3)
+    return views
 
-    Args:
-        input_path: Directory containing the VASP input files and submit script.
-        submit_script: Submit script filename relative to ``input_path``.
-        use_slurm: Launch with ``sbatch --wait`` instead of direct execution.
-        startup_timeout: Seconds allowed for VASP and the plugin to connect.
-        evaluation_timeout: Seconds allowed for one VASP evaluation.
-        transport_host: Host advertised for network transport.  Unix sockets
-            are used for direct jobs; Slurm jobs use an AF_INET connection.
-        position_tolerance: Absolute tolerance used to match VASP positions
-            with the requested Cartesian Angstrom structure.
 
-    Notes:
-        The input files are used in place.  This class does not create step
-        directories, copy files, or parse OUTCAR.  The user must enable
-        ``PLUGINS/STRUCTURE = T`` in INCAR.
+def _read_poscar(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Read Cartesian coordinates and lattice vectors from one POSCAR.
+
+    The check is deliberately limited to the structural fields needed by the
+    wrapper.  VASP's optional selective-dynamics flags and trailing comments
+    do not affect those fields.
     """
+    with open(path, encoding="utf-8") as stream:
+        lines = [line.split("!", 1)[0].strip() for line in stream if line.strip()]
+    if len(lines) < 8:
+        raise ValueError(f"POSCAR is incomplete: {path}")
+    scale = float(lines[1].split()[0])
+    lattice = np.asarray([[float(value) for value in lines[index].split()[:3]] for index in (2, 3, 4)], dtype=np.float64)
+    if scale < 0:
+        # VASP interprets a negative scale as the desired cell volume.
+        scale = (abs(scale) / abs(np.linalg.det(lattice))) ** (1.0 / 3.0)
+    elif scale == 0:
+        raise ValueError("POSCAR scale factor must be non-zero")
+    lattice *= scale
+    # POSCAR 5 format includes element symbols; older files may omit them.
+    count_line = 5 if all(token.lstrip("+-").isdigit() for token in lines[5].split()) else 6
+    counts = [int(value) for value in lines[count_line].split()]
+    if not counts or any(value < 0 for value in counts):
+        raise ValueError(f"POSCAR has invalid atom counts: {path}")
+    coordinate_line = count_line + 1
+    if lines[coordinate_line].lower().startswith("s"):
+        coordinate_line += 1
+    coordinate_mode = lines[coordinate_line].lower()[0]
+    if coordinate_mode not in {"c", "d"}:
+        raise ValueError(f"POSCAR has an invalid coordinate mode: {path}")
+    n_atom = sum(counts)
+    coordinate_rows = [line.split()[:3] for line in lines[coordinate_line + 1:coordinate_line + 1 + n_atom]]
+    if len(coordinate_rows) != n_atom:
+        raise ValueError(f"POSCAR does not contain {n_atom} coordinate rows: {path}")
+    coordinates = np.asarray(coordinate_rows, dtype=np.float64)
+    if coordinate_mode == "c":
+        coordinates *= scale
+    else:
+        coordinates = coordinates @ lattice
+    return coordinates, lattice
 
-    def __init__(
-            self,
-            input_path: str,
-            submit_script: str,
-            use_slurm: bool = False,
-            startup_timeout: float = 60.0,
-            evaluation_timeout: float = 300.0,
-            transport_host: str | None = None,
-            position_tolerance: float = 1.e-10,
-    ) -> None:
-        super().__init__(input_path)
-        self.input_path = os.path.abspath(input_path)
-        self.submit_script = submit_script
-        self._submit_script_path = os.path.abspath(os.path.join(self.input_path, submit_script))
-        required_files = ("INCAR", "POSCAR", "KPOINTS", "POTCAR")
-        for filename in required_files:
-            if not os.path.isfile(os.path.join(self.input_path, filename)):
-                raise FileNotFoundError(f"{filename} not found at {self.input_path}.")
-        if not os.path.isfile(self._submit_script_path):
-            raise FileNotFoundError(f"submit_script {submit_script!r} not found at {self.input_path}.")
-        if startup_timeout <= 0 or evaluation_timeout <= 0:
-            raise ValueError("startup_timeout and evaluation_timeout must be positive.")
-        if position_tolerance < 0:
-            raise ValueError("position_tolerance must be non-negative.")
 
-        self.use_slurm = bool(use_slurm)
-        self.startup_timeout = float(startup_timeout)
-        self.evaluation_timeout = float(evaluation_timeout)
-        self.position_tolerance = float(position_tolerance)
-        self.transport_host = transport_host
+class _Transport(ABC):
+    """Common FIFO protocol with backend-specific storage and job control."""
 
-        # Section: Persistent VASP session
-        # These objects have the same lifetime as the wrapper. In particular,
-        # one VASP process serves every evaluation instead of one process per X.
-        self._transport: ConnectionTransport | None = None
-        self._job: subprocess.Popen | None = None
-        self._job_stdout = None
-        self._job_stderr = None
-
-        # ``sbatch --wait`` is only a local waiter. Keep the actual Slurm job id
-        # so failure cleanup can cancel the remote VASP allocation as well.
-        self._slurm_job_id: str | None = None
-        self._slurm_stdout_thread: threading.Thread | None = None
-        self._slurm_job_id_ready = threading.Event()
-
-        # Section: Wrapper state
-        # A failed session is terminal: reconnecting to a partly initialized or
-        # unexpectedly dead VASP process could associate results with wrong X.
-        self._started = False
-        self._closed = False
-        self._failed: BaseException | None = None
-        self._methods_replaced = False
-        self._evaluation_id = 0
-
-        # Energy and Grad normally arrive as consecutive protocol calls. Cache
-        # both results from one VASP snapshot to avoid a duplicate SCF cycle.
-        self._cached_positions: np.ndarray | None = None
-        self._cached_cell: np.ndarray | None = None
-        self._cached_energy: float | None = None
-        self._cached_forces: np.ndarray | None = None
-        self._cached_stress: np.ndarray | None = None
-        self._lock = threading.RLock()
-        self._plugin_path = os.path.join(self.input_path, "vasp_plugin.py")
-
-    def _write_plugin(self) -> None:
-        """Atomically install the generated callback bridge in ``input_path``."""
-        if os.path.exists(self._plugin_path):
-            try:
-                with open(self._plugin_path, "r", encoding="utf-8") as stream:
-                    existing = stream.read(128)
-            except OSError as exc:
-                raise RuntimeError(f"Could not inspect {self._plugin_path}.") from exc
-            if "Generated BUCToolkit VASP plugin bridge" not in existing:
-                raise FileExistsError(
-                    f"Refusing to overwrite an existing user plugin at {self._plugin_path}."
-                )
-        # Never expose a partially written plugin to a concurrently starting
-        # VASP process. A non-generated user plugin is deliberately preserved.
-        fd, temporary_path = tempfile.mkstemp(
-            prefix=".vasp_plugin.", suffix=".tmp", dir=self.input_path, text=True
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-                stream.write(_PLUGIN_SOURCE)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, self._plugin_path)
-        except BaseException:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-            raise
-
-    def _start_job(self) -> None:
-        """Launch the persistent direct or Slurm VASP job without waiting."""
-        assert self._transport is not None
-        environment = os.environ.copy()
-        environment.update(self._transport.plugin_environment())
-        environment["BUCTOOLKIT_VASP_POSITION_TOLERANCE"] = repr(self.position_tolerance)
-        script_name = os.path.basename(self._submit_script_path)
-        if self.use_slurm:
-            command = ["sbatch", "--wait", "--parsable", f"./{script_name}"]
-        else:
-            command = [f"./{script_name}"]
-        stdout_path = os.path.join(self.input_path, ".buctoolkit_vasp.stdout")
-        stderr_path = os.path.join(self.input_path, ".buctoolkit_vasp.stderr")
-        self._job_stdout = open(stdout_path, "w", encoding="utf-8")
-        self._job_stderr = open(stderr_path, "w", encoding="utf-8")
-        try:
-            if self.use_slurm:
-                self._job = subprocess.Popen(
-                    command,
-                    cwd=self.input_path,
-                    env=environment,
-                    stdout=subprocess.PIPE,
-                    stderr=self._job_stderr,
-                    text=True,
-                    bufsize=1,
-                )
-                slurm_stdout = self._job.stdout
-
-                def _drain_slurm_stdout() -> None:
-                    # Draining avoids a full pipe stalling sbatch. Its first
-                    # parsable line also owns the id required for ``scancel``.
-                    first_line = True
-                    if slurm_stdout is None:
-                        return
-                    for line in slurm_stdout:
-                        if first_line:
-                            self._slurm_job_id = line.strip().split(";", 1)[0] or None
-                            self._slurm_job_id_ready.set()
-                            first_line = False
-                        self._job_stdout.write(line)
-                        self._job_stdout.flush()
-                    self._slurm_job_id_ready.set()
-
-                self._slurm_stdout_thread = threading.Thread(target=_drain_slurm_stdout, daemon=True)
-                self._slurm_stdout_thread.start()
-            else:
-                self._job = subprocess.Popen(
-                    command,
-                    cwd=self.input_path,
-                    env=environment,
-                    stdout=self._job_stdout,
-                    stderr=self._job_stderr,
-                    text=True,
-                )
-        except BaseException:
-            self._job_stdout.close()
-            self._job_stderr.close()
-            self._job_stdout = self._job_stderr = None
-            raise
-
-    def _job_status(self) -> tuple[bool, int | None]:
-        """Return whether the local process/waiter lives and its exit status."""
-        if self._job is None:
-            return False, None
-        return self._job.poll() is None, self._job.returncode
-
-    def _job_failure(self, context: str) -> RuntimeError:
-        """Classify early normal exit, nonzero exit, and signal termination."""
-        alive, returncode = self._job_status()
-        if alive:
-            return RuntimeError(f"VASP {context} while the process is still running.")
-        if returncode is None:
-            return RuntimeError(f"VASP {context} without an exit status.")
-        if returncode < 0:
-            return RuntimeError(f"VASP was killed by signal {-returncode} during {context}.")
-        if returncode == 0:
-            return RuntimeError(f"VASP exited normally before completing {context}.")
-        return RuntimeError(f"VASP exited with status {returncode} during {context}.")
-
-    def _bootstrap(self) -> None:
-        """Generate the plugin, start VASP, and complete the first handshake."""
-        with self._lock:
-            if self._started:
-                return
-            if self._closed:
-                raise RuntimeError("VASP_PluginModel is closed.")
-            if self._failed is not None:
-                raise RuntimeError("VASP_PluginModel is in a failed state.") from self._failed
-            self._write_plugin()
-            self._transport = ConnectionTransport(
-                use_network=self.use_slurm,
-                host=self.transport_host,
-                socket_dir="/tmp",
-            )
-            try:
-                # The listener must exist before VASP imports its plugin; the
-                # callback connects immediately during its first invocation.
-                self._transport.start()
-                self._start_job()
-                self._transport.accept(
-                    self.startup_timeout,
-                    is_alive=lambda: self._job_status()[0],
-                )
-                hello = self._transport.receive(self.startup_timeout)
-                if hello.get("type") != "HELLO":
-                    raise RuntimeError(f"Unexpected VASP plugin handshake: {hello.get('type')!r}.")
-                self._started = True
-            except BaseException as exc:
-                if self._job is not None and not self._job_status()[0]:
-                    exc = self._job_failure("plugin startup")
-                self._failed = exc
-                self._abort_process()
-                self._transport.close()
-                raise exc
-
-    @staticmethod
-    def _normalize_input(X: th.Tensor, cell: Any = None) -> tuple[np.ndarray, tuple[int, ...], np.ndarray | None]:
-        """Normalize one Cartesian structure before retained state is changed."""
-        if not isinstance(X, th.Tensor):
-            X = th.as_tensor(X)
-        if X.ndim == 2 and X.shape[-1] == 3:
-            origin_shape = tuple(X.shape)
-            positions = X
-        elif X.ndim == 3 and X.shape[0] == 1 and X.shape[-1] == 3:
-            origin_shape = tuple(X.shape)
-            positions = X.squeeze(0)
-        else:
-            raise ValueError("VASP_PluginModel accepts one structure shaped (n_atom, 3) or (1, n_atom, 3).")
-        positions_np = positions.detach().to(device="cpu", dtype=th.float64).numpy().copy()
-        cell_np = None
-        if cell is not None:
-            cell_tensor = th.as_tensor(cell)
-            if cell_tensor.shape != (3, 3):
-                raise ValueError(f"cell must have shape (3, 3), but got {tuple(cell_tensor.shape)}.")
-            cell_np = cell_tensor.detach().to(device="cpu", dtype=th.float64).numpy().copy()
-        return positions_np, origin_shape, cell_np
-
-    def _wait_result(self, evaluation_id: int) -> dict[str, Any]:
-        """Wait for one matching result while continuously checking VASP."""
-        assert self._transport is not None
-        deadline = time.monotonic() + self.evaluation_timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"Timed out waiting for VASP evaluation {evaluation_id}.")
-            alive, _ = self._job_status()
-            if not alive:
-                raise self._job_failure(f"evaluation {evaluation_id}")
-            try:
-                message = self._transport.receive(min(remaining, 0.25))
-            except TimeoutError:
-                continue
-            except ConnectionError as exc:
-                if not self._job_status()[0]:
-                    raise self._job_failure(f"evaluation {evaluation_id}") from exc
-                raise RuntimeError(
-                    f"The VASP plugin connection was lost during evaluation {evaluation_id}."
-                ) from exc
-            kind = message.get("type")
-            if kind == "RESULT":
-                if message.get("evaluation_id") != evaluation_id:
-                    raise RuntimeError("Received a VASP result for the wrong evaluation id.")
-                return message
-            if kind == "ERROR":
-                raise RuntimeError(f"VASP plugin failed: {message.get('error', 'unknown error')}")
-            if kind == "GOODBYE":
-                raise RuntimeError("VASP plugin exited before returning the requested result.")
-            raise RuntimeError(f"Unexpected VASP plugin event: {kind!r}.")
-
-    def _evaluate(self, X: th.Tensor, *, cell: Any = None) -> tuple[float, np.ndarray, np.ndarray, tuple[int, ...], th.device, th.dtype]:
-        """Synchronously evaluate one structure through the persistent session."""
-        positions, origin_shape, cell_np = self._normalize_input(X, cell)
-        device = X.device if isinstance(X, th.Tensor) else th.device("cpu")
-        dtype = X.dtype if isinstance(X, th.Tensor) and X.is_floating_point() else th.float64
-        with self._lock:
-            self._bootstrap()
-            if (
-                    self._cached_positions is not None
-                    and np.array_equal(positions, self._cached_positions)
-                    and ((cell_np is None and self._cached_cell is None) or np.array_equal(cell_np, self._cached_cell))
-            ):
-                # Cache identity is value based because IPC necessarily creates
-                # arrays with storage unrelated to the caller's torch tensor.
-                assert self._cached_energy is not None and self._cached_forces is not None and self._cached_stress is not None
-                return self._cached_energy, self._cached_forces, self._cached_stress, origin_shape, device, dtype
-
-            assert self._transport is not None
-            self._evaluation_id += 1
-            evaluation_id = self._evaluation_id
-            self._transport.send({
-                "type": "STRUCTURE_REQUEST",
-                "evaluation_id": evaluation_id,
-                "positions": positions,
-                "cell": cell_np,
-            })
-            try:
-                result = self._wait_result(evaluation_id)
-            except BaseException as exc:
-                self._failed = exc
-                self._abort_process()
-                raise
-            try:
-                energy = float(result["energy"])
-                forces = np.asarray(result["forces"], dtype=np.float64).copy()
-                stress = np.asarray(result["stress"], dtype=np.float64).copy()
-                if forces.shape != positions.shape:
-                    raise RuntimeError(f"VASP returned forces with shape {forces.shape}, expected {positions.shape}.")
-                self._cached_positions = positions
-                self._cached_cell = cell_np
-                self._cached_energy = energy
-                self._cached_forces = forces
-                self._cached_stress = stress
-                # ACK releases the plugin-side result generation. The plugin
-                # discards ACK before accepting the next structure request.
-                self._transport.send({"type": "ACK", "evaluation_id": evaluation_id})
-            except BaseException as exc:
-                self._failed = exc
-                self._abort_process()
-                raise
-            if not self._methods_replaced:
-                # Bootstrap validation has now succeeded. Later protocol calls
-                # can bypass the first-call public dispatch methods.
-                self.Energy = self._energy_after_start
-                self.Grad = self._grad_after_start
-                self._methods_replaced = True
-            return energy, forces, stress, origin_shape, device, dtype
-
-    def Energy(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
-        """Return the VASP total energy for one Cartesian structure.
+    def __init__(self, input_path: str, command: Sequence[str], session: str) -> None:
+        """Initialize paths and common controller-side protocol state.
 
         Args:
-            X: One structure shaped ``(n_atom, 3)`` or ``(1, n_atom, 3)``.
-            *args: Reserved positional arguments for the func protocol.
+            input_path: VASP working directory shared with the plugin.
+            command: Backend command or submission-script arguments.
+            session: Unique suffix preventing concurrent sessions from sharing FIFOs.
+        """
+        self.input_path, self.command = input_path, list(command)
+        prefix = os.path.join(input_path, f".buctoolkit-vasp-{session}")
+        self.command_path, self.event_path = prefix + ".command.fifo", prefix + ".event.fifo"
+        self.command_fd = self.event_fd = None
+        self.event_buffer = b""
+        self.array = None
+        self.views = {}
+
+    @abstractmethod
+    def prepare(self, size: int) -> dict[str, str]:
+        """Allocate backend storage and return plugin environment variables."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def launch(self, environment: dict[str, str]) -> None:
+        """Start or submit VASP without waiting for completion."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def status(self) -> tuple[bool, str]:
+        """Return active state and a human-readable lifecycle description."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def terminate(self) -> None:
+        """Stop an active local process group or Slurm allocation."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def active(self) -> bool:
+        """Return whether controller cleanup must still terminate the job."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def close_data(self) -> None:
+        """Release and unlink backend-specific shared data."""
+        raise NotImplementedError
+
+    def start(self, n_atom: int, environment: dict[str, str], interval: float) -> None:
+        """Allocate data, create IPC endpoints, launch VASP, and await READY.
+
+        ``input_path`` remains the child cwd throughout this operation. This
+        is what makes BUCToolkit's configured directory and VASP's relative
+        INCAR/POSCAR lookup refer to the same files.
+
+        Args:
+            n_atom: Atom count defining the fixed shared-array layout.
+            environment: Parent environment inherited by VASP and its plugin.
+            interval: Seconds between startup liveness checks while waiting for
+                the plugin READY event.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the VASP job terminates during startup.
+        """
+        child_env = environment.copy()
+        child_env.update({
+            "BUCTOOLKIT_VASP_NUMBER_ATOMS": str(n_atom),
+            "BUCTOOLKIT_VASP_COMMAND_FIFO": self.command_path,
+            "BUCTOOLKIT_VASP_EVENT_FIFO": self.event_path,
+        })
+        child_env.update(self.prepare(6 * n_atom + 19))
+        self.views = _views(self.array, n_atom)
+        # Open both ends before launch. This removes the old startup gap in
+        # which the controller slept until STRUCTURE created the FIFOs.
+        for path in (self.command_path, self.event_path):
+            try:
+                os.mkfifo(path, 0o600)
+            except FileExistsError:
+                if not stat.S_ISFIFO(os.stat(path).st_mode):
+                    raise
+        self.command_fd = os.open(self.command_path, os.O_RDWR | os.O_NONBLOCK)
+        self.event_fd = os.open(self.event_path, os.O_RDWR | os.O_NONBLOCK)
+        self.launch(child_env)
+
+    def assert_alive(self, context: str) -> None:
+        """Raise when the VASP owner of a pending request has terminated.
+
+        Args:
+            context: Operation included in the resulting diagnostic.
+
+        Returns:
+            None.
+        """
+        alive, message = self.status()
+        if not alive:
+            raise RuntimeError(f"VASP stopped during {context}: {message}.")
+
+    def send(self, generation: int, has_cell: bool) -> None:
+        """Publish request metadata after shared request arrays are ready.
+
+        Args:
+            generation: Monotonic request identifier.
+            has_cell: Whether the shared cell belongs to this request.
+
+        Returns:
+            None.
+        """
+        if isinstance(self.array, np.memmap):
+            self.array.flush()
+        record = f"EVALUATE {generation} {int(has_cell)}\n".encode("ascii")
+        if os.write(self.command_fd, record) != len(record):
+            raise RuntimeError("Incomplete VASP command write.")
+
+    def stop_plugin(self) -> None:
+        """Wake a blocked plugin callback before terminating its VASP owner."""
+        if self.command_fd is None:
+            return
+        try:
+            os.write(self.command_fd, b"STOP\n")
+        except OSError:
+            # The plugin may already have exited or closed its FIFO.
+            pass
+
+    def receive(self, interval: float, context: str) -> str:
+        """Wait for one event, waking every interval to check VASP status.
+
+        Args:
+            interval: Seconds between process-liveness checks; this is not an
+                evaluation deadline.
+            context: Operation included in lifecycle diagnostics.
+
+        Returns:
+            One newline-delimited plugin event without its terminator.
+        """
+        while True:
+            if b"\n" in self.event_buffer:
+                line, self.event_buffer = self.event_buffer.split(b"\n", 1)
+                return line.decode("ascii")
+            self.assert_alive(context)
+            ready, _, _ = select.select([self.event_fd], [], [], interval)
+            if ready:
+                chunk = os.read(self.event_fd, 4096)
+                if len(chunk) == 0:
+                    raise ConnectionError("VASP plugin event FIFO was closed.")
+                self.event_buffer += chunk
+
+    def wait_for_exit(self, timeout: float, poll_frequency: float) -> bool:
+        """Wait for the backend job to exit without busy polling.
+
+        Args:
+            timeout: Maximum wait in seconds for normal VASP shutdown.
+            poll_frequency: Seconds between backend liveness checks.
+
+        Returns:
+            ``True`` when the backend has exited, otherwise ``False`` after
+            ``timeout`` seconds.
+        """
+        deadline = time.monotonic() + timeout
+        while self.active():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            select.select([], [], [], min(poll_frequency, remaining))
+        return True
+
+    def close(self) -> None:
+        """Close descriptors and unlink FIFO/data resources.
+
+        Returns:
+            None. Repeated calls are safe after owned handles are cleared.
+        """
+        for name in ("command_fd", "event_fd"):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+        self.close_data()
+        for path in (self.command_path, self.event_path):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+
+class _LocalTransport(_Transport):
+    """Direct process backend using named shared memory."""
+
+    def __init__(self, *args: Any) -> None:
+        """Initialize local-process state in addition to common transport state."""
+        super().__init__(*args)
+        self.shared = None
+        self.process = None
+
+    def prepare(self, size: int) -> dict[str, str]:
+        """Create named shared memory visible to the local child process."""
+        self.shared = shared_memory.SharedMemory(create=True, size=size * 8)
+        self.array = np.ndarray((size,), np.float64, buffer=self.shared.buf)
+        return {"BUCTOOLKIT_VASP_STORAGE": "shared_memory", "BUCTOOLKIT_VASP_DATA_NAME": self.shared.name}
+
+    def launch(self, environment: dict[str, str]) -> None:
+        """Launch the submit script in a new process group."""
+        self.process = subprocess.Popen(self.command, cwd=self.input_path, env=environment, start_new_session=True)
+
+    def status(self) -> tuple[bool, str]:
+        """Classify running, normal, non-zero, and signal exits."""
+        if self.process is None:
+            return False, "direct process was not started"
+        code = self.process.poll()
+        if code is None:
+            return True, "direct process is running"
+        if code < 0:
+            return False, f"direct process was killed by signal {-code}"
+        if code == 0:
+            return False, "direct process exited normally"
+        return False, f"direct process exited with status {code}"
+
+    def active(self) -> bool:
+        """Return whether the local VASP process is still running."""
+        return self.process is not None and self.process.poll() is None
+
+    def terminate(self) -> None:
+        """Terminate the local VASP process group with a bounded fallback."""
+        if not self.active():
+            return
+        os.killpg(self.process.pid, signal.SIGTERM)
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(self.process.pid, signal.SIGKILL)
+            self.process.wait()
+
+    def close_data(self) -> None:
+        """Release and unlink the controller-owned shared-memory segment."""
+        if self.shared is not None:
+            # Drop NumPy exports before closing SharedMemory; otherwise Python
+            # raises BufferError while the array views are still alive.
+            self.views.clear()
+            self.array = None
+            shared = self.shared
+            self.shared = None
+            try:
+                shared.close()
+            finally:
+                try:
+                    shared.unlink()
+                except FileNotFoundError:
+                    pass
+
+
+class _SlurmTransport(_Transport):
+    """Slurm backend using a shared-work-directory mmap and job ID polling."""
+
+    ACTIVE = {"CONFIGURING", "COMPLETING", "PENDING", "RUNNING", "SIGNALING", "STAGE_OUT", "SUSPENDED"}
+
+    def __init__(self, *args: Any) -> None:
+        """Initialize Slurm job tracking and shared mmap storage paths."""
+        super().__init__(*args)
+        self.data_path = os.path.join(self.input_path, ".buctoolkit-vasp-data-%s.mmap" % uuid.uuid4().hex)
+        self.job_id = None
+        self.missing = 0
+
+    def prepare(self, size: int) -> dict[str, str]:
+        """Create mmap storage in the shared VASP working directory."""
+        self.array = np.memmap(self.data_path, np.float64, mode="w+", shape=(size,))
+        return {"BUCTOOLKIT_VASP_STORAGE": "mmap", "BUCTOOLKIT_VASP_DATA_PATH": self.data_path}
+
+    def launch(self, environment: dict[str, str]) -> None:
+        """Submit the script and retain the Slurm job ID as lifecycle handle."""
+        result = subprocess.run(["sbatch", "--parsable", "--export=ALL", *self.command], cwd=self.input_path, env=environment, capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise RuntimeError(f"sbatch failed: {result.stderr.strip()}")
+        self.job_id = result.stdout.strip().split(";", 1)[0]
+        if not self.job_id:
+            raise RuntimeError("sbatch returned no job id")
+
+    @staticmethod
+    def _state(value: str) -> str:
+        """Normalize Slurm state text by dropping flags and whitespace."""
+        return value.strip().split("+", 1)[0].split()[0].upper()
+
+    def status(self) -> tuple[bool, str]:
+        """Poll squeue/sacct and classify active, terminal, or missing jobs."""
+        if self.job_id is None:
+            return False, "Slurm job was not submitted"
+        queue = subprocess.run(["squeue", "--noheader", "--jobs", self.job_id, "--format=%T"], capture_output=True, text=True, check=False)
+        if queue.returncode:
+            raise RuntimeError(queue.stderr.strip())
+        if queue.stdout.strip():
+            state = self._state(queue.stdout.splitlines()[0])
+            return True, f"Slurm job {self.job_id} is {state}"
+        accounting = subprocess.run(["sacct", "--noheader", "--allocations", "--jobs", self.job_id, "--format=State,ExitCode", "--parsable2"], capture_output=True, text=True, check=False)
+        for line in accounting.stdout.splitlines():
+            fields = line.strip().split("|")
+            if len(fields) >= 2 and fields[0]:
+                state = self._state(fields[0])
+                if state in self.ACTIVE:
+                    return True, f"Slurm job {self.job_id} is {state}"
+                return False, f"Slurm job {self.job_id} ended as {state} ({fields[1]})"
+        self.missing += 1
+        return (self.missing < 3, f"Slurm job {self.job_id} disappeared from scheduler")
+
+    def active(self) -> bool:
+        """Return whether Slurm still reports this allocation as active."""
+        try:
+            return self.status()[0]
+        except RuntimeError:
+            return self.job_id is not None
+
+    def terminate(self) -> None:
+        """Cancel the active Slurm allocation, if one is still present."""
+        if self.job_id and self.active():
+            subprocess.run(["scancel", self.job_id], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def close_data(self) -> None:
+        """Flush and remove the controller-owned mmap file."""
+        if isinstance(self.array, np.memmap):
+            self.array.flush()
+        self.views.clear()
+        self.array = None
+        try:
+            os.unlink(self.data_path)
+        except FileNotFoundError:
+            pass
+
+
+class VASP_PluginModel(_BaseWrapper):
+    """Persistent VASP plugin calculator controlled by BUCToolkit.
+
+    ``input_path`` is always VASP's working directory. ``submit_script`` may
+    be relative to it or an absolute shared script; both are launched with
+    ``cwd=input_path``.
+
+    Args:
+        input_path: Directory containing INCAR, POSCAR, KPOINTS and POTCAR.
+        submit_script: Relative script in ``input_path`` or absolute shared script.
+        use_slurm: Select Slurm+mmap instead of local process+shared memory.
+        evaluation_timeout: Seconds between liveness checks while waiting for
+            plugin startup or an SCF evaluation result.
+        position_tolerance: Relative tolerance for structure matching.
+
+    Returns:
+        An object implementing BUCToolkit's Energy/Grad wrapper protocol.
+    """
+
+    def __init__(self, input_path: str, submit_script: str | None = None, use_slurm: bool = False, evaluation_timeout: float = 300.0, position_tolerance: float = 5.e-5, command: str | list[str] | None = None):
+        """Create a persistent external VASP calculator.
+
+        Args:
+            input_path: Directory containing VASP's INCAR, POSCAR, KPOINTS and POTCAR.
+            submit_script: Optional executable script used when ``command`` is absent.
+            use_slurm: Submit ``submit_script`` with Slurm instead of launching a
+            direct child process. ``command`` is invalid in this mode.
+            evaluation_timeout: Seconds between liveness checks while waiting
+                for plugin startup or an SCF evaluation result.
+            position_tolerance: Relative tolerance for structure matching.
+            command: Optional command string or argv list, such as
+                ``"mpirun -n N vasp_std"``. It is only used for local launches.
+
+        Returns:
+            None. The VASP process is started lazily by the first ``Energy`` call.
+
+        Raises:
+            FileNotFoundError: If a required VASP input or submit script is missing.
+            ValueError: If timeout or tolerance values are invalid.
+        """
+        # VASP is an external calculator, not a torch/PyG model.  The base
+        # initializer is called only to establish its common bookkeeping
+        # fields; no model object is wrapped here.
+        super().__init__(None)
+        self.input_path = os.path.abspath(input_path)
+        if use_slurm and command is not None:
+            raise ValueError("`command` must not be provided when `use_slurm=True`; provide `submit_script` instead.")
+        if use_slurm and submit_script is None:
+            raise ValueError("`submit_script` is required when `use_slurm=True`.")
+        if command is None and submit_script is None:
+            raise ValueError("`submit_script` or `command` must be provided.")
+        self.submit_script = None if submit_script is None else os.path.abspath(submit_script if os.path.isabs(submit_script) else os.path.join(self.input_path, submit_script))
+        if isinstance(command, str):
+            command = command.split()
+        elif command is not None and not isinstance(command, list):
+            raise TypeError(f"Expected `command` to be str or List, but got {type(command)}")
+        if command is not None:
+            self.command = [str(item) for item in command]
+            if len(self.command) == 0:
+                raise ValueError("`command` must not be empty.")
+        else:
+            self.command = [self.submit_script]
+        for name in ("INCAR", "POSCAR", "KPOINTS", "POTCAR"):
+            if not os.path.isfile(os.path.join(self.input_path, name)):
+                raise FileNotFoundError(f"{name} not found in {self.input_path}")
+        if self.submit_script is not None and not os.path.isfile(self.submit_script):
+            raise FileNotFoundError(f"submit_script not found: {self.submit_script}")
+        if evaluation_timeout <= 0 or position_tolerance < 0:
+            raise ValueError("evaluation_timeout must be positive; position_tolerance must be non-negative")
+        self.use_slurm = bool(use_slurm)
+        self.evaluation_timeout = float(evaluation_timeout)
+        self.position_tolerance = float(position_tolerance)
+        self.transport = None
+        self.is_init = False
+        self.closed = False
+        self.failed = None
+        self.n_atom = None
+        self._reference_cell = None
+        self.generation = 0
+        self.cache = None
+        self.plugin_path = os.path.join(self.input_path, "vasp_plugin.py")
+    def Energy(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
+        """Return VASP energy, dispatching through first-call initialization.
+
+        Args:
+            X: Cartesian coordinates shaped ``(n_atom, 3)`` or
+                ``(1, n_atom, 3)``.
+            *args: Reserved func-protocol arguments.
             **kwargs: Optional ``cell`` shaped ``(3, 3)``.
 
         Returns:
-            A tensor with shape ``(1,)`` on the input device.
+            A one-element tensor containing the VASP total energy.
         """
-        cell = kwargs.get("cell", None)
-        energy, _, _, _, device, dtype = self._evaluate(X, cell=cell)
+        if self.is_init:
+            return self.__regular_energy(X, *args, **kwargs)
+        return self.__init_energy(X, *args, **kwargs)
+
+    @staticmethod
+    def _check_INCAR(input_path: str) -> None:
+        """Append plugin settings and comment conflicting assignments.
+
+        The marked block is intentionally left in INCAR after termination. A
+        repeated initialization recognizes it and avoids accumulating duplicate
+        overrides; no backup file or restoration pass is required.
+        """
+        incar_path = os.path.join(input_path, "INCAR")
+        with open(incar_path, encoding="utf-8") as stream:
+            lines = stream.readlines()
+        if any("BUCTOOLKIT VASP PLUGIN SETTINGS" in line for line in lines):
+            return
+        rewritten = []
+        for line in lines:
+            content = line.split("#", 1)[0].split("!", 1)[0]
+            key = content.split("=", 1)[0].strip().upper() if "=" in content else ""
+            if key in {"IBRION", "PLUGINS/STRUCTURE"} and content.strip():
+                rewritten.append("# BUCToolkit disabled original: " + line.rstrip("\n") + "\n")
+            else:
+                rewritten.append(line)
+        rewritten.extend([
+            "\n# BUCTOOLKIT VASP PLUGIN SETTINGS\n",
+            "# Required by VASP_PluginModel; original assignments remain above.\n",
+            "IBRION = 12\n",
+            "PLUGINS/STRUCTURE = T\n",
+            "# END BUCTOOLKIT VASP PLUGIN SETTINGS\n",
+        ])
+        with open(incar_path, "w", encoding="utf-8", newline="\n") as stream:
+            stream.writelines(rewritten)
+
+    @staticmethod
+    def _normalize(X: th.Tensor, cell: Any):
+        """Validate and copy one structure before mutating session state.
+
+        Args:
+            X: Floating-point coordinates shaped ``(n_atom, 3)`` or
+                ``(1, n_atom, 3)``.
+            cell: Optional lattice vectors shaped ``(3, 3)``.
+
+        Returns:
+            Positions, cell, original shape, device and dtype.
+
+        Raises:
+            TypeError: If ``X`` is not a floating-point tensor.
+            ValueError: If coordinate or cell shapes are invalid.
+        """
+        if not isinstance(X, th.Tensor) or not X.is_floating_point():
+            raise TypeError("X must be a floating-point torch.Tensor")
+        shape = tuple(X.shape)
+        if X.ndim == 2 and X.shape[1] == 3:
+            positions = X
+        elif X.ndim == 3 and X.shape[0] == 1 and X.shape[2] == 3:
+            positions = X[0]
+        else:
+            raise ValueError(f"X must have shape (n_atom, 3) or (1, n_atom, 3), got {shape}")
+        pos = positions.detach().cpu().double().numpy().copy()
+        cell_np = None if cell is None else th.as_tensor(cell).detach().cpu().double().numpy().copy()
+        # PyG stores one structure's cell as (1, 3, 3); the VASP plugin
+        # protocol uses the corresponding unbatched (3, 3) lattice matrix.
+        if cell_np is not None and cell_np.shape == (1, 3, 3):
+            cell_np = cell_np[0]
+        if cell_np is not None and cell_np.shape != (3, 3):
+            raise ValueError("cell must have shape (3, 3) or (1, 3, 3)")
+        return pos, cell_np, shape, X.device, X.dtype
+
+    @staticmethod
+    def _cell_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Extract optional cell context without imposing an argument type.
+
+        The func protocol permits arbitrary positional context.  VASP only
+        recognizes an explicit ``cell`` keyword or a conventional ``cell`` /
+        ``lattice_vectors`` attribute on the first context object.
+        """
+        if "cell" in kwargs:
+            return kwargs["cell"]
+        if len(args) > 0:
+            context = args[0]
+            for name in ("cell", "lattice_vectors"):
+                if hasattr(context, name):
+                    return getattr(context, name)
+        return None
+
+    def _write_plugin(self) -> None:
+        """Atomically install the generated plugin in the VASP working directory."""
+        if os.path.exists(self.plugin_path):
+            with open(self.plugin_path, encoding="utf-8") as stream:
+                if "Generated BUCToolkit/VASP FIFO bridge" not in stream.read(120):
+                    raise FileExistsError(f"Refusing to overwrite {self.plugin_path}")
+        fd, temp = tempfile.mkstemp(dir=self.input_path, prefix=".vasp_plugin.", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(_PLUGIN_SOURCE)
+        os.replace(temp, self.plugin_path)
+
+    def _check_initial_structure(self, positions: np.ndarray, cell: np.ndarray | None) -> None:
+        """Verify that the first requested structure matches VASP's POSCAR.
+
+        BUCToolkit controls the evaluation sequence, but VASP still reads its
+        initial geometry from the working directory.  Refusing a mismatch here
+        prevents silently evaluating a different structure and avoids starting
+        a long-running process for an invalid request.
+        """
+        poscar_positions, poscar_cell = _read_poscar(os.path.join(self.input_path, "POSCAR"))
+        self._reference_cell = poscar_cell
+        if positions.shape != poscar_positions.shape:
+            raise ValueError(
+                "The initial coordinate shape does not match VASP POSCAR: "
+                f"{positions.shape} != {poscar_positions.shape}"
+            )
+        if not np.allclose(
+                positions,
+                poscar_positions,
+                rtol=self.position_tolerance,
+                atol=1.e-7,
+        ):
+            raise ValueError(
+                "The initial coordinates do not match VASP POSCAR within "
+                f"a relative tolerance of {self.position_tolerance:g}"
+            )
+        if cell is not None and not np.allclose(
+                cell,
+                poscar_cell,
+                rtol=self.position_tolerance,
+                atol=1.e-7,
+        ):
+            raise ValueError(
+                "The initial cell does not match VASP POSCAR within "
+                f"a relative tolerance of {self.position_tolerance:g}"
+            )
+
+    def _terminate(self, reason):
+        """Record a termination reason and stop an active backend job.
+
+        Args:
+            reason: Human-readable explanation written to ``timeout.err``.
+
+        Returns:
+            None.
+        """
+        if self.transport is not None and self.transport.active():
+            with open(os.path.join(self.input_path, "timeout.err"), "w", encoding="utf-8") as stream:
+                stream.write(reason + "\n")
+            self.transport.stop_plugin()
+            self.transport.terminate()
+
+    def _write_stopcar(self) -> None:
+        """Request VASP's normal hard-stop cleanup through ``STOPCAR``.
+
+        ``LABORT`` is read by VASP's electronic-loop abort handler.  It marks
+        the run as a hard stop while still allowing the final output stage,
+        including ``WAVECAR`` writing, to execute.
+        """
+        stopcar_path = os.path.join(self.input_path, "STOPCAR")
+        with open(stopcar_path, "w", encoding="ascii", newline="\n") as stream:
+            stream.write("LABORT = T\n")
+
+    def __init_energy(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
+        """Bootstrap IPC/VASP once, then evaluate the first structure.
+
+        Args:
+            X: Coordinates accepted by :meth:`Energy`.
+            *args: Optional func-protocol context used to locate a cell.
+            **kwargs: Optional keyword context, including ``cell``.
+
+        Returns:
+            The first VASP energy as a one-element tensor.
+        """
+        positions, cell, _, _, _ = self._normalize(X, self._cell_from_call(args, kwargs))
+        self._check_initial_structure(positions, cell)
+        self._check_INCAR(self.input_path)
+        self._write_plugin()
+        kind = _SlurmTransport if self.use_slurm else _LocalTransport
+        self.transport = kind(self.input_path, self.command, uuid.uuid4().hex)
+        env = os.environ.copy()
+        env["BUCTOOLKIT_VASP_POSITION_TOLERANCE"] = repr(self.position_tolerance)
+        try:
+            self.transport.start(len(positions), env, self.evaluation_timeout)
+            ready = self.transport.receive(self.evaluation_timeout, "plugin startup").split()
+            if len(ready) != 2 or ready[0] != "READY":
+                raise RuntimeError(f"Unexpected plugin event: {ready!r}")
+        except BaseException as exc:
+            self.failed = exc
+            self._terminate(f"plugin startup failed: {exc}")
+            self.transport.close()
+            raise
+        self.n_atom, self.is_init = len(positions), True
+        return self.__regular_energy(X, *args, **kwargs)
+
+    def _evaluate(self, positions: np.ndarray, cell: np.ndarray | None) -> tuple[float, np.ndarray]:
+        """Send one generation and copy its synchronized energy/force result.
+
+        Args:
+            positions: Cartesian coordinates in shared-array precision.
+            cell: Optional lattice vectors for this request.
+
+        Returns:
+            A scalar energy and a private copy of the VASP forces.
+
+        Raises:
+            RuntimeError: If VASP or the plugin reports an invalid result.
+        """
+        if self.transport is None or len(positions) != self.n_atom:
+            raise ValueError("atom count does not match the persistent VASP session")
+        self.generation += 1
+        views = self.transport.views
+        # VASP's plugin STRUCTURE interface exposes fractional positions,
+        # whereas BUCToolkit's public func/grad protocol uses Cartesian ones.
+        # Convert only at the IPC boundary and retain Cartesian values in the
+        # cache and in the returned tensors.
+        lattice = cell if cell is not None else self._reference_cell
+        if lattice is None:
+            raise RuntimeError("A lattice is required to convert Cartesian positions for VASP.")
+        fractional_positions = np.linalg.solve(lattice.T, positions.T).T
+        np.copyto(views["positions"], fractional_positions)
+        if cell is not None:
+            # Both interfaces expose one lattice vector per row.  Only the
+            # coordinate solve above changes orientation because the plugin's
+            # Cartesian conversion is ``positions @ lattice_vectors.T``.
+            np.copyto(views["cell"], cell)
+        try:
+            self.transport.send(self.generation, cell is not None)
+            # ``evaluation_timeout`` is only a liveness-poll interval.  A
+            # long SCF cycle must never be treated as a failed evaluation.
+            while True:
+                try:
+                    event = self.transport.receive(
+                        self.evaluation_timeout,
+                        f"evaluation {self.generation}",
+                    ).split()
+                    break
+                except TimeoutError:
+                    self.transport.assert_alive(f"evaluation {self.generation}")
+            if event[0] == "ERROR":
+                detail = "VASP plugin error"
+                if len(event) == 2:
+                    try:
+                        detail = bytes.fromhex(event[1]).decode("utf-8")
+                    except (ValueError, UnicodeDecodeError):
+                        pass
+                raise RuntimeError(detail)
+            if len(event) != 2 or event[0] != "RESULT" or int(event[1]) != self.generation:
+                raise RuntimeError(f"Unexpected plugin event: {event!r}")
+            energy = float(views["energy"][0])
+            forces = np.array(views["forces"], copy=True)
+            self.cache = (positions.copy(), None if cell is None else cell.copy(), energy, forces)
+            return energy, forces
+        except BaseException as exc:
+            self.failed = exc
+            self._terminate(f"evaluation failed: {exc}")
+            self.transport.close()
+            raise
+
+    def __regular_energy(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
+        """Evaluate energy through an already initialized persistent session."""
+        positions, cell, _, device, dtype = self._normalize(X, self._cell_from_call(args, kwargs))
+        if self.closed or self.failed is not None:
+            raise RuntimeError("VASP_PluginModel is unavailable")
+        if self.cache is not None and np.array_equal(self.cache[0], positions) and ((cell is None and self.cache[1] is None) or np.array_equal(cell, self.cache[1])):
+            energy = self.cache[2]
+        else:
+            energy, _ = self._evaluate(positions, cell)
         return th.tensor([energy], device=device, dtype=dtype)
 
     def Grad(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
-        """Return the mathematical energy gradient, i.e. negative VASP forces.
+        """Return the mathematical gradient, i.e. negative VASP forces.
 
         Args:
-            X: One structure shaped ``(n_atom, 3)`` or ``(1, n_atom, 3)``.
-            *args: Reserved positional arguments for the grad protocol.
+            X: Coordinates shaped ``(n_atom, 3)`` or ``(1, n_atom, 3)``.
+            *args: Reserved grad-protocol arguments.
             **kwargs: Optional ``cell`` shaped ``(3, 3)``.
 
         Returns:
-            A tensor shaped like ``X`` on the input device.
+            A tensor shaped like ``X`` on the input device and dtype.
         """
-        cell = kwargs.get("cell", None)
-        _, forces, _, origin_shape, device, dtype = self._evaluate(X, cell=cell)
-        return th.as_tensor(-forces, device=device, dtype=dtype).reshape(origin_shape).contiguous()
-
-    def _energy_after_start(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
-        """Evaluate energy through an already initialized plugin session."""
-        cell = kwargs.get("cell", None)
-        energy, _, _, _, device, dtype = self._evaluate(X, cell=cell)
-        return th.tensor([energy], device=device, dtype=dtype)
-
-    def _grad_after_start(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
-        """Evaluate the gradient through an already initialized plugin session."""
-        cell = kwargs.get("cell", None)
-        _, forces, _, origin_shape, device, dtype = self._evaluate(X, cell=cell)
-        return th.as_tensor(-forces, device=device, dtype=dtype).reshape(origin_shape).contiguous()
-
-    def _abort_process(self) -> None:
-        """Cancel the remote allocation and stop its local waiter/process."""
-        # Killing ``sbatch --wait`` alone does not cancel the scheduled VASP
-        # job, so cancel the allocation before terminating the local waiter.
-        if self._slurm_stdout_thread is not None and self._slurm_job_id is None:
-            self._slurm_job_id_ready.wait(timeout=0.5)
-        if self._slurm_job_id is not None:
-            try:
-                subprocess.run(
-                    ["scancel", self._slurm_job_id],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=5.0,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
-            self._slurm_job_id = None
-        if self._job is not None and self._job.poll() is None:
-            self._job.terminate()
-            try:
-                self._job.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                self._job.kill()
-                self._job.wait()
+        positions, cell, shape, device, dtype = self._normalize(X, self._cell_from_call(args, kwargs))
+        if not self.is_init:
+            self.Energy(X, *args, **kwargs)
+        if self.cache is not None and np.array_equal(self.cache[0], positions) and ((cell is None and self.cache[1] is None) or np.array_equal(cell, self.cache[1])):
+            forces = self.cache[3]
+        else:
+            _, forces = self._evaluate(positions, cell)
+        return th.as_tensor(-forces, device=device, dtype=dtype).reshape(shape).contiguous()
 
     def close(self) -> None:
-        """Close the plugin session and terminate VASP if necessary.
+        """Gracefully stop VASP, then release all IPC resources.
 
-        Returns:
-            None. The operation is idempotent.
+        A ``LABORT`` request gives VASP an opportunity to write final files.
+        If the process remains active for ``evaluation_timeout`` seconds, the
+        existing forced-termination path is used as a safety fallback.
         """
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            if self._transport is not None and self._transport.connection is not None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self.transport is not None:
                 try:
-                    # Prefer callback-boundary shutdown, then enforce bounded
-                    # termination below if VASP never invokes the callback.
-                    self._transport.send({"type": "CLOSE"})
-                    deadline = time.monotonic() + min(self.startup_timeout, 5.0)
-                    while time.monotonic() < deadline and self._job_status()[0]:
-                        if self._transport.connection.poll(0.1):
-                            message = self._transport.receive()
-                            if message.get("type") == "GOODBYE":
-                                break
-                except Exception:
-                    pass
-            self._abort_process()
-            if self._transport is not None:
-                self._transport.close()
-            for stream in (self._job_stdout, self._job_stderr):
-                if stream is not None:
-                    stream.close()
-            if self._slurm_stdout_thread is not None:
-                self._slurm_stdout_thread.join(timeout=1.0)
-                self._slurm_stdout_thread = None
-            self._job_stdout = self._job_stderr = None
+                    if self.transport.active():
+                        self._write_stopcar()
+                        self.transport.stop_plugin()
+                        has_exited = self.transport.wait_for_exit(
+                            self.evaluation_timeout,
+                            POLL_FREQ_AFTER_STOPCAR,
+                        )
+                        if not has_exited:
+                            self._terminate(
+                                "VASP did not exit after STOPCAR within "
+                                f"{self.evaluation_timeout:g} seconds"
+                            )
+                except BaseException as exc:
+                    self._terminate(f"VASP graceful shutdown failed: {exc}")
+                    raise
+                finally:
+                    self.transport.close()
+        finally:
+            self.transport = None
+            self.is_init = False
+            self.n_atom = None
+            self.generation = 0
+            self.cache = None
+            self.failed = None
+            self.closed = False
 
     def __enter__(self) -> "VASP_PluginModel":
+        """Return this wrapper for use in a context manager."""
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        """Release the persistent VASP session on context exit."""
         self.close()

@@ -32,6 +32,7 @@ Homepage = "https://github.com/TrinitroCat/BUCToolkit"
 [project.scripts]
 buctoolkit = "BUCToolkit.cli.main:main"
 bckt = "BUCToolkit.cli.main:main"
+btvasp = "BUCToolkit.cli.main:main_btvasp"
 
 [project.entry-points."buctoolkit.cli"]
 bckt_cli = "BUCToolkit.cli.__init__:run_base_cli"

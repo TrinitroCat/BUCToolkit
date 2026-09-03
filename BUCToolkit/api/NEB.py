@@ -16,13 +16,13 @@ from torch import nn
 
 from BUCToolkit.BatchOptim.TS.CI_NEB import CI_NEB
 from BUCToolkit.utils._CheckModules import check_module
-from ._io import _CONFIGS, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from ._io import _BaseAPI, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils.AtomSelector import atom_fix_selector
 from BUCToolkit.BatchStructures import Batch
 
 
-class ClimbingImageNudgedElasticBand(_CONFIGS):
+class ClimbingImageNudgedElasticBand(_BaseAPI):
     """
     Class of Climbing Image Nudged Elastic Band algorithm to search transition state.
     Users need to set the dataset and dataloader manually.
@@ -56,8 +56,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
 
         __algos = {'CI-NEB': CI_NEB}
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        self.data_type = data_type
+        self._set_data_type(data_type)
         self.reload_config(config_file)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
@@ -99,7 +98,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
+        _model = self._instantiate_model(model)
         if self.START == 'resume' or self.START == 1:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
@@ -146,7 +145,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
                     self.pygBatch = Batch
 
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = self._build_model_wrapper(_model)
                 def get_indx(data):
                     _indx = getattr(data, 'idx', None)
                     # To correctly manage the names after NEB opt. There names will be [[`idx`], [`idx`], ...] (repeat N_images times).
@@ -184,7 +183,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     return graph
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model)
                 raise NotImplementedError  # TODO <<<<
                 def get_batch_size(data):
                     return data.num_nodes('atom')

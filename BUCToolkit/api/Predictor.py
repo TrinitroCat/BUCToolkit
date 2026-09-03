@@ -17,12 +17,12 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.api._io import _CONFIGS, _LoggingEnd
+from BUCToolkit.api._io import _BaseAPI, _LoggingEnd
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper, ArrayDumper
 
 
-class Predictor(_CONFIGS):
+class Predictor(_BaseAPI):
     """
     A Base Predictor class.
     Users need to set the dataset and dataloader manually.
@@ -40,7 +40,7 @@ class Predictor(_CONFIGS):
 
         self.config_file = config_file
         self.reload_config(config_file)
-        self.data_type = data_type
+        self._set_data_type(data_type)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
@@ -124,7 +124,11 @@ class Predictor(_CONFIGS):
             warnings.warn("Cuda is not available, so `warm_up` will be turned off.")
             warm_up = False
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
+        _model = self._instantiate_model(model)
+        model_wrap = self._build_model_wrapper(_model)
+        if not isinstance(model_wrap._model, nn.Module):
+            raise TypeError('Predictor requires a wrapper around torch.nn.Module.')
+        _model = model_wrap._model
         if self.START == 'resume' or self.START == 1 or self.START == 2:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
@@ -302,4 +306,3 @@ class EmptyContextManager:
 
     def wait_stream(self, *args, **kwargs):
         pass
-

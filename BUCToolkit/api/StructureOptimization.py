@@ -17,7 +17,7 @@ from torch import nn
 from BUCToolkit import BatchOptim
 from BUCToolkit.BatchOptim.minimize import CG, QN, FIRE
 from BUCToolkit.BatchOptim.TS.Dimer import Dimer
-from BUCToolkit.api._io import _CONFIGS, _Model_Wrapper_pyg, _Model_Wrapper_dgl, PygBatchUpdater
+from BUCToolkit.api._io import _BaseAPI, _Model_Wrapper_dgl, PygBatchUpdater
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER
 from BUCToolkit.utils._CheckModules import check_module
@@ -25,7 +25,7 @@ from BUCToolkit.utils.ElemListReduce import elem_list_reduce
 from BUCToolkit.utils.setup_loggers import has_any_handler
 
 
-class StructureOptimization(_CONFIGS):
+class StructureOptimization(_BaseAPI):
     """
     The class of structure optimization for relaxation and transition state (only for single-point TS search, e.g. DIMER).
     Users need to set the dataset and dataloader manually.
@@ -94,13 +94,11 @@ class StructureOptimization(_CONFIGS):
 
         self.dX = None
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
+        self._set_data_type(data_type)
         #if data_type == 'pyg':
         #    self.pygData = check_module('torch_geometric.data.batch')
         #else:
         #    self.pygData = None
-        self.data_type = data_type
-
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
@@ -205,7 +203,7 @@ class StructureOptimization(_CONFIGS):
         # check logger
         if not has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
+        _model = self._instantiate_model(model)
         if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
@@ -250,7 +248,7 @@ class StructureOptimization(_CONFIGS):
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = self._build_model_wrapper(_model)
 
                 def get_batch_size(data):
                     return len(data)
@@ -285,7 +283,7 @@ class StructureOptimization(_CONFIGS):
                 update_batch_rot = PygBatchUpdater()
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model)
 
                 def get_batch_size(data):
                     return data.num_nodes('atom')

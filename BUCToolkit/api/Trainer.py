@@ -28,10 +28,10 @@ from torch.optim.lr_scheduler import (StepLR, ExponentialLR, ChainedScheduler, C
 from .Losses import Energy_Force_Loss, Energy_Loss
 from .Metrics import E_MAE, E_R2, F_MAE, F_MaxE, _r2_score, _rmse
 from .ModelOptims import FIRELikeOptimizer, LangevinOptimizer
-from ._io import _CONFIGS, _LoggingEnd, ExpMovingAverage
+from ._io import _BaseAPI, _LoggingEnd, ExpMovingAverage
 
 
-class Trainer(_CONFIGS):
+class Trainer(_BaseAPI):
     r"""
     The model trainer class.
     Users need to set the dataset and dataloader manually.
@@ -319,7 +319,11 @@ class Trainer(_CONFIGS):
         # check vars
         if not isclass(model):
             raise TypeError('`model` must be a class. You may not instantiate it.')
-        _model: nn.Module = model(**self.MODEL_CONFIG)
+        _model = self._instantiate_model(model)
+        model_wrap = self._build_model_wrapper(_model)
+        if not isinstance(model_wrap._model, nn.Module):
+            raise TypeError('Trainer requires a wrapper around torch.nn.Module.')
+        _model = model_wrap._model
         if self.START != 'from_scratch' and self.START != 0:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
@@ -742,4 +746,3 @@ class Trainer(_CONFIGS):
         else:
             _metr_list = dict()
         return _val_loss, _metr_list
-

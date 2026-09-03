@@ -151,10 +151,14 @@ CONFIG_STUB = {
     },
 
     # Model configs
+    "MODEL_TYPE": ("pyg", str, "Model protocol: pyg, vasp, or custom"),
     "MODEL_FILE": ("your/model/file/path/template_model.py", str, "path to model definition file"),
     "MODEL_NAME": ("YourModel", str, "name of the model class in MODEL_FILE"),
     "MODEL_CONFIG": {
         "hyperparameter1": ("xxx", Any, "Model hyperparameter"),
         "hyperparameter2": ("xxx", Any, "Model hyperparameter"),
     },
+    "MODEL_WRAPPER_CONFIG": {},
+    "MODEL_WRAPPER_FILE": (None, str, "path to custom model wrapper source file"),
+    "MODEL_WRAPPER_NAME": (None, str, "name of custom model wrapper in MODEL_WRAPPER_FILE"),
 }

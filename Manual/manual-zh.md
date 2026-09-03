@@ -149,9 +149,11 @@ CLI 的 `BLUE_MOON` 从 `DATA_PATH`/`FSDATA_PATH` 读取成对结构并使用
 
 ### 模型参数
 
-`MODEL_FILE` 和 `MODEL_NAME` 指定 CLI 模型，`MODEL_CONFIG` 作为构造函数
-关键字参数传入。`START`、`LOAD_CHK_FILE_PATH` 和 `STRICT_LOAD` 控制参数
-读取。参见[模型与 checkpoint](examples-zh.md#configure-a-model-and-checkpoint)。
+`MODEL_TYPE` 选择模型协议（`pyg`、`vasp` 或 `custom`）。默认 PyG 协议使用
+`MODEL_FILE` 和 `MODEL_NAME` 指定模型，并将 `MODEL_CONFIG` 传给模型构造函数。
+`MODEL_WRAPPER_CONFIG` 配置包装器；VASP 直接使用它且不读取 `MODEL_CONFIG`。
+自定义包装器通过 `MODEL_WRAPPER_FILE` 和 `MODEL_WRAPPER_NAME` 加载。
+`START`、`LOAD_CHK_FILE_PATH` 和 `STRICT_LOAD` 控制参数读取。参见[模型与 checkpoint](examples-zh.md#configure-a-model-and-checkpoint)。
 
 ## 高级 API 参数
 

@@ -15,11 +15,11 @@ import torch as th
 from torch import nn
 
 from BUCToolkit.BatchMC import MMC
-from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from ._io import _BaseAPI, _LoggingEnd, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 
 
-class MonteCarlo(_CONFIGS):
+class MonteCarlo(_BaseAPI):
     """
     Class of Monte Carlo algorithms, including NVT g Monte Carlo & simulated annealing (temperature varied MC).
     Users need to set the dataset and dataloader manually.
@@ -53,8 +53,7 @@ class MonteCarlo(_CONFIGS):
         super().__init__(config_file)
 
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        self.data_type = data_type
+        self._set_data_type(data_type)
         self.reload_config(config_file)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
@@ -98,7 +97,7 @@ class MonteCarlo(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
+        _model = self._instantiate_model(model)
         if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
@@ -135,7 +134,7 @@ class MonteCarlo(_CONFIGS):
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = self._build_model_wrapper(_model)
                 def get_batch_size(data):
                     return len(data)
 
@@ -170,7 +169,7 @@ class MonteCarlo(_CONFIGS):
                     return _indx
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model)
                 def get_batch_size(data):
                     return data.num_nodes('atom')
 

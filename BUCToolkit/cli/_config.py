@@ -9,6 +9,7 @@ import yaml
 
 _PATH_FIELDS = (
     "MODEL_FILE",
+    "MODEL_WRAPPER_FILE",
     "DATA_PATH",
     "VAL_SET_PATH",
     "FSDATA_PATH",
@@ -94,7 +95,7 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
         )
     config = dict(config)
 
-    for field in ("TASK", "DATA_TYPE"):
+    for field in ("TASK", "DATA_TYPE", "MODEL_TYPE", "MODEL_WRAPPER_NAME"):
         if field in config and not isinstance(config[field], str):
             raise _field_error(
                 TypeError,
@@ -179,8 +180,7 @@ def prepare_output_root(output_root: str) -> str:
         it is returned.
 
     Raises:
-        ValueError: If the path is a symbolic link, a file, or a non-empty
-            directory.
+        ValueError: If the path is a symbolic link or a file.
         OSError: If the missing directory cannot be created or inspected.
     """
     output_root = os.path.abspath(os.path.expanduser(output_root))
@@ -189,9 +189,9 @@ def prepare_output_root(output_root: str) -> str:
             raise ValueError(f"Output root `{output_root}` must not be a symbolic link.")
         if not os.path.isdir(output_root):
             raise ValueError(f"Output root `{output_root}` must be a directory.")
-        with os.scandir(output_root) as entries:
-            if next(entries, None) is not None:
-                raise ValueError(f"Output root `{output_root}` must be empty.")
+        #with os.scandir(output_root) as entries:
+        #    if next(entries, None) is not None:
+        #        raise ValueError(f"Output root `{output_root}` must be empty.")
     else:
         os.makedirs(output_root)
     return output_root

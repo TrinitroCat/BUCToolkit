@@ -17,7 +17,7 @@ import torch as th
 from torch import nn
 
 from BUCToolkit.BatchOptim.frequency import Frequency
-from BUCToolkit.api._io import _CONFIGS, _Model_Wrapper_regularBatch_pyg, _Model_Wrapper_dgl
+from BUCToolkit.api._io import _BaseAPI, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, MASS, N_MASS
 
@@ -25,7 +25,7 @@ REVISED_FLOAT_ARRAY_FORMAT = FLOAT_ARRAY_FORMAT  # reduce the line_width to exhi
 REVISED_FLOAT_ARRAY_FORMAT['max_line_width'] = 64
 
 
-class VibrationAnalysis(_CONFIGS):
+class VibrationAnalysis(_BaseAPI):
     """
     The class of normal mode frequencies calculation by finite difference algo.
     Due to the huge computation cost, it would run sequentially instead of batched.
@@ -51,8 +51,7 @@ class VibrationAnalysis(_CONFIGS):
         super().__init__(config_file)
 
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        self.data_type = data_type
+        self._set_data_type(data_type)
         self.reload_config(config_file)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
@@ -74,7 +73,7 @@ class VibrationAnalysis(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
+        _model = self._instantiate_model(model)
         if self.START == 'resume' or self.START == 1 or self.START == 2:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
@@ -113,7 +112,7 @@ class VibrationAnalysis(_CONFIGS):
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_regularBatch_pyg(_model)  # note: Use regularBatch version of _model wrapper
+                model_wrap = self._build_model_wrapper(_model, regular_batch=True)
 
                 def get_batch_size(data):
                     return len(data)
@@ -135,7 +134,7 @@ class VibrationAnalysis(_CONFIGS):
                     return model_wrap.pygBatch.from_data_list([single_graph, ]*batch_size)
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model)
                 raise NotImplementedError  # TODO <<<< complete dgl format
 
                 def get_batch_size(data):

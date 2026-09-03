@@ -16,13 +16,13 @@ from torch import nn
 
 from BUCToolkit.BatchMD import ConstrNVT, ConstrNVE
 from BUCToolkit.utils._CheckModules import check_module
-from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from ._io import _BaseAPI, _LoggingEnd, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.BatchGenerate.coords_interp import linear_interpolation_tens
 from BUCToolkit.BatchStructures import Batch
 
 
-class ConstrainedMolecularDynamics(_CONFIGS):
+class ConstrainedMolecularDynamics(_BaseAPI):
     """
     Class of constrained molecular dynamics simulation.
     Users need to set the dataset, dataloader, and constraint functions manually.
@@ -61,8 +61,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         super().__init__(config_file)
 
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        self.data_type = data_type
+        self._set_data_type(data_type)
         self.reload_config(config_file)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
@@ -136,7 +135,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
+        _model = self._instantiate_model(model)
         if self.START == 'resume' or self.START == 1 or self.START == 2:
             chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
@@ -185,7 +184,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
                     self.pygBatch = Batch
 
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = self._build_model_wrapper(_model)
                 def get_batch_size(data):
                     return len(data)
 
@@ -228,7 +227,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     return graph
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model)
                 raise NotImplementedError  # TODO <<<<
                 def get_batch_size(data):
                     return data.num_nodes('atom')

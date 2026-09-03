@@ -54,7 +54,7 @@ These following third-party libraries are used:
 - **PyTorch** (BSD-3-Clause License), Copyright © 2016-present Facebook Inc.
 
 These following third-party libraries are optional:
-- **DGL** (Apache-2.3 License). Only parts of DGL models are currently supported.
+- **DGL** (Apache-2.3 License). DGL support is deprecated and no longer available.
 - **torch-geometric** (MIT License). The basic `Data` and `Batch` object have been built-in.
 For its other advanced functions, the whole torch-geometric can be installed.
 - **[ASE (LGPL-v2.1 License)](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads)**. Some functions involving `ase.Atoms` object, format transformation for instance.

@@ -963,11 +963,15 @@ IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calcula
 
 ARGS_MODEL = """
 # model configs
+MODEL_TYPE: !!str pyg  # Literal['pyg', 'vasp', 'custom']
 MODEL_FILE: !!str your/model/file/path/template_model.py  # function file path of torch model
 MODEL_NAME: !!str YourModel   # the specific name of the model in `MODEL_FILE`
 MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CONFIG)`
   hyperparameter1: 'xxx'
   hyperparameter2: 'xxx'
+MODEL_WRAPPER_CONFIG: {}  # arguments passed to the selected model wrapper
+MODEL_WRAPPER_FILE: null  # custom wrapper source file; only for MODEL_TYPE=custom
+MODEL_WRAPPER_NAME: null  # custom wrapper name; only for MODEL_TYPE=custom
 """
 
 ARGS_TRAIN = """

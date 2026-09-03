@@ -51,7 +51,7 @@ Python 函数（返回能量及其梯度，即力的相反数）。
 - **PyTorch**（BSD-3-Clause 许可证），版权所有 © 2016-present Facebook Inc。
 
 以下第三方库为可选项：
-- **DGL**（Apache-2.3 许可证）。目前仅支持部分 DGL 模型。
+- **DGL**（Apache-2.3 许可证）。DGL 支持已弃用，当前不再提供。
 - **torch-geometric**（MIT 许可证）。目前程序已经内置了基本的 `Data` 和 `Batch` 对象。
 如需其他高级功能，可完整安装 torch-geometric。
 - **[ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads)**（LGPL-v2.1 许可证）。用于涉及 `ase.Atoms` 对象的函数，例如格式转换。

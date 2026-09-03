@@ -127,23 +127,43 @@ def _validate_paired_structures(initial_data, paired_data, paired_name: str) -> 
             )
 
 
-def parse_center_input_file(path: str):
+def parse_center_input_file(
+        path: str,
+        model_override: Any | None = None,
+        model_config_override: Dict[str, Any] | None = None,
+        model_wrapper_config_override: Dict[str, Any] | None = None,
+        output_root_override: str | None = None,
+) -> tuple[str, Any, Any]:
     """
     Build a CLI task runner, its paired dataset, and user model callable.
 
     Args:
         path: YAML input file path.
+        model_override: Optional model class or factory. When provided, model
+            loading from ``MODEL_FILE`` and ``MODEL_NAME`` is skipped.
+        model_config_override: Optional mapping passed to the task runner's
+            ``set_model_config`` after configuration loading.
+        model_wrapper_config_override: Optional mapping merged into
+            ``MODEL_WRAPPER_CONFIG`` after configuration loading.
+        output_root_override: Optional output directory used instead of the
+            YAML ``OUTPUT_ROOT``. It is created if needed and may be non-empty.
 
     Returns:
         A tuple of canonical task name, configured runner, and model callable.
 
     Raises:
+        TypeError: If a configured field has an invalid type.
         ValueError: If task configuration, output ownership, or paired
             structures are invalid.
         FileNotFoundError: If a configured input path does not exist.
     """
-    config: Dict[str, Any] = load_input_config(path, require_output_root=True)
-    prepare_output_root(config['OUTPUT_ROOT'])
+    config: Dict[str, Any] = load_input_config(path, require_output_root=output_root_override is None)
+    if output_root_override is not None:
+        config['OUTPUT_ROOT'] = output_root_override
+    if output_root_override is None:
+        prepare_output_root(config['OUTPUT_ROOT'])
+    else:
+        os.makedirs(config['OUTPUT_ROOT'], exist_ok=True)
 
     TASKS_TYPE = {
         'TRAIN': api.Trainer,
@@ -198,14 +218,22 @@ def parse_center_input_file(path: str):
     else:
         task_type = TASKS_TYPE_ALIAS[task_type]
 
+    model_type = str(config.get('MODEL_TYPE', 'pyg')).lower()
+
     # Section: load model
-    model_file = config.get('MODEL_FILE', None)
-    model_name = config.get('MODEL_NAME', None)
-    if model_file is None:
-        raise ValueError(f"`MODEL_FILE` must be specified.")
-    if model_name is None:
-        raise ValueError(f"`MODEL_NAME` must be specified.")
-    udf_model = load_model(model_file, model_name)
+    if model_type == 'vasp':
+        from BUCToolkit.utils.model_wrappers import VASP_PluginModel
+        udf_model = VASP_PluginModel
+    elif model_override is None:
+        model_file = config.get('MODEL_FILE', None)
+        model_name = config.get('MODEL_NAME', None)
+        if model_file is None:
+            raise ValueError(f"`MODEL_FILE` must be specified.")
+        if model_name is None:
+            raise ValueError(f"`MODEL_NAME` must be specified.")
+        udf_model = load_model(model_file, model_name)
+    else:
+        udf_model = model_override
 
     # Section: load data
     data_type = config.get('DATA_TYPE', 'POSCAR').upper()
@@ -328,13 +356,28 @@ def parse_center_input_file(path: str):
         dataset_args = (run_data,)
 
     # dataloader
-    if task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):
+    if model_type == 'vasp' and (task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON')):
+        raise ValueError(
+            'VASP external-process evaluation currently supports one structure '
+            'per batch and cannot be used with paired NEB/BLUE_MOON data.'
+        )
+    if model_type == 'vasp':
+        from BUCToolkit.api.DataLoaders import ExtProcDataLoader
+        dataloader = ExtProcDataLoader
+    elif task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):
         dataloader = ISFSPyGDataLoader
     else:
         dataloader = PyGDataLoader
 
     # set runner
     runner = TASKS_TYPE[task_type](path, 'pyg')
+    if model_config_override is not None:
+        runner.set_model_config(model_config_override)
+    if model_wrapper_config_override is not None:
+        runner.MODEL_WRAPPER_CONFIG = {
+            **runner.MODEL_WRAPPER_CONFIG,
+            **model_wrapper_config_override,
+        }
     runner.set_dataset(*dataset_args, )  # type: ignore
     if dataloader is ISFSPyGDataLoader:
         dataloader_config = {}
@@ -555,6 +598,12 @@ def main():
             if not opened_file.closed:
                 opened_file.close()
         sys.stdout = original_stdout
+
+
+def main_btvasp(argv: list[str] | None = None) -> None:
+    """Entry point for the dedicated ``btvasp`` console script."""
+    from BUCToolkit.cli._vasp_interface import main_btvasp as _main_btvasp
+    return _main_btvasp(argv)
 
 if __name__ == '__main__':
     main()

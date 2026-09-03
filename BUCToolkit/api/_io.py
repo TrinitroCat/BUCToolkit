@@ -66,6 +66,9 @@ class _CONFIGS(object):
         self.reload_config(config_file)
         self.reset_logger()
 
+        # Constants
+        self.__CURRENT_MODEL_TYPES = {'pyg', 'vasp', 'custom'}
+
     def set_device(self, device: str | th.device) -> None:
         """ reset the device that model would train on """
         self.DEVICE = device
@@ -76,6 +79,24 @@ class _CONFIGS(object):
         """
         if model_config is None: model_config = dict()
         self.MODEL_CONFIG = model_config
+
+    def set_output(self, output_path: str, prediction_path: str | None = None) -> None:
+        """Set task output locations and rebuild the standard BUCToolkit logger.
+
+        Args:
+            output_path: Directory receiving task logs.
+            prediction_path: Optional binary dumper path. If omitted, the
+                current prediction path is retained.
+
+        Returns:
+            None.
+        """
+        self.OUTPUT_PATH = os.path.abspath(output_path)
+        self.REDIRECT = True
+        if prediction_path is not None:
+            self.SAVE_PREDICTIONS = True
+            self._PREDICTIONS_SAVE_FILE = os.path.abspath(prediction_path)
+        self.reset_logger()
 
     def set_model_param(self, model_state_dict: Dict, is_strict: bool = True, is_assign: bool = False) -> None:
         """
@@ -189,7 +210,8 @@ class _CONFIGS(object):
         """
         if algo_config is None: algo_config = dict()
         __time = time.strftime("%Y%m%d_%H:%M:%S")
-        para_count = sum(p.numel() for p in _model.parameters())
+        parameters = getattr(_model, 'parameters', None)
+        para_count = sum(p.numel() for p in parameters()) if callable(parameters) else 0
         self.logger.info('\n' + generate_display_art())
         self.logger.info('\n' + '*' * 89 + f'\n TIME: {__time}')
         # parse mode
@@ -252,7 +274,8 @@ class _CONFIGS(object):
         self.logger.info(f' MODEL INFORMATION:')
         self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
         if mode == 'TRAIN':
-            para_count_train = sum(p.numel() for p in _model.parameters() if p.requires_grad)
+            parameters = getattr(_model, 'parameters', None)
+            para_count_train = sum(p.numel() for p in parameters() if p.requires_grad) if callable(parameters) else 0
             self.logger.info(f'\tTOTAL TRAINABLE PARAMETERS: {para_count_train}')
         if self.VERBOSE > 1:
             self.logger.info(f'\tHYPER-PARAMETERS:')
@@ -451,13 +474,36 @@ class _CONFIGS(object):
         if not isinstance(self.MODEL_NAME, str): raise TypeError('MODEL_NAME must be a str.')
         self.MODEL_CONFIG = self.config.get('MODEL_CONFIG', dict())
         if not isinstance(self.MODEL_CONFIG, Dict): raise ValueError('MODEL_CONFIG must be a dictionary.')
+        self.MODEL_TYPE = str(self.config.get('MODEL_TYPE', 'pyg')).lower()
+        if self.MODEL_TYPE not in self.__CURRENT_MODEL_TYPES:
+            raise ValueError(
+                f"`MODEL_TYPE` must be one of {self.__CURRENT_MODEL_TYPES}, "
+                f"but got {self.MODEL_TYPE}."
+            )
+        self.MODEL_WRAPPER_CONFIG = self.config.get('MODEL_WRAPPER_CONFIG', dict())
+        if not isinstance(self.MODEL_WRAPPER_CONFIG, Dict):
+            raise TypeError('`MODEL_WRAPPER_CONFIG` must be a dictionary.')
+        self.MODEL_WRAPPER_FILE = self.config.get('MODEL_WRAPPER_FILE', None)
+        self.MODEL_WRAPPER_NAME = self.config.get('MODEL_WRAPPER_NAME', None)
+        if self.MODEL_TYPE == 'custom':
+            if not isinstance(self.MODEL_WRAPPER_FILE, str):
+                raise ValueError('`MODEL_WRAPPER_FILE` is required when `MODEL_TYPE` is custom.')
+            if not isinstance(self.MODEL_WRAPPER_NAME, str):
+                raise ValueError('`MODEL_WRAPPER_NAME` is required when `MODEL_TYPE` is custom.')
+        elif self.MODEL_WRAPPER_FILE is not None or self.MODEL_WRAPPER_NAME is not None:
+            warnings.warn(
+                '`MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME` are only used with '
+                '`MODEL_TYPE=custom`.',
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         # output info
         self.REDIRECT = self.config.get('REDIRECT', True)
-        self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
+        self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', True)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
-        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
+        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './BUCToolkit_results.db')
         if self.SAVE_PREDICTIONS:
             while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
                 warnings.warn(
@@ -508,6 +554,104 @@ class _CONFIGS(object):
     @property
     def PREDICTIONS_SAVE_FILE(self):
         return self._PREDICTIONS_SAVE_FILE
+
+
+class _BaseAPI(_CONFIGS):
+    """Shared model and data-protocol support for numerical APIs.
+
+    The task classes retain their algorithms, while this base class owns the
+    model lifecycle and the distinction between graph and direct function
+    wrappers. DGL remains in the source tree for reference but is no longer an
+    accepted execution backend.
+    """
+
+    @staticmethod
+    def _validate_data_type(data_type: str) -> str:
+        """Validate the supported graph data representation.
+
+        Args:
+            data_type: Graph container name supplied by a task API.
+
+        Returns:
+            The normalized lower-case data type.
+
+        Raises:
+            TypeError: If ``data_type`` is not a string.
+            NotImplementedError: If the deprecated DGL representation is used.
+            ValueError: If the data type is unknown.
+        """
+        if not isinstance(data_type, str):
+            raise TypeError(f'`data_type` must be a string, but got {type(data_type)}.')
+        normalized = data_type.lower()
+        if normalized == 'dgl':
+            raise NotImplementedError(
+                'DGL support is deprecated and no longer available; use data_type="pyg".'
+            )
+        if normalized != 'pyg':
+            raise ValueError(f'Unsupported `data_type` {data_type!r}; expected "pyg".')
+        return normalized
+
+    def _instantiate_model(self, model: Any) -> Any:
+        """Instantiate the configured model or the built-in VASP wrapper.
+
+        Args:
+            model: Uninstantiated model class used by graph/custom modes.
+
+        Returns:
+            An instantiated base model. For VASP this is already a wrapper.
+        """
+        if self.MODEL_TYPE == 'vasp':
+            from BUCToolkit.utils.model_wrappers import VASP_PluginModel
+            return VASP_PluginModel(**self.MODEL_WRAPPER_CONFIG)
+        return model(**self.MODEL_CONFIG)
+
+    def _build_model_wrapper(self, model: Any, regular_batch: bool = False) -> _BaseWrapper:
+        """Create the configured function wrapper around an instantiated model.
+
+        Args:
+            model: Instantiated base model, or the VASP wrapper itself.
+            regular_batch: Select the vibration-analysis PyG batch adapter.
+
+        Returns:
+            A wrapper exposing the standard ``Energy`` and ``Grad`` protocol.
+
+        Raises:
+            ValueError: If a custom wrapper configuration is incomplete.
+        """
+        if self.MODEL_TYPE == 'vasp':
+            # External calculators require a fresh process for each loader
+            # batch.  The dedicated loader invokes this callback at its batch
+            # boundary without adding cleanup code to every task API.
+            from BUCToolkit.api.DataLoaders import ExtProcDataLoader, PyGDataLoader
+            if self._data_loader is PyGDataLoader:
+                self._data_loader = ExtProcDataLoader
+            if self._data_loader is not ExtProcDataLoader:
+                raise ValueError(
+                    'VASP models require `ExtProcDataLoader` so each external '
+                    'process is released before the next structure.'
+                )
+            self._data_loader_configs = {
+                **self._data_loader_configs,
+                'signal_function': model.close,
+            }
+            return model
+        if self.MODEL_TYPE == 'custom':
+            from BUCToolkit.cli.main import load_model
+            wrapper_class = load_model(self.MODEL_WRAPPER_FILE, self.MODEL_WRAPPER_NAME)
+            wrapper = wrapper_class(model, **self.MODEL_WRAPPER_CONFIG)
+            if not isinstance(wrapper, _BaseWrapper):
+                raise TypeError(
+                    'A custom model wrapper must inherit from `_BaseWrapper`, '
+                    f'but got {type(wrapper)}.'
+                )
+            return wrapper
+        if regular_batch:
+            return _Model_Wrapper_regularBatch_pyg(model, **self.MODEL_WRAPPER_CONFIG)
+        return _Model_Wrapper_pyg(model, **self.MODEL_WRAPPER_CONFIG)
+
+    def _set_data_type(self, data_type: str) -> None:
+        """Store a validated graph data type on a task instance."""
+        self.data_type = self._validate_data_type(data_type)
 
 
 class _Model_Wrapper_pyg(_BaseWrapper):
@@ -603,6 +747,7 @@ class _Model_Wrapper_pyg_only_X(_BaseWrapper):
 
 
 class _Model_Wrapper_dgl(_BaseWrapper):
+    """Deprecated DGL adapter retained only for source compatibility."""
     def __init__(self, model) -> None:
         """
         A format transformer for converting Tensor X into DGLGraph.ndata['pos'] i.e., wrapping the model(graph, ...) into f(X)

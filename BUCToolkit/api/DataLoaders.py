@@ -8,7 +8,7 @@
 #  Environment: Python 3.12
 
 import random
-from typing import Any, Dict, List, Self, Tuple, Literal, Sequence
+from typing import Any, Callable, Dict, List, Self, Tuple, Literal, Sequence
 from collections.abc import Mapping
 
 import numpy as np
@@ -29,8 +29,9 @@ dgl = check_module('dgl')
 
 
 class DglGraphLoader:
-    """
-    A Data loader to form dgl graph IN MEMORY
+    """Deprecated DGL data loader retained for source compatibility.
+
+    New API entry points reject ``data_type='dgl'`` before this loader is used.
 
     Args:
         data:
@@ -227,6 +228,77 @@ class PyGDataLoader:
             return data, label
         else:
             raise StopIteration
+
+
+class ExtProcDataLoader(PyGDataLoader):
+    """PyG loader that signals completion of each external-process batch.
+
+    The loader keeps the ordinary :class:`PyGDataLoader` data contract while
+    adding a lifecycle boundary for calculators backed by a persistent
+    external process.  The callback is sent before every batch after the first
+    one and once when iteration reaches ``StopIteration``.
+
+    Args:
+        signal_function: Optional callback used to release the previous
+            external-process session.
+        *args, **kwargs: Arguments accepted by :class:`PyGDataLoader`.
+
+    Notes:
+        ``is_first`` is reset when a batch boundary is signalled.  This keeps
+        repeated calls after exhaustion harmless and prevents duplicate
+        cleanup callbacks.
+    """
+
+    def __init__(
+            self,
+            *args: Any,
+            signal_function: Callable[..., Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if self.batchsize != 1:
+            raise ValueError(
+                "`ExtProcDataLoader` requires batch_size = 1 because one "
+                "external-process session serves exactly one structure."
+            )
+        self.is_first = True
+        self._signal_function: Callable[[], Any] = lambda: None
+        if signal_function is not None:
+            self.set_signal(signal_function)
+
+    def set_signal(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        """Register the callback invoked at external-process boundaries.
+
+        Args:
+            func: Callable that releases the active external-process session.
+            *args, **kwargs: Arguments bound to ``func`` for every callback.
+
+        Raises:
+            TypeError: If ``func`` is not callable.
+        """
+        if not callable(func):
+            raise TypeError(f"`func` must be callable, but got {type(func)}.")
+
+        def send_signal() -> Any:
+            return func(*args, **kwargs)
+
+        self._signal_function = send_signal
+
+    def _sent_signal(self) -> Any:
+        """Invoke the registered external-process lifecycle callback."""
+        return self._signal_function()
+
+    def __next__(self) -> Tuple[pygBatch, Dict[Literal['energy', 'forces'], th.Tensor] | None]:
+        """Return the next batch after releasing the preceding one."""
+        if not self.is_first:
+            self._sent_signal()
+            self.is_first = True
+        try:
+            batch = super().__next__()
+        except StopIteration:
+            raise
+        self.is_first = False
+        return batch
 
 
 class BatchStructuresDataLoader:
