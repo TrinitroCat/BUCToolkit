@@ -39,7 +39,7 @@ class StructureOptimization(_BaseAPI):
         RELAXATION:
           ALGO: Literal[CG, BFGS, FIRE], the optimization algo.
           REQUIRE_GRAD: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs). Default: False.
-          ITER_SCHEME: Literal['PR+', 'FR', 'PR', 'WYL'], only use for ALGO=CG, the iteration scheme of CG. Default: PR+.
+          ITER_SCHEME: Literal['PR+', 'FR', 'PR', ], only use for ALGO=CG, the iteration scheme of CG. Default: PR+.
           E_THRES: float, threshold of Energy difference (eV). Default: 1e-4.
           F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
           MAXITER: int, the maximum iteration numbers. Default: 300.

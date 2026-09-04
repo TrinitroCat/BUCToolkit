@@ -75,13 +75,17 @@ class CG(_BaseOpt):
         self.MIN_CACHE = th.scalar_tensor(1.e-20, device=self.device)
 
     @staticmethod
-    def __check_restart(gg, ggo, g, p, beta):
+    def __check_restart(gg, ggo, g, p, beta, batch_scatter_indices=None):
         """
         check if restarting is needed.
 
         """
         ortho_check = th.abs(ggo) > 0.1 * gg
-        return ortho_check
+        if batch_scatter_indices is None:
+            gp = th.sum(g * p, dim=(-2, -1), keepdim=True)
+        else:
+            gp = th.sum(index_inner_product(g, p, 1, batch_scatter_indices), dim=-1, keepdim=True)
+        return ortho_check | ((-gg + beta * gp) >= 0.)
 
     def __PRP_irreg(
             self,
@@ -100,7 +104,7 @@ class CG(_BaseOpt):
         beta = (gg - ggo) / gogo  # (1, B, 1)
         beta.clamp_min_(self.MIN_CACHE)
         # Restart
-        is_restart = self.__check_restart(gg, ggo, g, p, beta)
+        is_restart = self.__check_restart(gg, ggo, g, p, beta, batch_scatter_indices)
         beta.masked_fill_(is_restart, 0.)
         beta = beta.index_select(1, batch_scatter_indices)
         if self.verbose > 1:
@@ -152,7 +156,7 @@ class CG(_BaseOpt):
         gg = th.sum(index_inner_product(g, g, 1, batch_scatter_indices), dim=-1, keepdim=True)
         beta = gg / gogo
         # Restart
-        is_restart = self.__check_restart(gg, ggo, g, p, beta)
+        is_restart = self.__check_restart(gg, ggo, g, p, beta, batch_scatter_indices)
         beta.masked_fill_(is_restart, 0.)  # (1, B, 1)
         beta = beta.index_select(1, batch_scatter_indices)  # (1, sumN, 1)
         if self.verbose > 1:
@@ -254,4 +258,3 @@ class CG(_BaseOpt):
         Returns: None
         """
         pass
-

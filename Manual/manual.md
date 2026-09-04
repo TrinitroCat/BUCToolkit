@@ -89,7 +89,7 @@ file are resolved relative to that file.
 | Field | Values / type | Default | Meaning |
 | --- | --- | --- | --- |
 | `ALGO` | `CG`, `BFGS`, `FIRE` | `FIRE` | Minimization algorithm. [Optimization](examples.md#structure-optimization-with-the-api) |
-| `ITER_SCHEME` | `PR+`, `FR`, `PR`, `WYL` | `PR+` | CG iteration scheme. |
+| `ITER_SCHEME` | `PR+`, `FR`, `PR`,  | `PR+` | CG iteration scheme. |
 | `E_THRES` | float | `1e4` | Energy-difference threshold. |
 | `F_THRES` | float | `0.05` | Maximum-force threshold. |
 | `MAXITER` | positive integer | `300` | Maximum outer iterations. |

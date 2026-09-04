@@ -47,7 +47,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["tests*", "dist*", "Manual*"]
+exclude = ["tests*", "dist*", "Manual*", "build*", "*.egg-info*"]
 
 [tool.setuptools.package-data]
 "*" = ["README.md"]
