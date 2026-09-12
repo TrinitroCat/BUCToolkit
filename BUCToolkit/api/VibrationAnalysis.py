@@ -73,14 +73,19 @@ class VibrationAnalysis(_BaseAPI):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model = self._instantiate_model(model)
         if self.START == 'resume' or self.START == 1 or self.START == 2:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=False)
+                _model.load_state_dict(_chk_model_param, strict=False)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
+            epoch_now = _chk_train_state['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
                 'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
@@ -105,14 +110,14 @@ class VibrationAnalysis(_BaseAPI):
         vib_calculator = None
         try:
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'VIB', self.Vib_config, self.n_samp)
+                self.logout_task_information(_model, 'VIB', self.Vib_config, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = self._build_model_wrapper(_model, regular_batch=True)
+                model_wrap = self._build_model_wrapper(_model, regular_batch=True, hyperparam=hyperparam)
 
                 def get_batch_size(data):
                     return len(data)
@@ -134,7 +139,7 @@ class VibrationAnalysis(_BaseAPI):
                     return model_wrap.pygBatch.from_data_list([single_graph, ]*batch_size)
 
             else:
-                model_wrap = self._build_model_wrapper(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 raise NotImplementedError  # TODO <<<< complete dgl format
 
                 def get_batch_size(data):

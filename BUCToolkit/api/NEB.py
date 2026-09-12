@@ -98,14 +98,19 @@ class ClimbingImageNudgedElasticBand(_BaseAPI):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model = self._instantiate_model(model)
         if self.START == 'resume' or self.START == 1:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        if self.START == 'resume' or self.START == 1:
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=False)
+                _model.load_state_dict(_chk_model_param, strict=False)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
+            epoch_now = _chk_train_state['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
                 'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
@@ -130,7 +135,7 @@ class ClimbingImageNudgedElasticBand(_BaseAPI):
         try:
             # I/O
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'NEB', self.NEB_config, self.n_samp)
+                self.logout_task_information(_model, 'NEB', self.NEB_config, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
@@ -145,7 +150,7 @@ class ClimbingImageNudgedElasticBand(_BaseAPI):
                     #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
                     self.pygBatch = Batch
 
-                model_wrap = self._build_model_wrapper(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 def get_indx(data):
                     _indx = getattr(data, 'idx', None)
                     # To correctly manage the names after NEB opt. There names will be [[`idx`], [`idx`], ...] (repeat N_images times).
@@ -183,7 +188,7 @@ class ClimbingImageNudgedElasticBand(_BaseAPI):
                     return graph
 
             else:
-                model_wrap = self._build_model_wrapper(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 raise NotImplementedError  # TODO <<<<
                 def get_batch_size(data):
                     return data.num_nodes('atom')

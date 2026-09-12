@@ -1,5 +1,6 @@
 """ Input / Output Module """
 import gc
+import copy
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -194,7 +195,9 @@ class _CONFIGS(object):
             _model: nn.Module,
             mode: str,
             algo_config: Dict[str, Any] | None,
-            n_samp: int | None
+            n_samp: int | None,
+            checkpoint_hyperparam: Dict[str, Any] | None = None,
+            model_hyperparam: Dict[str, Any] | None = None,
     ) -> None:
         """
         Logout task head information.
@@ -203,6 +206,8 @@ class _CONFIGS(object):
             mode: task mode keyword.
             algo_config: Dict[str, Any], kwargs/configs of this task.
             n_samp: int, number of samples loaded in.
+            checkpoint_hyperparam: Optional checkpoint metadata for display.
+            model_hyperparam: Effective model hyperparameters used for this task.
 
         Returns: None
 
@@ -278,8 +283,15 @@ class _CONFIGS(object):
             self.logger.info(f'\tTOTAL TRAINABLE PARAMETERS: {para_count_train}')
         if self.VERBOSE > 1:
             self.logger.info(f'\tHYPER-PARAMETERS:')
-            for hp, hpv in self.MODEL_CONFIG.items():
+            model_config = self.MODEL_CONFIG if model_hyperparam is None else model_hyperparam['MODEL_CONFIG']
+            for hp, hpv in model_config.items():
                 self.logger.info(f'\t\t{hp}: {hpv}')
+            if isinstance(checkpoint_hyperparam, dict):
+                checkpoint_train = checkpoint_hyperparam.get('TRAIN')
+                if isinstance(checkpoint_train, dict):
+                    self.logger.info('\tCHECKPOINT TRAINING HYPER-PARAMETERS (metadata only):')
+                    for hp, hpv in checkpoint_train.items():
+                        self.logger.info(f'\t\t{hp}: {hpv}')
 
         self.logger.info(f' TASK WILL RUN ON {self.DEVICE}')
         if mode == 'TRAIN':
@@ -590,7 +602,81 @@ class _BaseAPI(_CONFIGS):
             raise ValueError(f'Unsupported `data_type` {data_type!r}; expected "pyg".')
         return normalized
 
-    def _instantiate_model(self, model: Any) -> Any:
+    def _load_chk(self, path: str | None = None):
+        """Load a checkpoint once and split metadata, model parameters, and training state."""
+        load_path = self.LOAD_CHK_FILE_PATH if path is None else path
+        chk_data = th.load(load_path, weights_only=True)
+        if not isinstance(chk_data, dict):
+            raise TypeError(f'Checkpoint must contain a dictionary, but got {type(chk_data)}.')
+        if 'model_state_dict' not in chk_data:
+            raise KeyError(f'Checkpoint `{load_path}` does not contain `model_state_dict`.')
+        chk_hyperparam = chk_data.get('buctoolkit_hyperparameters', None)
+        chk_model_param = chk_data['model_state_dict']
+        chk_train_state = {
+            key: chk_data.get(key)
+            for key in ('epoch', 'val_loss', 'optimizer_state_dict', 'lr_scheduler_state_dict')
+        }
+        return chk_hyperparam, chk_model_param, chk_train_state
+
+    @staticmethod
+    def _merge_model_hyperparameters(input_config: Dict[str, Any], chk_config: Dict[str, Any], path: str = ''):
+        merged = copy.deepcopy(input_config)
+        conflicts = []
+        union_notes = []
+        for key, chk_value in chk_config.items():
+            key_path = f'{path}.{key}' if path else str(key)
+            if key not in input_config:
+                merged[key] = copy.deepcopy(chk_value)
+                union_notes.append(f'{key_path}: checkpoint-only, using checkpoint={chk_value!r}')
+            elif isinstance(input_config[key], dict) and isinstance(chk_value, dict):
+                merged[key], nested_conflicts, nested_notes = _BaseAPI._merge_model_hyperparameters(
+                    input_config[key], chk_value, key_path
+                )
+                conflicts.extend(nested_conflicts)
+                union_notes.extend(nested_notes)
+            elif input_config[key] != chk_value:
+                merged[key] = copy.deepcopy(chk_value)
+                conflicts.append(f'{key_path}: input={input_config[key]!r}, checkpoint={chk_value!r}')
+        for key, input_value in input_config.items():
+            if key not in chk_config:
+                key_path = f'{path}.{key}' if path else str(key)
+                union_notes.append(f'{key_path}: input-only, using input={input_value!r}')
+        return merged, conflicts, union_notes
+
+    def _checkpoint_hyperparameters(self, chk_hyperparam):
+        """Merge checkpoint MODEL metadata with input MODEL configuration."""
+        input_hyperparam = self._current_model_hyperparameters()
+        if chk_hyperparam is None:
+            self.logger.info('Checkpoint hyperparameters were not found; input MODEL configuration will be used.')
+            return input_hyperparam
+        if not isinstance(chk_hyperparam, dict):
+            self.logger.warning('Checkpoint hyperparameters have an invalid format; input MODEL configuration will be used.')
+            return input_hyperparam
+        chk_model = chk_hyperparam.get('MODEL', {})
+        if not isinstance(chk_model, dict):
+            self.logger.warning('Checkpoint MODEL hyperparameters have an invalid format; input MODEL configuration will be used.')
+            return input_hyperparam
+        merged, conflicts, union_notes = self._merge_model_hyperparameters(input_hyperparam, chk_model)
+        if conflicts:
+            self.logger.warning(
+                'Checkpoint MODEL hyperparameters differ from input; checkpoint values will be used:\n'
+                + '\n'.join(f'  {conflict}' for conflict in conflicts)
+            )
+        if union_notes and self.VERBOSE > 1:
+            self.logger.info(
+                'Checkpoint MODEL hyperparameters were merged by union:\n'
+                + '\n'.join(f'  {note}' for note in union_notes)
+            )
+        return merged
+
+    def _current_model_hyperparameters(self) -> Dict[str, Any]:
+        return {
+            'MODEL_TYPE': self.MODEL_TYPE,
+            'MODEL_CONFIG': self.MODEL_CONFIG,
+            'MODEL_WRAPPER_CONFIG': self.MODEL_WRAPPER_CONFIG,
+        }
+
+    def _instantiate_model(self, model: Any, hyperparam: Dict[str, Any] | None = None) -> Any:
         """Instantiate the configured model or the built-in VASP wrapper.
 
         Args:
@@ -599,12 +685,26 @@ class _BaseAPI(_CONFIGS):
         Returns:
             An instantiated base model. For VASP this is already a wrapper.
         """
-        if self.MODEL_TYPE == 'vasp':
+        if hyperparam is None:
+            hyperparam = {
+                'MODEL_TYPE': self.MODEL_TYPE,
+                'MODEL_CONFIG': self.MODEL_CONFIG,
+                'MODEL_WRAPPER_CONFIG': self.MODEL_WRAPPER_CONFIG,
+            }
+        model_type = hyperparam['MODEL_TYPE']
+        model_config = hyperparam['MODEL_CONFIG']
+        model_wrapper_config = hyperparam['MODEL_WRAPPER_CONFIG']
+        if model_type == 'vasp':
             from BUCToolkit.utils.model_wrappers import VASP_PluginModel
-            return VASP_PluginModel(**self.MODEL_WRAPPER_CONFIG)
-        return model(**self.MODEL_CONFIG)
+            return VASP_PluginModel(**model_wrapper_config)
+        return model(**model_config)
 
-    def _build_model_wrapper(self, model: Any, regular_batch: bool = False) -> _BaseWrapper:
+    def _build_model_wrapper(
+            self,
+            model: Any,
+            regular_batch: bool = False,
+            hyperparam: Dict[str, Any] | None = None,
+    ) -> _BaseWrapper:
         """Create the configured function wrapper around an instantiated model.
 
         Args:
@@ -617,7 +717,14 @@ class _BaseAPI(_CONFIGS):
         Raises:
             ValueError: If a custom wrapper configuration is incomplete.
         """
-        if self.MODEL_TYPE == 'vasp':
+        if hyperparam is None:
+            hyperparam = {
+                'MODEL_TYPE': self.MODEL_TYPE,
+                'MODEL_WRAPPER_CONFIG': self.MODEL_WRAPPER_CONFIG,
+            }
+        model_type = hyperparam['MODEL_TYPE']
+        model_wrapper_config = hyperparam['MODEL_WRAPPER_CONFIG']
+        if model_type == 'vasp':
             # External calculators require a fresh process for each loader
             # batch.  The dedicated loader invokes this callback at its batch
             # boundary without adding cleanup code to every task API.
@@ -634,10 +741,10 @@ class _BaseAPI(_CONFIGS):
                 'signal_function': model.close,
             }
             return model
-        if self.MODEL_TYPE == 'custom':
+        if model_type == 'custom':
             from BUCToolkit.cli.main import load_model
             wrapper_class = load_model(self.MODEL_WRAPPER_FILE, self.MODEL_WRAPPER_NAME)
-            wrapper = wrapper_class(model, **self.MODEL_WRAPPER_CONFIG)
+            wrapper = wrapper_class(model, **model_wrapper_config)
             if not isinstance(wrapper, _BaseWrapper):
                 raise TypeError(
                     'A custom model wrapper must inherit from `_BaseWrapper`, '
@@ -645,8 +752,8 @@ class _BaseAPI(_CONFIGS):
                 )
             return wrapper
         if regular_batch:
-            return _Model_Wrapper_regularBatch_pyg(model, **self.MODEL_WRAPPER_CONFIG)
-        return _Model_Wrapper_pyg(model, **self.MODEL_WRAPPER_CONFIG)
+            return _Model_Wrapper_regularBatch_pyg(model, **model_wrapper_config)
+        return _Model_Wrapper_pyg(model, **model_wrapper_config)
 
     def _set_data_type(self, data_type: str) -> None:
         """Store a validated graph data type on a task instance."""
@@ -884,6 +991,9 @@ class ExpMovingAverage:
     @th.no_grad()
     def restore(self):
         """Restore the model parameters saved by apply()."""
+        if not self.backup:
+            return
+
         try:
             for name, param in self.model.named_parameters():
                 if param.requires_grad:

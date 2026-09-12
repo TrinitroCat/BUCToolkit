@@ -247,6 +247,44 @@ class Trainer(_BaseAPI):
         else:
             self._layerwise_opt_configs = None
 
+    def _build_checkpoint_hyperparameters(
+            self,
+            model_hyperparam: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Build serializable model and training metadata for checkpoints."""
+        optimizer_name = next(
+            (name for name, optim in self._OPTIM_DICT.items() if optim is self.OPTIMIZER),
+            'custom' if self.OPTIMIZER is not None else None,
+        )
+        scheduler_name = next(
+            (name for name, scheduler in self._LR_SCHEDULER_DICT.items() if scheduler is self.LR_SCHEDULER),
+            'custom' if self.LR_SCHEDULER is not None else None,
+        )
+        layerwise_config = None
+        if self._layerwise_opt_configs is not None:
+            layerwise_config = {
+                pattern.pattern: copy.deepcopy(config)
+                for pattern, config in self._layerwise_opt_configs.items()
+            }
+        return {
+            'MODEL': copy.deepcopy(model_hyperparam),
+            'TRAIN': {
+                'OPTIM': optimizer_name,
+                'OPTIM_CONFIG': copy.deepcopy(self.OPTIM_CONFIG),
+                'LAYERWISE_OPTIM_CONFIG': layerwise_config,
+                'LR_SCHEDULER': scheduler_name,
+                'LR_SCHEDULER_CONFIG': copy.deepcopy(self.LR_SCHEDULER_CONFIG),
+                'LOSS': self.loss_name,
+                'LOSS_CONFIG': copy.deepcopy(self.LOSS_CONFIG),
+                'EMA': self.EMA,
+                'EMA_DECAY': self.EMA_DECAY,
+                'ACCUMULATE_STEP': self.ACCUMULATE_STEP,
+                'GRAD_CLIP': self.GRAD_CLIP,
+                'GRAD_CLIP_MAX_NORM': self.GRAD_CLIP_MAX_NORM,
+                'GRAD_CLIP_CONFIG': copy.deepcopy(self.GRAD_CLIP_CONFIG),
+            },
+        }
+
     @staticmethod
     def _async_save_chkpt(q: queue.Queue):
         """
@@ -305,7 +343,7 @@ class Trainer(_BaseAPI):
         _chk_queue = queue.Queue(maxsize=4)
         _chk_thread = threading.Thread(target=self._async_save_chkpt, args=(_chk_queue,), daemon=True)
         _chk_thread.start()
-        _copy_stream = th.cuda.Stream() if 'cuda' in str(self.DEVICE) else None
+        _copy_stream = th.cuda.Stream(device=self.DEVICE) if 'cuda' in str(self.DEVICE) else None
         return _chk_queue, _chk_thread, _copy_stream
 
     def train(self, model):
@@ -319,20 +357,26 @@ class Trainer(_BaseAPI):
         # check vars
         if not isclass(model):
             raise TypeError('`model` must be a class. You may not instantiate it.')
-        _model = self._instantiate_model(model)
-        model_wrap = self._build_model_wrapper(_model)
+        if self.START != 'from_scratch' and self.START != 0:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
         if not isinstance(model_wrap._model, nn.Module):
             raise TypeError('Trainer requires a wrapper around torch.nn.Module.')
         _model = model_wrap._model
         if self.START != 'from_scratch' and self.START != 0:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=self.STRICT_LOAD)
+                _model.load_state_dict(_chk_model_param, strict=self.STRICT_LOAD)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
             if self.START == 'resume' or self.START == 1:
-                epoch_now = chk_data['epoch']
-                val_loss_old = chk_data['val_loss'] if isinstance(chk_data['val_loss'], float) else chk_data['val_loss'][0]
+                epoch_now = _chk_train_state['epoch']
+                val_loss = _chk_train_state['val_loss']
+                val_loss_old = val_loss if isinstance(val_loss, float) else val_loss[0]
             elif self.START == 'param_only' or self.START == 2:
                 epoch_now = 0
                 val_loss_old = th.inf
@@ -341,7 +385,6 @@ class Trainer(_BaseAPI):
                 raise ValueError(f'Invalid `START` value {self.START}. It should be "from_scratch" / 0 , "resume" / 1 , "param_only" / 2')
         elif self.START == 'from_scratch' or self.START == 0:
             epoch_now = 0
-            chk_data = None
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
             val_loss_old = th.inf
@@ -410,12 +453,12 @@ class Trainer(_BaseAPI):
         else:
             OPTIMIZER = self.OPTIMIZER(parameter_iterator, **self.OPTIM_CONFIG)
             if self.START == 'resume' or self.START == 1:
-                OPTIMIZER.load_state_dict(chk_data['optimizer_state_dict'])
+                OPTIMIZER.load_state_dict(_chk_train_state['optimizer_state_dict'])
 
         if self.LR_SCHEDULER is not None:
             scheduler = self.LR_SCHEDULER(OPTIMIZER, last_epoch=(epoch_now - 1), **self.LR_SCHEDULER_CONFIG)
             if self.START == 'resume' or self.START == 1:
-                scheduler.load_state_dict(chk_data['lr_scheduler_state_dict'])
+                scheduler.load_state_dict(_chk_train_state['lr_scheduler_state_dict'])
         else:
             scheduler = None
 
@@ -455,7 +498,14 @@ class Trainer(_BaseAPI):
         try:
             # I/O
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'TRAIN', None, n_trn_samp + n_val_samp)
+                self.logout_task_information(
+                    _model,
+                    'TRAIN',
+                    None,
+                    n_trn_samp + n_val_samp,
+                    checkpoint_hyperparam=_chk_hyperparam,
+                    model_hyperparam=hyperparam,
+                )
 
             # MAIN LOOP
             if self.DEBUG_MODE:
@@ -614,6 +664,7 @@ class Trainer(_BaseAPI):
                                                 'model_state_dict': _model.state_dict(),
                                                 'optimizer_state_dict': OPTIMIZER.state_dict(),
                                                 'val_loss': _val_loss,
+                                                'buctoolkit_hyperparameters': self._build_checkpoint_hyperparameters(hyperparam),
                                             }
                                             if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
                                             _save_path = os.path.join(self.CHK_SAVE_PATH, f'best_checkpoint{self.CHK_SAVE_POSTFIX}.pt')
@@ -636,6 +687,8 @@ class Trainer(_BaseAPI):
                         num_step += 1
 
                     except Exception as e:
+                        if self.EMA:
+                            ema.restore()
                         _can_valid = False
                         time_gp = time.perf_counter()
                         num_step += 1
@@ -667,6 +720,7 @@ class Trainer(_BaseAPI):
                     'model_state_dict': _model.state_dict(),
                     'optimizer_state_dict': OPTIMIZER.state_dict(),
                     'val_loss': history['val_loss'][-1],
+                    'buctoolkit_hyperparameters': self._build_checkpoint_hyperparameters(hyperparam),
                 }
                 if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
                 _save_path = os.path.join(self.CHK_SAVE_PATH, f'checkpoint{self.CHK_SAVE_POSTFIX}.pt')
@@ -697,7 +751,8 @@ class Trainer(_BaseAPI):
                         'epoch': i,
                         'model_state_dict': _model.state_dict(),
                         'optimizer_state_dict': OPTIMIZER.state_dict(),
-                        'val_loss': th.inf
+                        'val_loss': th.inf,
+                        'buctoolkit_hyperparameters': self._build_checkpoint_hyperparameters(hyperparam),
                     }
                     if len(history['val_loss']) != 0:
                         states['val_loss'] = history['val_loss'][-1],

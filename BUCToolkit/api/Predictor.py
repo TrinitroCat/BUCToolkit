@@ -124,18 +124,23 @@ class Predictor(_BaseAPI):
             warnings.warn("Cuda is not available, so `warm_up` will be turned off.")
             warm_up = False
         # check vars
-        _model = self._instantiate_model(model)
-        model_wrap = self._build_model_wrapper(_model)
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
         if not isinstance(model_wrap._model, nn.Module):
             raise TypeError('Predictor requires a wrapper around torch.nn.Module.')
         _model = model_wrap._model
         if self.START == 'resume' or self.START == 1 or self.START == 2:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'])
+                _model.load_state_dict(_chk_model_param)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
+            epoch_now = _chk_train_state['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             warnings.warn('The model was not read trained parameters from checkpoint file. \nI HOPE YOU KNOW WHAT YOU ARE DOING!', RuntimeWarning)
             epoch_now = 0
@@ -157,7 +162,7 @@ class Predictor(_BaseAPI):
         try:
             # I/O
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'PREDICT', None, self.n_samp)
+                self.logout_task_information(_model, 'PREDICT', None, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
