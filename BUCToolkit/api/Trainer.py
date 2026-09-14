@@ -507,6 +507,10 @@ class Trainer(_BaseAPI):
                     model_hyperparam=hyperparam,
                 )
 
+            # Warm-up & check
+            trn_set = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, **self._data_loader_configs)
+            self._warm_up(trn_set, _model)
+
             # MAIN LOOP
             if self.DEBUG_MODE:
                 th.autograd.set_detect_anomaly(True)
@@ -625,12 +629,19 @@ class Trainer(_BaseAPI):
                             # print per step
                             if self.VERBOSE:
                                 with _LoggingEnd(self.log_handler):
-                                    self.logger.info(f'epoch: {i + 1:>6}, ({real_n_samp:>8d}/{n_trn_samp:>8d}), train_loss: {__loss:> 4.4e}')
+                                    self.logger.info(
+                                        f'epoch: {i + 1:>6}, ({real_n_samp:>8d}/{n_trn_samp:>8d}), '
+                                        f'train_loss: {__loss:> 4.4e}'
+                                    )
                                     if len(self.METRICS) > 0:
                                         for _name, _metr in _metr_list.items():  # type: ignore
                                             self.logger.info(f', {_name}: {_metr:> 4.4e}')
-                                    if scheduler is not None: self.logger.info(f', lr: {' '.join([f'{_:< 4.2e}' for _ in scheduler.get_last_lr()])}')
-                                self.logger.info(f', time: {time.perf_counter() - time_gp:>10.4f}, [UPDATE GRAD]')
+                                    if scheduler is not None: self.logger.info(
+                                        f', lr: {' '.join([f'{_:< 4.2e}' for _ in scheduler.get_last_lr()])}'
+                                    )
+                                self.logger.info(
+                                    f', time: {time.perf_counter() - time_gp:>10.4f}, [UPDATE GRAD]'
+                                )
 
                         # validation
                         _is_start_val = (__loss < self.VAL_IF_TRN_LOSS_BELOW)
@@ -735,7 +746,9 @@ class Trainer(_BaseAPI):
                 if self.VERBOSE: self.logger.info('Done.')
 
         except Exception as e:
-            self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:{traceback.format_exc()}\n')
+            self.logger.exception(
+                f'An ERROR occurred before the main loop:\n\t{e}\nTraceback:{traceback.format_exc()}\n'
+            )
 
         finally:
             # optimization: send sentinel to async checkpoint saver and wait for completion
@@ -801,3 +814,67 @@ class Trainer(_BaseAPI):
         else:
             _metr_list = dict()
         return _val_loss, _metr_list
+
+    def _warm_up(self, trn_set, _model):
+        """
+        Warm up for training model
+        Args:
+            trn_set: training set
+            _model: the instantiated model object
+        Returns:
+
+        """
+        _counter = 0
+        n_err = 0
+        if self.VERBOSE > 0:
+            self.logger.info("WARM-UP & CHECK...\n" + "-" * 60)
+        for batch_data, batch_label in trn_set:
+            _counter += 1
+            if _counter > 3:
+                break
+            try:
+                _model.train()
+                # to avoid get an empty batch
+                if not isinstance(batch_data, (th.Tensor,)):
+                    len_data = batch_data.batch_size
+                else:
+                    len_data = len(batch_data)
+                if len_data <= 0:
+                    if self.VERBOSE: self.logger.info(f'An empty batch occurred in warm-up. Skipped.')
+                    continue
+                # batch device
+                batch_data = batch_data.to(self.DEVICE)
+                # batch_label = batch_label.to(self.DEVICE)
+
+                # pred & loss, pred must be a Dict.
+                pred_y = _model(batch_data)
+                # check gradients
+                if not isinstance(pred_y, dict):
+                    self.logger.fatal(f'pred_y should be a dict, but got {type(pred_y)}.')
+                    raise
+
+                self.logger.info(f"WARM-UP CIRCLE {_counter}.")
+                for k, v in pred_y.items():
+                    if not isinstance(v, th.Tensor):
+                        self.logger.info(f'prediction "{k}" is not a tensor, but a {type(v)}.')
+                        continue
+                    if v.requires_grad:
+                        _has_grad_str = "REQUIRE GRADIENT"
+                    else:
+                        _has_grad_str = "NOT REQUIRE GRADIENT"
+                    self.logger.info(
+                        f"\t* {k}:\n"
+                        f"\t\tSHAPE:       {v.shape}\n"
+                        f"\t\tDATA TYPE:   {v.dtype}\n"
+                        f"\t\tVALUE RANGE: {v.amin()} ~ {v.amax()}\n"
+                        f"\t\t{_has_grad_str}\n"
+                    )
+            except Exception as e:
+                n_err += 1
+                if n_err >= 2:
+                    self.logger.fatal(f"Too many errors occurred in warm-up. I refuse to continue this job.")
+                    raise
+                if self.VERBOSE > 0:
+                    self.logger.warning(f'An error occurred in warm-up step {_counter}:\n{e}')
+        if self.VERBOSE > 0:
+            self.logger.info("WARM-UP DONE\n" + "-" * 60)

@@ -35,8 +35,10 @@ CONFIG_STUB = {
 
     # Training
     "TRAIN": {
-        "CHK_SAVE_PATH": ("./output/chk", str, "directory used to save training checkpoints"),
         "EPOCH": (10, int, "number of training epochs"),
+        "SAVE_CHK": (True, bool, "whether to save checkpoints during training."),
+        "CHK_SAVE_PATH": ("./output/chk", str, "directory used to save training checkpoints"),
+        "CHK_SAVE_POSTFIX": ("your_saved_chk_file_suffix", str, "postfix of checkpoint file name."),
         "VAL_BATCH_SIZE": (20, int, "batch size for validation. default is the same as BATCH_SIZE"),
         "VAL_PER_STEP": (100, int, "validate every VAL_PER_STEP steps. step = BATCH_SIZE * ACCUMULATE_STEP"),
         "VAL_IF_TRN_LOSS_BELOW": (1e5, float, "only validating after training loss < VAL_IF_TRN_LOSS_BELOW"),
@@ -119,8 +121,6 @@ CONFIG_STUB = {
     # Molecular dynamics
     "MD": {
         "ENSEMBLE": ("NVT", str, "MD ensemble. Options: NVE, NVT"),
-        "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
-        "N_IMAGES": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
         "THERMOSTAT": ("CSVR", str, "thermostat for NVT ensemble. Options: Langevin, VR, Nose-Hoover, CSVR"),
         "THERMOSTAT_CONFIG": {
             "DAMPING_COEFF": (0.01, float, "damping coefficient for Langevin thermostat. Unit: fs^-1"),
@@ -130,6 +130,11 @@ CONFIG_STUB = {
         "MAX_STEP": (100, int, "total number of MD steps. Total time = TIME_STEP * MAX_STEP"),
         "T_INIT": (298.15, float, "initial temperature. Unit: K. For NVE, used to generate random initial velocities"),
         "OUTPUT_COORDS_PER_STEP": (1, int, "frequency of outputting atom coordinates. If verbose=3, velocities also output"),
+
+        "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
+        "N_IMAGES": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
+        "CONSTR_THRESHOLD": (1.e-5, float, "The threshold of constraints violated"),
+        "REQUIRE_FIXMAN": ("auto", str, "`auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually"),
         "CONSTRAINTS_FILE": ("./constraints.py", str, "path to constraints function file"),
         "CONSTRAINTS_FUNC": ("func", str, "name of constraints function in CONSTRAINTS_FILE"),
         "CONSTRAINTS_VAL_FUNC": (None, str, "optional name of constr_val(t) in CONSTRAINTS_FILE; null keeps the initial-value default"),
