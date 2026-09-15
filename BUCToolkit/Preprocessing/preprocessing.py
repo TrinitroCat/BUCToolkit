@@ -883,7 +883,7 @@ def split_dataset(
     if not isinstance(data, BatchStructures):
         raise TypeError('data must be BatchStructures.')
     if isinstance(ratio, float): ratio = [ratio, 1 - ratio]
-    if sum(ratio) != 1.:
+    if abs(sum(ratio) - 1.) > 1.e-7:
         raise ValueError(f'Summation of `ratio` must be 1., but got {sum(ratio)}.')
     for _ in ratio:
         if (_ >= 1.) or (_ <= 0.): raise ValueError(f'All values in `ratio` must between (0, 1), but got {_}.')
@@ -894,7 +894,7 @@ def split_dataset(
     if shuffle:
         # create a shuffle indices
         indx = list(range(len(data)))
-        random.seed(seed)
+        random.Random(seed)
         random.shuffle(indx)
         # create an inverse indices
         inv_indx = [0] * len(data)
@@ -916,6 +916,8 @@ def split_dataset(
         sub_BS.save(save_path[-1])
     else:
         result_list.append(sub_BS)
+    # resume
+    if shuffle: data.rearrange(inv_indx)
 
     return result_list if save_path is None else None
 

@@ -119,6 +119,7 @@ class BaseConstr(BaseIO):
         self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = None  # M^-1/2
         self.max_proj_iter = 10
+        self.retraction_stagnation_factor = 0.05
         self.constr_thres = constr_threshold
         self.X_cache = None  # constr force, i.e., the mu of Lagrange multipler
         self._compiled_jac = None  # pre-compiled Jacobian for replay
@@ -128,6 +129,10 @@ class BaseConstr(BaseIO):
         super().__init__()
         self.init_logger('Main.Constraints')
         self.verbose = int(verbose)
+        # Bind the concrete retraction implementation once. Future solver
+        # variants can replace this binding during initialization without
+        # adding a dispatch branch to every projection call.
+        self._retraction_map_solver = self._retraction_newton
 
     def initialize(
             self,
@@ -476,13 +481,236 @@ class BaseConstr(BaseIO):
 
         return Px
 
+    @staticmethod
+    def _retraction_newton(
+            X: th.Tensor,
+            X_work: th.Tensor,
+            sqrtM_Q: th.Tensor,
+            R: th.Tensor,
+            aux_multiplier: th.Tensor,
+            jacobian_func: Callable[[th.Tensor], Tuple[th.Tensor, th.Tensor]],
+            initial_constr_err: th.Tensor,
+            constr_threshold: float,
+            stagnation_threshold: float,
+            max_proj_iter: int,
+            time_step: float,
+            verbose: int,
+            logger: Any,
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """Solve the retraction in the fixed initial normal space.
+
+        Args:
+            X: Coordinates before retraction. Updated in-place with the final
+                working coordinates when the solver exits.
+            X_work: Coordinate work buffer with the same shape as ``X``.
+            sqrtM_Q: Fixed mass-weighted normal basis.
+            R: Fixed upper-triangular QR factor for force recovery.
+            aux_multiplier: Accumulated multiplier updated in-place.
+            jacobian_func: Callable returning the current Jacobian and
+                residual.
+            initial_constr_err: Initial maximum constraint residual.
+            constr_threshold: Absolute constraint convergence threshold.
+            stagnation_threshold: Threshold for the existing early-stop
+                criterion.
+            max_proj_iter: Maximum number of solver iterations.
+            time_step: Integration time step used for force conversion.
+            verbose: Constraint diagnostic verbosity.
+            logger: Logger used for diagnostics.
+
+        Returns:
+            ``Fc``, the constraint force recovered once from the final
+            multiplier; ``dX``, the final coordinate displacement; and a
+            scalar Boolean tensor that is true only when the constraint
+            residual reached ``constr_threshold``.
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        dX = th.zeros_like(X)
+        X_work.copy_(X)
+        constr_err_old = initial_constr_err
+
+        def _final_calc_Fc():
+            fc: th.Tensor = th.linalg.solve_triangular(
+                R,
+                aux_multiplier.unsqueeze(-1),
+                upper=True,
+            ).squeeze(-1)
+            fc *= 207.28617 / (time_step ** 2)
+            X.copy_(X_work)
+            return fc
+
+        for i in range(max_proj_iter):
+            jac, y = jacobian_func(X_work)
+            constr_err = th.max(th.abs(y))
+            if verbose > 1:
+                logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
+
+            is_converged = constr_err <= constr_threshold
+            is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
+            if is_converged or is_fixed:
+                if is_fixed and not is_converged:
+                    logger.warning(
+                        'Constraint errors are not converged yet, but it has '
+                        'been fixed. This loop will be skipped.'
+                    )
+                Fc = _final_calc_Fc()
+                return Fc, dX, is_converged
+            constr_err_old = constr_err
+
+            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
+            d_multiplier, _ = th.linalg.solve_ex(aux, -y)
+            aux_multiplier.add_(d_multiplier)
+            dX = th.einsum(
+                'bnc, bc -> bn',
+                sqrtM_Q, aux_multiplier
+            ).reshape(n_batch, n_atoms, n_dim)
+            th.add(X, dX, out=X_work)
+
+        logger.warning("Projection of X to the manifold is not converged.")
+        is_converged = th.zeros((), device=X.device, dtype=th.bool)
+        Fc = _final_calc_Fc()
+        return Fc, dX, is_converged
+
+    @staticmethod
+    def _retraction_damp_newton(
+            X: th.Tensor,
+            X_work: th.Tensor,
+            sqrtM_Q: th.Tensor,
+            R: th.Tensor,
+            aux_multiplier: th.Tensor,
+            jacobian_func: Callable[[th.Tensor], Tuple[th.Tensor, th.Tensor]],
+            initial_constr_err: th.Tensor,
+            constr_threshold: float,
+            stagnation_threshold: float,
+            max_proj_iter: int,
+            time_step: float,
+            verbose: int,
+            logger: Any,
+            max_backtrack: int = 8,
+            step_shrink: float = 0.5,
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """Solve the retraction with a safeguarded Newton step.
+
+        The Newton direction is always formed in the fixed initial normal
+        space. A trial multiplier is accepted only when it lowers the maximum
+        absolute constraint residual; otherwise the same direction is reduced
+        geometrically. The accumulated multiplier is changed only after an
+        accepted trial, so the force and velocity correction retain their
+        existing physical meaning.
+
+        Args:
+            X: Coordinates before retraction. Updated in-place on exit.
+            X_work: Coordinate work buffer with the same shape as ``X``.
+            sqrtM_Q: Fixed mass-weighted normal basis.
+            R: Fixed upper-triangular QR factor for force recovery.
+            aux_multiplier: Accumulated multiplier updated in-place.
+            jacobian_func: Callable returning the current Jacobian and residual.
+            initial_constr_err: Initial maximum constraint residual.
+            constr_threshold: Absolute constraint convergence threshold.
+            stagnation_threshold: Threshold for the existing early-stop test.
+            max_proj_iter: Maximum number of solver iterations.
+            time_step: Integration time step used for force conversion.
+            verbose: Constraint diagnostic verbosity.
+            logger: Logger used for diagnostics.
+            max_backtrack: Maximum number of step reductions per iteration.
+            step_shrink: Multiplicative reduction applied to a rejected step.
+
+        Returns:
+            ``Fc``, ``dX``, and a scalar Boolean convergence status.
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        dX = th.zeros_like(X)
+        X_work.copy_(X)
+        constr_err_old = initial_constr_err
+        is_converged = initial_constr_err <= constr_threshold
+
+        def _final_calc_Fc():
+            fc: th.Tensor = th.linalg.solve_triangular(
+                R,
+                aux_multiplier.unsqueeze(-1),
+                upper=True,
+            ).squeeze(-1)
+            fc *= 207.28617 / (time_step ** 2)
+            X.copy_(X_work)
+            return fc
+
+        for i in range(max_proj_iter):
+            jac, y = jacobian_func(X_work)
+            constr_err = th.max(th.abs(y))
+            if verbose > 1:
+                logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
+
+            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
+            aux_q, aux_r = th.linalg.qr(aux.mT)
+            aux_diag = th.abs(th.diagonal(aux_r, dim1=-2, dim2=-1))
+            aux_scale = th.max(aux_diag)
+            is_rank_deficient = aux_scale <= 0
+            if not is_rank_deficient:
+                is_rank_deficient = th.min(aux_diag) <= 1e-6 * aux_scale
+
+            is_converged = constr_err <= constr_threshold
+            is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
+            if is_fixed or is_converged:
+                if is_fixed and not is_converged:
+                    if is_rank_deficient:
+                        logger.warning(
+                            'Constraint errors are not converged yet, but the '
+                            'current normal-space Jacobian is degenerate. The '
+                            'remaining iterations will be skipped.'
+                        )
+                    else:
+                        logger.warning(
+                            'Constraint errors are not converged yet, but the '
+                            'residual improvement is below the stagnation '
+                            'threshold. The remaining iterations will be skipped.'
+                        )
+                Fc = _final_calc_Fc()
+                return Fc, dX, is_converged
+            constr_err_old = constr_err
+
+            d_multiplier = th.linalg.solve_triangular(
+                aux_r.mT.contiguous(),
+                (-y).unsqueeze(-1),
+                upper=False,
+            )
+            d_multiplier = th.bmm(aux_q, d_multiplier).squeeze(-1)
+            accepted = False
+            step = 1.
+            candidate_multiplier = th.empty_like(aux_multiplier)
+            candidate_dX = th.empty_like(dX)
+            for _ in range(max_backtrack + 1):
+                candidate_multiplier.copy_(aux_multiplier).add_(d_multiplier, alpha=step)
+                candidate_dX = th.einsum(
+                    'bnc, bc -> bn',
+                    sqrtM_Q, candidate_multiplier
+                ).reshape(n_batch, n_atoms, n_dim)
+                th.add(X, candidate_dX, out=X_work)
+                _, y_trial = jacobian_func(X_work)
+                trial_err = th.max(th.abs(y_trial))
+                if trial_err < constr_err:
+                    accepted = True
+                    break
+                th.add(X, dX, out=X_work)
+                step *= step_shrink
+
+            if not accepted:
+                logger.warning('Damped Newton retraction step did not lower the constraint error.')
+                Fc = _final_calc_Fc()
+                return Fc, dX, is_converged
+
+            aux_multiplier.copy_(candidate_multiplier)
+            dX.copy_(candidate_dX)
+
+        logger.warning("Projection of X to the manifold is not converged.")
+        Fc = _final_calc_Fc()
+        return Fc, dX, is_converged
+
     def _project2(
             self,
             X: th.Tensor,
             X_orig: th.Tensor | None = None,
             V: th.Tensor | None = None,
             constr_time: th.Tensor | float | None = None,
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+    ) -> Tuple[th.Tensor, th.Tensor|None, th.Tensor|None]:
         """
         Continuously project the Jacobian of all constrains to the exact manifold.
         ** Update X and V (if given) in-place.
@@ -511,7 +739,6 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = X.shape
         n_constr = self.R.shape[-1]
         aux_multipler = th.zeros(n_batch, n_constr, device=self.device, dtype=FLOAT_TYPE)
-        dX = th.zeros_like(X)
         if X_orig is None: X_orig = X
         time_step = self.time_step
         constr_thres = self.constr_thres
@@ -534,7 +761,11 @@ class BaseConstr(BaseIO):
             # (e.g., erf soft-CN with vanishing gradients):
             #   mask y for convergence — degenerate dirs ignored
             #   clamp R diagonals — prevents solve_triangular blow-up
-            degenerate_eps = 0.5 * self.constr_thres
+            # Stop only when the residual improvement is small compared with
+            # the requested tolerance.  Five percent preserves
+            # the cheap stagnation escape without cutting off useful Newton
+            # progress too early.
+            degenerate_eps = self.retraction_stagnation_factor * self.constr_thres
             #degenerate_mask = th.abs(R.diagonal(dim1=-2, dim2=-1)) < degenerate_eps  # (n_batch, n_constr)
             #R.diagonal(dim1=-2, dim2=-1).clamp_min_(degenerate_eps)
             sqrtM_Q = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (b, an, c)
@@ -568,52 +799,23 @@ class BaseConstr(BaseIO):
         R.detach_()
         sqrtM_Q.detach_()
 
-        # MAIN loop.
-        X_tmp = self.X_cache
-        X_tmp.copy_(X)
-        constr_err_old = th.max(th.abs(y))
-        is_fixed = False
-        for i in range(self.max_proj_iter):
-            jac, y = self._jacobian(X_tmp)
-            constr_err = th.max(th.abs(y))
-            if self.verbose > 1: self.logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
-            if th.abs(constr_err - constr_err_old) < degenerate_eps:
-                self.logger.warning(f"Constraint errors are not converged yet, but it has been fixed. This loop will be skipped.")
-                is_fixed = True
-            if (constr_err <= constr_thres) or is_fixed:
-                X.copy_(X_tmp)
-                # compute constraint forces
-                Fc = th.linalg.solve_triangular(R, aux_multipler.unsqueeze(-1), upper=True).squeeze(-1)
-                Fc *= 207.28617 / (time_step ** 2)  # convert to eV/s(X), 1 amu*Ang/fs^2 = 103.64... eV/Ang, Verlet formulae require a factor 2, hence that 207.28617 = 2 * 103.64...
-                # Numerical safe velocity correction
-                if V is not None:
-                    # dv = M^{-1/2} Q mu / time_step
-                    V.add_(dX.div_(time_step))
-                return Fc, G, w
-            constr_err_old = constr_err
+        Fc, dX, _is_converged = self._retraction_map_solver(
+            X=X,
+            X_work=self.X_cache,
+            sqrtM_Q=sqrtM_Q,
+            R=R,
+            aux_multiplier=aux_multipler,
+            jacobian_func=self._jacobian,
+            initial_constr_err=th.max(th.abs(y)),
+            constr_threshold=constr_thres,
+            stagnation_threshold=degenerate_eps,
+            max_proj_iter=self.max_proj_iter,
+            time_step=time_step,
+            verbose=self.verbose,
+            logger=self.logger,
+        )
 
-            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
-            d_mu, _ = th.linalg.solve_ex(aux, -y)
-            aux_multipler.add_(d_mu)
-            dX = th.einsum(
-                'bnc, bc -> bn',
-                sqrtM_Q, aux_multipler
-            ).reshape(n_batch, n_atoms, n_dim)
-            th.add(
-                X,
-                dX,
-                out=X_tmp
-            )
-
-        # If not converged (warning and still update V if requested)
-        self.logger.warning("Projection of X to the manifold is not converged.")
-        X.copy_(X_tmp)
-        Fc = th.linalg.solve_triangular(R, aux_multipler.unsqueeze(-1), upper=True).squeeze(-1)
-        Fc *= 207.28617 / (time_step ** 2)
-
-        # Numerical safe velocity correction
         if V is not None:
-            # dv = M^{-1/2} Q mu / time_step
             V.add_(dX.div_(time_step))
 
         return Fc, G, w
