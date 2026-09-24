@@ -333,166 +333,6 @@ class POSCARs2Feat(BatchStructures):
         return fileName, cell, atom_type, atom_num, atom_coord, atom_fixed
 
 
-class ConcatPOSCAR2Feat(BatchStructures):
-    r"""
-    Read and convert the single file of a batch POSCARs contents from given path into arrays of atoms, coordinates, cell vectors etc.
-    All numerical data were stored as float32 in memory.
-    The format of the read file:
-
-        # id1
-        TITLE
-        SCALE FACTOR
-        LATTICE VECTOR AXIS X (x1, x2, x3)
-        LATTICE VECTOR AXIS Y (y1, y2, y3)
-        LATTICE VECTOR AXIS Z (z1, z2, z3)
-        CHEMICAL ELEMENTS LIST (Element1 Element2 Element3 ...)
-        ATOM NUMBERS OF EACH ELEMENT (N1 N2 N3 ...)
-        COORDINATE TYPE ("Direct" or "Cartesian")
-        ATOM COORDINATES IN ORDER OF CHEMICAL ELEMENTS LIST (x1 y1 z1)
-        (x2 y2 z2)
-        (x3 y3 z3)
-        ...
-        # id2
-        ...
-        # id3
-        ...
-        ...
-
-    EOF
-
-    Parameters:
-        path: str, the path of POSCAR files
-        select_ids: list (or other Sequences), the list of selected id to be read. 'None' means read all files in the input path.
-        output_coord_type: str, 'cartesian' or 'direct'. The coordination type of output atom coordination.
-
-    Attributes:
-        Sample_ids: list, name list of structrues
-        Coords: list, coordinations of atoms. Shape: List[NDArray[(n_atoms, 3), dtype=float32]]
-        Cells: list, cell vector of crystals. Shape: List[NDArray[(3,3), dtype=float32]]
-        Elements: list, elements of crystals. Shape: List[List[str(element symbols)]]
-        Numbers: list, element numbers of crystals. Shape: List[List[int(atom number of each element)]]. the same order of Elements.
-
-    Returns: None
-    """
-
-    def __init__(self, path: str = './', select_ids: List[str] | Set[str] | None = None, output_coord_type: str = 'cartesian', verbose: int = 0) -> None:
-        warnings.warn('Deprecated.', DeprecationWarning)
-        raise Exception('Deprecated.')
-        super().__init__()
-        time_st = time.perf_counter()
-        Z_dict = {key: i for i, key in enumerate(_ALL_ELEMENT, 1)}  # a dictionary which map element symbols into their atomic numbers.
-        self._Z_dict = Z_dict
-
-        # loading files
-        if verbose: print('*' * 60 + '\nReading files...')
-        self.output_coord_type = output_coord_type
-        self._Sample_ids = list()
-        self.Atom_list = None
-        self.Atomic_number_list = None
-        self.Cells = list()
-        self.Coords = list()
-        self.Elements = list()
-        self.Numbers = list()
-        time_old = copy.deepcopy(time_st)
-
-        with open(path, 'r') as f:
-            if select_ids is None:  # read all files
-                while True:
-                    _text = f.readline()
-                    if _text == '':
-                        break
-                    if _text[0] == '#':  # whether the id line. Find the headline.
-                        _id = _text.replace(' ', '')  # str
-                        _id = _id[1:-1]
-                        self._Sample_ids.append(_id)
-
-                        next(f)  # skip title line
-                        scale = float(f.readline())  # scale factor line
-                        # Cell Vector
-                        _cell_vec = list()
-                        _cell_vec.append((f.readline()).split())  # cell axis a
-                        _cell_vec.append((f.readline()).split())  # cell axis b
-                        _cell_vec.append((f.readline()).split())  # cell axis c
-                        _cell_vec = np.asarray(_cell_vec, dtype=np.float32) * scale  # np.NDArray
-                        self.Cells.append(_cell_vec)
-                        # Atoms
-                        _atoms = (f.readline()).split()
-                        self.Elements.append(_atoms)  # List[str]
-                        # Atom Numbers
-                        _atom_num = [int(_) for _ in (f.readline()).split()]
-                        self.Numbers.append(_atom_num)  # List[int]
-                        _atom_tol_num = sum(_atom_num)
-                        # Coord Type
-                        _type = (f.readline()).strip()
-                        # Coords
-                        if _type[0] == 's' or _type[0] == 'S':  # whether 'Selective dynamics'
-                            _type = (f.readline()).strip()
-                        _coords = np.empty((_atom_tol_num, 3), dtype=np.float32)
-                        for ii in range(_atom_tol_num):
-                            _coords[ii] = np.asarray((f.readline().split())[:3], dtype=np.float32)
-                        if _type[0] == 'd' or _type[0] == 'D':
-                            _coords = _coords @ _cell_vec
-                        elif _type[0] == 'c' or _type[0] == 'C':
-                            pass
-                        else:
-                            warnings.warn(f'Unknown Coordinate type. Coordinate type of sample *** {_id} *** would be considered as "Direct"')
-                            _coords = _coords @ _cell_vec
-                        self.Coords.append(_coords)
-            else:
-                select_ids = set(select_ids)
-                _have_read_ids = set()
-                while True:
-                    _text = f.readline()
-                    if _text == '':  # judge EOF
-                        break
-                    if _text[0] == '#':  # whether the id line. Find the head line.
-                        _id = _text.replace(' ', '')  # str
-                        _id = _id[1:-1]
-                        if _id not in select_ids:
-                            continue
-                        _have_read_ids.add(_id)
-                        self._Sample_ids.append(_id)
-
-                        next(f)  # skip title line
-                        scale = float(f.readline())  # scale factor line
-                        # Cell Vector
-                        _cell_vec = list()
-                        _cell_vec.append((f.readline()).split())  # cell axis a
-                        _cell_vec.append((f.readline()).split())  # cell axis b
-                        _cell_vec.append((f.readline()).split())  # cell axis c
-                        _cell_vec = np.asarray(_cell_vec, dtype=np.float32) * scale  # np.NDArray
-                        self.Cells.append(_cell_vec)
-                        # Atoms
-                        _atoms = (f.readline()).split()
-                        self.Elements.append(_atoms)  # List[str]
-                        # Atom Numbers
-                        _atom_num = [int(_) for _ in (f.readline()).split()]
-                        self.Numbers.append(_atom_num)  # List[int]
-                        _atom_tol_num = sum(_atom_num)
-                        # Coord Type
-                        _type = (f.readline()).strip()
-                        # Coords
-                        if _type[0] == 's' or _type[0] == 'S':  # whether 'Selective dynamics'
-                            _type = (f.readline()).strip()
-                        _coords = np.empty((_atom_tol_num, 3), dtype=np.float32)
-                        for ii in range(_atom_tol_num):
-                            _coords[ii] = np.asarray((f.readline().split())[:3], dtype=np.float32)
-                        if _type[0] == 'd' or _type[0] == 'D':
-                            _coords = _coords @ _cell_vec
-                        elif _type[0] == 'c' or _type[0] == 'C':
-                            pass
-                        else:
-                            warnings.warn(f'Unknown Coordinate type. Coordinate type of sample *** {_id} *** would be considered as "Direct"')
-                            _coords = _coords @ _cell_vec
-                        self.Coords.append(_coords)
-
-        if verbose: print('All files were read successfully!\n' + '*' * 60)
-
-        time_ed = time.perf_counter()
-        if verbose: print('Total time: %s' % (time_ed - time_st))
-        pass
-
-
 class OUTCAR2Feat(BatchStructures):
     r"""
     Read atoms, coordinates, atom numbers, energies and force in OUTCARs from given path.
@@ -619,7 +459,7 @@ class OUTCAR2Feat(BatchStructures):
             _id = [file_name + f'_{i}' for i in range(n_step)]
             # output
             if parallel:
-                return _id, atoms, numbers, cells, coords, energies, forces, fixed, ['C',] * n_step
+                return _id, atoms.tolist(), numbers.tolist(), cells, coords, energies, forces, fixed, ['C',] * n_step
             else:
                 self._Sample_ids.extend(_id)
                 self.Elements.extend(atoms.tolist())
@@ -654,13 +494,17 @@ class OUTCAR2Feat(BatchStructures):
         elif not isinstance(file_list, Sequence):
             raise TypeError(f'Invalid type of files_list: {type(file_list)}')
 
-        if n_core > len(file_list):
-            warnings.warn(f'`ncore` is greater than file numbers, so `ncore` was reset to {len(file_list)}', RuntimeWarning)
-            n_core = len(file_list)
-        elif n_core == -1:
+        if n_core == -1:
             n_core = jb.cpu_count()
         elif not(isinstance(n_core, int)) or n_core < -1:
             raise ValueError(f'Invalid `n_core` number: {n_core}.')
+
+        if n_core > len(file_list):
+            warnings.warn(
+                f'`ncore` is greater than file numbers, so `ncore` was reset to {len(file_list)}',
+                RuntimeWarning
+            )
+            n_core = len(file_list)
 
         if n_core == 1:
             if self.verbose: print('Sequential Reading...');print('Progress: 0%', end='\r')

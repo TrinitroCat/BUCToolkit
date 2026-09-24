@@ -26,7 +26,7 @@ import joblib as jb
 import numpy as np
 
 from BUCToolkit.utils._para_flatt_list import flatten
-from BUCToolkit.Preprocessing.write_files import WritePOSCARs, write_xyz, write_cif
+from BUCToolkit.Preprocessing.write_files import WritePOSCARs, Write2xyz, write_cif
 
 
 class BatchStructures(object):
@@ -734,7 +734,7 @@ class BatchStructures(object):
         try:
             file_name_list = [f'{_}' for _ in file_name_list]
             if file_format == 'POSCAR':
-                WritePOSCARs(
+                _ = WritePOSCARs(
                     sub_self.Cells,
                     sub_self.Coords,
                     sub_self.Elements,
@@ -746,32 +746,37 @@ class BatchStructures(object):
                     sub_self.Coords_type,
                     n_core
                 )
+                _.write()
             elif file_format == 'xyz':
-                write_xyz(
+                _ = Write2xyz(
                     sub_self.Elements,
-                    sub_self.Coords,
-                    sub_self.Cells,
-                    sub_self.Energies,
                     sub_self.Numbers,
+                    sub_self.Cells,
+                    sub_self.Coords,
+                    sub_self.Fixed,
+                    sub_self.Energies,
                     sub_self.Forces,
                     output_path,
                     file_name_list,
                     output_xyz_type='only_position_xyz',
                     n_core=n_core
                 )
+                _.write()
             elif file_format == 'xyz_forces':
-                write_xyz(
+                _ = Write2xyz(
                     sub_self.Elements,
-                    sub_self.Coords,
-                    sub_self.Cells,
-                    sub_self.Energies,
                     sub_self.Numbers,
+                    sub_self.Cells,
+                    sub_self.Coords,
+                    sub_self.Fixed,
+                    sub_self.Energies,
                     sub_self.Forces,
                     output_path,
                     file_name_list,
                     output_xyz_type='write_position_and_force',
                     n_core=n_core
                 )
+                _.write()
             elif file_format == 'cif':
                 write_cif(
                     sub_self.Cells,
@@ -792,6 +797,123 @@ class BatchStructures(object):
         finally:
             if is_convert:
                 self._list2np(release_mem=True)
+
+    def write2text_traj(
+            self,
+            output_path: str = './',
+            indices: int | str | List[int] | Tuple[int, int] | None = None,
+            file_format: Literal['XDATCAR', 'xyz', 'xyz_forces'] = 'XDATCAR',
+            file_name: str | None = None,
+    ):
+        """
+        Write structures as a signle file to use as a trajectory.
+        Args:
+            indices: the selection indices of `self`. If Tuple, structures between `indices[0]` and `indices[1]` will be selected.
+            file_format: the format of written files.
+                'XDATCAR': vasp POSCAR format
+                'xyz': ext-xyz file that only contains atomic positions
+                'xyz_forces': ext-xyz file that contains atomic positions and forces
+            output_path: the directory of output file.
+            file_name_list: the list of file names. If None, it would be set to `Sample_ids`.
+            n_core: number of CPU cores to write in parallel. `-1` for all available CPU cores.
+
+        Returns: None
+
+        """
+        # check vars
+        if file_format not in {'XDATCAR', 'cif', 'xyz', 'xyz_forces'}:
+            raise ValueError(f'Invalid value of `file_format`: {file_format}.')
+        if indices is None:
+            sub_self = self
+        elif isinstance(indices, Tuple):
+            sub_self = self[indices[0]: indices[1]]
+        else:
+            sub_self = self[indices]
+        file_name_list = file_name if file_name is not None else sub_self.Sample_ids[0]
+        self._check_id()
+        self._check_len()
+        if self.Mode == 'A':
+            self._np2list()
+            is_convert = True
+        else:
+            is_convert = False
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        elif os.path.isfile(output_path):
+            raise OSError(f"There is already a file named '{output_path}'.")
+
+        try:
+            if file_format == 'XDATCAR':
+                if 'C' in sub_self.Coords_type:
+                    warnings.warn(
+                        f"Detected Cartesian coordinate in the input, "
+                        f"they will be uniformly converted to the fractional coordinate."
+                    )
+                    sub_self.cartesian2direct()
+                _ = WritePOSCARs(
+                    sub_self.Cells,
+                    sub_self.Coords,
+                    sub_self.Elements,
+                    sub_self.Numbers,
+                    sub_self.Fixed,
+                    output_path,
+                    file_name_list,
+                    sub_self.Sample_ids,
+                    sub_self.Coords_type,
+                    1,
+                )
+                _.write2one()
+            elif file_format == 'xyz':
+                if 'D' in sub_self.Coords_type:
+                    warnings.warn(
+                        f"Detected fractional coordinate in the input, "
+                        f"they will be uniformly converted to the Cartesian coordinate."
+                    )
+                    sub_self.direct2cartesian()
+                _ = Write2xyz(
+                    sub_self.Elements,
+                    sub_self.Numbers,
+                    sub_self.Cells,
+                    sub_self.Coords,
+                    sub_self.Fixed,
+                    sub_self.Energies,
+                    sub_self.Forces,
+                    output_path,
+                    file_name_list,
+                    output_xyz_type='only_position_xyz',
+                    n_core=1
+                )
+                _.write2one()
+            elif file_format == 'xyz_forces':
+                if 'D' in sub_self.Coords_type:
+                    warnings.warn(
+                        f"Detected fractional coordinate in the input, "
+                        f"they will be uniformly converted to the Cartesian coordinate."
+                    )
+                    sub_self.direct2cartesian()
+                _ = Write2xyz(
+                    sub_self.Elements,
+                    sub_self.Numbers,
+                    sub_self.Cells,
+                    sub_self.Coords,
+                    sub_self.Fixed,
+                    sub_self.Energies,
+                    sub_self.Forces,
+                    output_path,
+                    file_name_list,
+                    output_xyz_type='write_position_and_force',
+                    n_core=1
+                )
+                _.write2one()
+
+            else:
+                raise NotImplementedError
+        except Exception as e:
+            self.logger.error(f'An error occurred:\n\t{e}\ntraceback:\n\t{traceback.print_exc()}')
+        finally:
+            if is_convert:
+                self._list2np(release_mem=True)
+
 
     def set_Labels(self, val: Sequence | Dict | np.ndarray) -> None:
         """
@@ -1545,10 +1667,10 @@ class BatchStructures(object):
         for arg in batch_args:
             if count[arg] > temp_:
                 temp_ = count[arg]
-                batch_dict[count[arg]] = [arg, ]
-            elif count[arg] == temp_ and (count[arg] in batch_dict.keys()):
-                batch_dict[count[arg]].append(arg)
-            elif count[arg] == temp_ and (count[arg] not in batch_dict.keys()):
+                batch_dict[int(count[arg])] = [arg, ]
+            elif count[arg] == temp_ and (int(count[arg]) in batch_dict.keys()):
+                batch_dict[int(count[arg])].append(arg)
+            elif count[arg] == temp_ and (int(count[arg]) not in batch_dict.keys()):
                 warnings.warn(f'ERROR, unexpected situation has occurred in {arg}th sample.')
             else:
                 warnings.warn(f'ERROR2, unexpected situation has occurred in {arg}th sample.')

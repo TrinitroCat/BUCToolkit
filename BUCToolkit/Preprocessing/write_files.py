@@ -3,7 +3,7 @@
 #  Version: 0.9a
 #  File: write_files.py
 #  Environment: Python 3.12
-
+import io
 import os
 import warnings
 from typing import Sequence, List, Literal, Tuple
@@ -12,6 +12,87 @@ import numpy as np
 
 # from BUCToolkit.BatchStructures.BatchStructuresBase import BatchStructures
 from BUCToolkit.utils._print_formatter import STRING_ARRAY_FORMAT, AS_PRINT_COORDS, FLOAT_ARRAY_FORMAT
+
+
+def _check_consistency(
+        cells: Sequence[Sequence],
+        coords: Sequence[np.ndarray],
+        atom_labels: Sequence[Sequence[str]],
+        atom_numbers: Sequence[Sequence[int]],
+        fixed: Sequence[np.ndarray] | None = None,
+        output_path: str = './',
+        file_name_list: str | Sequence[str] = 'POSCAR',
+        coord_type: List[Literal['C', 'D']] | Literal['C', 'D'] = 'C',
+        n_core: int = -1,
+        _skip_file_names: bool = False
+):
+    """
+    Check the length consistency for inputs, and initialise them.
+    Args:
+        cells:
+        coords:
+        atom_labels:
+        atom_numbers:
+        fixed:
+        output_path:
+        file_name_list:
+
+    Returns: n_batch, file_name_list, coord_type, fixed, n_core
+    Note: If check failed, errors raising immediately.
+
+    """
+    # check vars
+    n_batch = len(cells)
+    # if only single str name, adding index as the suffix
+    if (not _skip_file_names) and isinstance(file_name_list, str):
+        file_name_list = [file_name_list + str(i) for i in range(n_batch)]
+    if not (n_batch == len(coords) == len(atom_labels) == len(atom_numbers)):
+        raise ValueError(
+            f'number of cells in cell vector, atom coordinates, atom labels, and atom_numbers should be the same,'
+            f'but got {n_batch, len(coords), len(atom_labels), len(atom_numbers)}'
+        )
+    if isinstance(coord_type, str):
+        coord_type = [coord_type] * n_batch
+    elif (not isinstance(coord_type, (List, Tuple))) or (len(coord_type) != n_batch):
+        raise ValueError(
+            f'Invalid value of `coord_type`: type: {type(coord_type)}, length: {len(coord_type)}.'
+            f' It should be type: List | Tuple, length: {n_batch}'
+        )
+    if fixed is None:
+        fixed = [np.full_like(_, 1, dtype=np.int8) for _ in coords]
+    # check path
+    if not os.path.isdir(output_path):
+        if os.path.exists(output_path):
+            raise ValueError("The given output_path already exists but not a directory.")
+        else:
+            os.makedirs(output_path)
+    # check len
+    if isinstance(file_name_list, Sequence):
+        if not (
+                len(file_name_list) == len(cells) == len(atom_labels)
+                == len(atom_numbers) == len(coords) == len(fixed)
+        ):
+            raise ValueError(
+                f'Inconsistent length of inputs.'
+                f'length of file_name_list, cells, atom_labels, atom_numbers, coords, system_list, fixed: '
+                f'{
+                (len(file_name_list), len(cells), len(atom_labels), len(atom_numbers), len(coords), len(fixed))
+                }'
+            )
+    # check parallel
+    tot_cores = jb.cpu_count()
+    if not isinstance(n_core, int):
+        raise TypeError(f'`ncore` must be an integer, but got {type(n_core)}.')
+    elif n_core == -1:
+        n_core = min(tot_cores, n_batch)  # handle the case of batch number < cores
+    elif n_core > tot_cores:
+        warnings.warn(
+            'Input `ncore` is greater than total CPU cores and was set to total CPU cores automatically.',
+            RuntimeWarning
+        )
+        n_core = tot_cores
+
+    return n_batch, file_name_list, coord_type, fixed, n_core
 
 
 class WritePOSCARs:
@@ -23,21 +104,21 @@ class WritePOSCARs:
             self,
             cells: Sequence[Sequence],
             coords: Sequence[np.ndarray],
-            atom_labels: Sequence[Sequence[str]],
+            elements: Sequence[Sequence[str]],
             atom_numbers: Sequence[Sequence[int]],
             fixed: Sequence[np.ndarray] | None = None,
             output_path: str = './',
             file_name_list: str | Sequence[str] = 'POSCAR',
             system_list: str | Sequence[str] = 'untitled',
             coord_type: List[Literal['C', 'D']] | Literal['C', 'D'] = 'C',
-            ncore: int = -1
+            n_core: int = -1
     ) -> None:
         """
         Convert coordinates matrices to POSCAR format, and write files to the "output_path".
 
         Args:
             cells: List|ndarray, a batch of lattice vectors. shape: (n_batch, 3, 3)
-            atom_labels: 2D list|ndarray of str, a batch of list of element symbols. shape: (n_batch, n_atom)
+            elements: 2D list|ndarray of str, a batch of list of element symbols. shape: (n_batch, n_atom)
             atom_numbers:2D list|ndarray of int, list of atom number of each element, in the order of atom_label. shape: (n_batch, n_atom)
             coords: list|ndarray, the batch of atoms coordinates, in the order of atom_label. shape: (n_batch, n_atom, 3)
             fixed: list|ndarray|None, the batch of atoms fixed directions, in the order of atom_label. shape: (n_batch, n_atom, 3), dtype: int.
@@ -47,70 +128,107 @@ class WritePOSCARs:
             system_list: str|list(str), the 1st line of output file i.e., the annotation or title of the file.
             coord_type: List[Literal['C', 'D']]|Literal['C', 'D'], 'D' or 'C', which means whether the input coordinates are "Direct" or "Cartesian".
                 If only a string, `coord_type` would set to be '[`coord_type`] * n_batch'.
-            ncore: int, the number of CPU cores to write files in parallel.
+            n_core: int, the number of CPU cores to write files in parallel.
 
         Returns: None
         """
-        # check vars
-        n_batch = len(cells)
-        if isinstance(file_name_list, str):
-            file_name_list = [file_name_list + str(i) for i in range(n_batch)]
+        n_batch, file_name_list, coord_type, fixed, n_core = _check_consistency(
+            cells,
+            coords,
+            elements,
+            atom_numbers,
+            fixed,
+            output_path,
+            file_name_list,
+            coord_type,
+            n_core
+        )
         if isinstance(system_list, str):
             system_list = [system_list] * n_batch
-        if not (n_batch == len(coords) == len(atom_labels) == len(atom_numbers)):
-            raise ValueError(f'number of cells in cell vector, atom coordinates, atom labels, and atom_numbers should be the same,\
-                              but occurred {n_batch, len(coords), len(atom_labels), len(atom_numbers)}')
-        if isinstance(coord_type, str):
-            coord_type = [coord_type] * n_batch
-        elif (not isinstance(coord_type, (List, Tuple))) or (len(coord_type) != n_batch):
-            raise ValueError(f'Invalid value of `coord_type`: type: {type(coord_type)}, length: {len(coord_type)}.'
-                             f' It should be type: List | Tuple, length: {n_batch}')
-        if fixed is None:
-            fixed = [np.full_like(_, 1, dtype=np.int8) for _ in coords]
-        # check len
-        if isinstance(file_name_list, Sequence):
-            if not (len(file_name_list) == len(cells) == len(atom_labels) == len(atom_numbers) == len(coords) == len(system_list) == len(fixed)):
-                raise ValueError(
-                    f'Inconsistent length of inputs.'
-                    f'length of file_name_list, cells, atom_labels, atom_numbers, coords, system_list, fixed: '
-                    f'{
-                    (len(file_name_list), len(cells), len(atom_labels), len(atom_numbers), len(coords), len(system_list), len(fixed))
-                    }'
-                )
-        # check parallel
-        tot_cores = jb.cpu_count()
-        if not isinstance(ncore, int):
-            raise TypeError(f'`ncore` must be an integer, but occurred {type(ncore)}.')
-        elif ncore == -1:
-            ncore = tot_cores
-        elif ncore > tot_cores:
-            warnings.warn('Input `ncore` is greater than total CPU cores and was set to total CPU cores automatically.', RuntimeWarning)
-            ncore = tot_cores
+        elif len(system_list) != n_batch:
+            raise ValueError(f"The length of system_list ({len(system_list)}) must be equal to n_batch ({n_batch}).")
+        (
+            self.n_batch,
+            self.file_name_list,
+            self.coord_type,
+            self.fixed,
+            self.n_core,
+            self.system_list,
+            self.cells,
+            self.atom_numbers,
+            self.output_path,
+            self.coords,
+            self.elements,
+        ) = (
+            n_batch,
+            file_name_list,
+            coord_type,
+            fixed,
+            n_core,
+            system_list,
+            cells,
+            atom_numbers,
+            output_path,
+            coords,
+            elements
+        )
 
-        if ncore != 1:
-            _para = jb.Parallel(ncore, backend="threading")
+    def write(self):
+        """
+        Write structures to separate POSCAR files.
+        Returns:
+
+        """
+        (
+            n_batch,
+            file_name_list,
+            coord_type,
+            fixed,
+            n_core,
+            system_list,
+            cells,
+            atom_numbers,
+            output_path,
+            coords,
+            elements,
+        ) = (
+            self.n_batch,
+            self.file_name_list,
+            self.coord_type,
+            self.fixed,
+            self.n_core,
+            self.system_list,
+            self.cells,
+            self.atom_numbers,
+            self.output_path,
+            self.coords,
+            self.elements
+        )
+
+        if n_core != 1:
+            _para = jb.Parallel(n_core, backend="threading")
             _para(
-                jb.delayed(self.__write)(
-                    cell,
+                jb.delayed(self.__do_mt_write_wrapper)(
+                    cells[i],
                     coords[i],
                     fixed[i],
-                    atom_labels[i],
+                    elements[i],
                     atom_numbers[i],
                     output_path=output_path,
                     file_name=file_name_list[i],
                     system=system_list[i],
                     coord_type=coord_type[i]
                 )
-                for i, cell in enumerate(cells)
+                for i, _ in enumerate(cells)
             )
 
         else:
             for i in range(n_batch):
-                self.__write(
+                self.__do_mt_write_wrapper(
                     cells[i],
                     coords[i],
                     fixed[i],
-                    atom_labels[i],
+                    elements[i],
                     atom_numbers[i],
                     output_path=output_path,
                     file_name=file_name_list[i],
@@ -118,18 +236,98 @@ class WritePOSCARs:
                     coord_type=coord_type[i]
                 )
 
-        pass
+    def write2one(self):
+        """
+        Write all structures to one file in format of XDATCAR in VASP >= 5.4.4
+        Returns: None
+
+        """
+        (
+            n_batch,
+            file_name_list,
+            coord_type,
+            fixed,
+            n_core,
+            system_list,
+            cells,
+            atom_numbers,
+            output_path,
+            coords,
+            elements,
+        ) = (
+            self.n_batch,
+            self.file_name_list,
+            self.coord_type,
+            self.fixed,
+            self.n_core,
+            self.system_list,
+            self.cells,
+            self.atom_numbers,
+            self.output_path,
+            self.coords,
+            self.elements
+        )
+        if 'C' in coord_type:
+            warnings.warn(f"XDATCAR format requires direct/fractional coordinates, but now some are Cartesian.")
+        #if len(file_name_list) > 1:
+        #    warnings.warn(f"`write2one` only writes one file, so only the `file_name_list[0]` will be used.")
+        file_name = file_name_list[0]
+        # Now only implement the serial version
+        with open(os.path.join(output_path, file_name), 'w') as POSCAR:
+            for i in range(n_batch):
+                self.__write_single(
+                    POSCAR,
+                    cells[i],
+                    coords[i],
+                    fixed[i],
+                    elements[i],
+                    atom_numbers[i],
+                    system=system_list[i],
+                    coord_type=coord_type[i],
+                    _is_XDATCAR=True
+                )
+
+    def __do_mt_write_wrapper(
+            self,
+            cell: Sequence,
+            coord: np.ndarray,
+            fixed: np.ndarray,
+            atom_label: Sequence,
+            atom_number: Sequence,
+            output_path: str,
+            file_name: str,
+            system: str,
+            coord_type: str
+    ):
+        if not (isinstance(output_path, str) and isinstance(file_name, str) and isinstance(system, str)):
+            raise TypeError(
+                f'output_path||file_name||system must be strings, '
+                f'but got type {type(output_path)}||{type(file_name)}||{type(system)}.'
+            )
+        with open(os.path.join(output_path, file_name), 'w') as POSCAR:
+            self.__write_single(
+                POSCAR,
+                cell,
+                coord,
+                fixed,
+                atom_label,
+                atom_number,
+                system=system,
+                coord_type=coord_type
+            )
 
     @staticmethod
-    def __write(cell: Sequence,
-                coord: np.ndarray,
-                fixed: np.ndarray,
-                atom_label: Sequence,
-                atom_number: Sequence,
-                output_path: str,
-                file_name: str,
-                system: str,
-                coord_type: str) -> None:
+    def __write_single(
+            POSCAR: io.TextIOWrapper,
+            cell: Sequence,
+            coord: np.ndarray,
+            fixed: np.ndarray,
+            atom_label: Sequence,
+            atom_number: Sequence,
+            system: str,
+            coord_type: str,
+            _is_XDATCAR: bool = False
+    ) -> None:
         """
         Convert coordinates matrix to POSCAR format, and write a file to the output_path.
 
@@ -139,10 +337,9 @@ class WritePOSCARs:
             atom_number:1D list|ndarray of int, list of atom number of each element, in the order of atom_label.
             coord: list|ndarray, the coordinates of atoms, in the order of atom_label.
             fixed: list|ndarray, the fixed direction of atoms.
-            output_path: str, the output path.
-            file_name: str, the file name.
             system: str, the 1st line of an output file i.e., the annotation or title of the file.
             coord_type: str, 'D' or 'C', which means whether the coordinates are "Direct" or "Cartesian".
+            _is_XDATCAR: bool, whether to change the format to XDATCAR.
 
         Return: None
         """
@@ -153,42 +350,44 @@ class WritePOSCARs:
             coord = np.asarray(coord, dtype=np.float32)
         elif not isinstance(coord, np.ndarray):
             raise TypeError(f'Unknown type of coord, type : {type(coord)}')
-        if not (isinstance(output_path, str) and isinstance(file_name, str) and isinstance(system, str)):
-            raise TypeError(f'output_path||file_name||system must be strings, '
-                            f'but got type {type(output_path)}||{type(file_name)}||{type(system)}.')
         elif coord_type != 'C' and coord_type != 'D':
             raise ValueError(f'Unknown coord_type : "{coord_type}"')
 
         # main
-        with open(os.path.join(output_path, file_name), 'w') as POSCAR:
-            POSCAR.write(system)
-            POSCAR.write('\n    1\n')
-            # cell
-            for vx in cell:
-                for xx in vx:
-                    POSCAR.write(f'    {xx:0< 14.8f}')
-                POSCAR.write('\n')
-            # atom element
-            for label in atom_label:
-                POSCAR.write(f' {label: <6s}')
+        POSCAR.write(system)
+        POSCAR.write('\n    1\n')
+        # cell
+        for vx in cell:
+            for xx in vx:
+                POSCAR.write(f'    {xx:0< 14.8f}')
             POSCAR.write('\n')
-            for label in atom_number:
-                POSCAR.write(f' {label: <6d}')
-            POSCAR.write('\n')
-            # selective dynamics
+        # atom element
+        for label in atom_label:
+            POSCAR.write(f' {label: <6s}')
+        POSCAR.write('\n')
+        for label in atom_number:
+            POSCAR.write(f' {label: <6d}')
+        POSCAR.write('\n')
+        # selective dynamics
+        if not _is_XDATCAR:  # XDATCAR has not selective dynamics
             POSCAR.write('Selective Dynamics\n')
-            if coord_type == 'C':
-                POSCAR.write('Cartesian\n')
-            elif coord_type == 'D':
-                POSCAR.write('Direct\n')
-            else: raise ValueError(f'Invalid `coord_type`: {coord_type}')
-            # atom coordinates
+        if coord_type == 'C':
+            POSCAR.write('Cartesian\n')
+        elif coord_type == 'D':
+            POSCAR.write('Direct\n')
+        else: raise ValueError(f'Invalid `coord_type`: {coord_type}')
+        # atom coordinates
+        if not _is_XDATCAR:
             fixed = np.where(fixed == 1, 'T', 'F')
             coord_str = AS_PRINT_COORDS(coord[:, :3])
             print_arr = np.concatenate((coord_str, fixed[:, :3]), axis=1)
-            print_str = np.array2string(print_arr, **STRING_ARRAY_FORMAT).replace('[', ' ').replace(']', ' ')
-            POSCAR.write(print_str)
-            POSCAR.write('\n')
+        else:
+            print_arr = AS_PRINT_COORDS(coord)
+        print_str = np.array2string(print_arr, **STRING_ARRAY_FORMAT).translate(
+            str.maketrans({'[': ' ', ']': ' '})
+        )
+        POSCAR.write(print_str)
+        POSCAR.write('\n')
 
 
 class Write2JDFTX:
@@ -313,6 +512,272 @@ class Write2JDFTX:
                 POSCAR.write(f'    {fixed[ind][0]}')  # Selective Dynamics
                 POSCAR.write('\n')
 
+class Write2xyz:
+    """
+    Write BatchStructures obj to xyz file
+    """
+    def __init__(
+            self,
+            elements,
+            atom_numbers,
+            cells,
+            coords,
+            fixed,
+            energies,
+            forces,
+            output_path: str,
+            file_name_list: List[str] | str | None = None,
+            output_xyz_type: Literal['only_position_xyz', 'write_position_and_force'] = 'only_position_xyz',
+            n_core: int = -1
+    ):
+        n_batch = len(cells)
+        if file_name_list is None:
+            file_name_list = [f'{_}.xyz' for _ in range(n_batch)]
+        n_batch, file_name_list, coord_type, fixed, n_core = _check_consistency(
+            cells,
+            coords,
+            elements,
+            atom_numbers,
+            fixed,
+            output_path,
+            file_name_list,
+            'C',  # xyz format always uses Cartesian coo
+            n_core
+        )
+        # extra check
+        if len(energies) != n_batch:
+            raise ValueError(
+                f'Number of energies should be equal to number of batches, but got {len(energies)} and {n_batch}.'
+            )
+        for i, coo in enumerate(coords):
+            if not isinstance(coo, np.ndarray):
+                raise TypeError(f'Expect coords to be a List[np.ndarray], but got [{type(coo)}]')
+            if not isinstance(forces[i], np.ndarray):
+                raise TypeError(f'Expect forces to be a List[np.ndarray], but got [{type(forces[i])}]')
+            if coo.shape != forces[i].shape:
+                raise ValueError(
+                    f"Expect that forces and coords have the same shape, "
+                    f"but got {coo.shape} and {forces[i].shape} at the {i}-th structure."
+                )
+        if output_xyz_type not in ['only_position_xyz', 'write_position_and_force']:
+            raise ValueError(
+                f"`output_xyz_type` should be one of ['only_position_xyz', 'write_position_and_force'],"
+                f" but got {output_xyz_type}"
+            )
+        self.output_xyz_type = output_xyz_type
+        (
+            self.n_batch,
+            self.file_name_list,
+            self.coord_type,
+            self.fixed,
+            self.n_core,
+            self.cells,
+            self.atom_numbers,
+            self.output_path,
+            self.coords,
+            self.elements,
+            self.energies,
+            self.forces,
+        ) = (
+            n_batch,
+            file_name_list,
+            coord_type,
+            fixed,
+            n_core,
+            cells,
+            atom_numbers,
+            output_path,
+            coords,
+            elements,
+            energies,
+            forces
+        )
+
+    @staticmethod
+    def _write_single(
+            xyz: io.TextIOWrapper,
+            output_xyz_type: Literal['only_position_xyz', 'write_position_and_force'],
+            elements,
+            coords,
+            cells,
+            energies,
+            numbers,
+            forces,
+    ):
+        xyz.write(f"{len(coords)}\n")  # total number of atoms
+
+        cells_str = np.array2string(cells, **FLOAT_ARRAY_FORMAT).replace("   ", " ").translate(
+            str.maketrans({"[": " ", "]": " ", "\n": ""})
+        )
+        xyz.write(
+            f"Lattice ='{cells_str}' Properties=species:S:1:pos:R:3:forces:R:3 energy={energies:<.7e} pbc=T T T\n"
+        )
+        # generate elem_list which contain the element type of every structure. (data type:list(array()),)
+        elem_ = [[f"{elements[i]: <2s}"] * int(numbers[i]) for i in range(len(elements))]
+        elem = sum(elem_, [])
+        elem_list = np.array(elem).reshape((len(coords), 1))
+
+        if output_xyz_type == "write_position_and_force":
+            coo_force_str = AS_PRINT_COORDS(np.concatenate((coords, forces), axis=1))
+            elem_pos_force_array = np.concatenate((elem_list, coo_force_str), axis=1)
+            elem_pos_force = np.array2string(elem_pos_force_array, **STRING_ARRAY_FORMAT).translate(
+                str.maketrans({"[": " ", "]": " "})
+            )
+            xyz.write(f"{elem_pos_force}\n")
+        else:
+            elem_pos_array = np.concatenate((elem_list, AS_PRINT_COORDS(coords)), axis=1)
+            elem_pos_array = np.array2string(elem_pos_array, **STRING_ARRAY_FORMAT).translate(
+                str.maketrans({"[": " ", "]": " "})
+            )
+            xyz.write(f"{elem_pos_array}\n")
+
+    def __do_mt_write_wrapper(
+            self,
+            output_xyz_type,
+            elements,
+            coords,
+            cells,
+            energies,
+            numbers,
+            forces,
+            output_path: str,
+            file_name: str,
+    ):
+        if not (isinstance(output_path, str) and isinstance(file_name, str)):
+            raise TypeError(
+                f'output_path||file_name||system must be strings, '
+                f'but got type {type(output_path)}||{type(file_name)}.'
+            )
+        with open(os.path.join(output_path, file_name), 'w') as xyz:
+            self._write_single(
+                xyz,
+                output_xyz_type,
+                elements,
+                coords,
+                cells,
+                energies,
+                numbers,
+                forces,
+            )
+
+    def write(self):
+        """
+        Write structures to separate extxyz-fomat files.
+        Returns: None
+
+        """
+        (
+            n_batch,
+            file_name_list,
+            coord_type,
+            fixed,
+            n_core,
+            cells,
+            atom_numbers,
+            output_path,
+            coords,
+            elements,
+            energies,
+            forces,
+            output_xyz_type
+        ) = (
+            self.n_batch,
+            self.file_name_list,
+            self.coord_type,
+            self.fixed,
+            self.n_core,
+            self.cells,
+            self.atom_numbers,
+            self.output_path,
+            self.coords,
+            self.elements,
+            self.energies,
+            self.forces,
+            self.output_xyz_type
+        )
+
+        if n_core == 1:
+            for ii, fn in enumerate(file_name_list):
+                self.__do_mt_write_wrapper(
+                    output_xyz_type,
+                    elements[ii],
+                    coords[ii],
+                    cells[ii],
+                    energies[ii],
+                    atom_numbers[ii],
+                    forces[ii],
+                    output_path,
+                    fn,
+                )
+        else:
+            _para = jb.Parallel(n_core, )
+            _para(
+                jb.delayed(self.__do_mt_write_wrapper)(
+                    output_xyz_type,
+                    elements[ii],
+                    coords[ii],
+                    cells[ii],
+                    energies[ii],
+                    atom_numbers[ii],
+                    forces[ii],
+                    output_path,
+                    fn,
+                )
+                for ii, fn in enumerate(file_name_list)
+            )
+
+    def write2one(self):
+        """
+        Write all structures to one file as a trajectory.
+        Returns: None
+
+        """
+        (
+            n_batch,
+            file_name_list,
+            coord_type,
+            fixed,
+            n_core,
+            cells,
+            atom_numbers,
+            output_path,
+            coords,
+            elements,
+            energies,
+            forces,
+            output_xyz_type
+        ) = (
+            self.n_batch,
+            self.file_name_list,
+            self.coord_type,
+            self.fixed,
+            self.n_core,
+            self.cells,
+            self.atom_numbers,
+            self.output_path,
+            self.coords,
+            self.elements,
+            self.energies,
+            self.forces,
+            self.output_xyz_type
+        )
+        if len(file_name_list) > 1:
+            warnings.warn(f"`write2one` only writes one file, so only the `file_name_list[0]` will be used.")
+        file_name = file_name_list[0]
+        # Now only implement the serial version
+        with open(os.path.join(output_path, file_name), 'w') as xyz:
+            for i in range(n_batch):
+                self._write_single(
+                    xyz,
+                    output_xyz_type,
+                    elements[i],
+                    coords[i],
+                    cells[i],
+                    energies[i],
+                    atom_numbers[i],
+                    forces[i],
+                )
+
 def write_xyz(
         elements,
         coords,
@@ -357,10 +822,14 @@ def write_xyz(
             forces,
     ):
         with open(os.path.join(output_path, file_name), "w") as xyz:  # 遍历生成不同所有文件，并进行编写
-            xyz.write(f"{len(coords)}\n")#total number of atoms
+            xyz.write(f"{len(coords)}\n") #total number of atoms
 
-            cells_str = np.array2string(cells, **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]"," ").replace("\n","").replace("   "," ")
-            xyz.write(f"Lattice ='{cells_str}' Properties=species:S:1:pos:R:3:forces:R:3 energy={energies:<.7e} pbc=T T T\n")
+            cells_str = np.array2string(cells, **FLOAT_ARRAY_FORMAT).translate(
+                str.maketrans({"[": " ", "]": " ", "\n": "", "   ":" "})
+            )
+            xyz.write(
+                f"Lattice ='{cells_str}' Properties=species:S:1:pos:R:3:forces:R:3 energy={energies:<.7e} pbc=T T T\n"
+            )
             # generate elem_list which contain the element type of every structure. (data type:list(array()),)
             elem_ = [[f"{elements[i]: <2s}"] * int(numbers[i]) for i in range(len(elements))]
             elem = sum(elem_, [])
@@ -369,12 +838,15 @@ def write_xyz(
             if output_xyz_type == "write_position_and_force":
                 coo_force_str = AS_PRINT_COORDS(np.concatenate((coords, forces), axis=1))
                 elem_pos_force_array = np.concatenate((elem_list, coo_force_str), axis=1)
-                elem_pos_force = np.array2string(elem_pos_force_array, **STRING_ARRAY_FORMAT).replace("[", " ").replace("]"," ")#.replace("'", "")
+                elem_pos_force = np.array2string(elem_pos_force_array, **STRING_ARRAY_FORMAT).translate(
+                    str.maketrans({"[": " ", "]": " "})
+                )
                 xyz.write(f"{elem_pos_force}\n")
             else:
                 elem_pos_array = np.concatenate((elem_list, AS_PRINT_COORDS(coords)), axis=1)
-                elem_pos_array = np.array2string(elem_pos_array, **STRING_ARRAY_FORMAT).replace("[", " ").replace(
-                    "]", " ")  # .replace("'", "")
+                elem_pos_array = np.array2string(elem_pos_array, **STRING_ARRAY_FORMAT).translate(
+                    str.maketrans({"[": " ", "]": " "})
+                )
                 xyz.write(f"{elem_pos_array}\n")
 
     if n_core == 1:

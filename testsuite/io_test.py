@@ -54,6 +54,9 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
     outcar_dir = os.path.join(tmp_base, 'io_test_outcars')
     poscar_dir = os.path.join(tmp_base, 'io_test_poscar')
     cif_dir = os.path.join(tmp_base, 'io_test_cif')
+    xdat_dir = os.path.join(tmp_base, 'io_test_xdatcar')
+    xyz_dir = os.path.join(tmp_base, 'io_test_xyz')
+    xyzf_dir = os.path.join(tmp_base, 'io_test_xyzf')
     bin_path = os.path.join(tmp_base, 'io_test_binary')
     bin_path2 = os.path.join(tmp_base, 'io_test_binary2')
 
@@ -113,7 +116,14 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         print(f'  CIF round-trip: {n_structs} structures OK')
 
         # ----------------------------------------------------------------
-        # Step 4: Binary save/load (mode='w') — full fidelity
+        # Step 4: Write CIF → read back → compare element/cell identity
+        # ----------------------------------------------------------------
+        bs_outcar.write2text_traj(xdat_dir, file_format='XDATCAR')
+        bs_outcar.write2text_traj(xyz_dir, file_format='xyz')
+        bs_outcar.write2text_traj(xyzf_dir, file_format='xyz_forces')
+
+        # ----------------------------------------------------------------
+        # Step 5: Binary save/load (mode='w') — full fidelity
         # ----------------------------------------------------------------
         bs_outcar.save(bin_path, mode='w')
         bs_bin = BatchStructures.load_from_file(bin_path)
@@ -128,7 +138,7 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         print(f'  Binary save/load (w): OK')
 
         # ----------------------------------------------------------------
-        # Step 5: Binary append (mode='a')
+        # Step 6: Binary append (mode='a')
         # ----------------------------------------------------------------
         bs_outcar[:n_structs // 2].save(bin_path2, mode='w')
         bs_app = BatchStructures()
@@ -143,7 +153,7 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         print(f'  Binary append: OK')
 
         # ----------------------------------------------------------------
-        # Step 6: Test BatchStructures public methods
+        # Step 7: Test BatchStructures public methods
         # ----------------------------------------------------------------
         bs = bs_outcar[:min(10, n_structs)]  # use slicing for subset (no .copy() needed)
         public_methods = [
@@ -197,7 +207,7 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         print(f'  BatchStructures methods: {len(public_methods)} tested')
 
         # ----------------------------------------------------------------
-        # Step 7: split_dataset
+        # Step 8: split_dataset
         # ----------------------------------------------------------------
         from BUCToolkit.Preprocessing.preprocessing import split_dataset
         parts = split_dataset(bs_outcar[:20], ratio=[0.5, 0.3, 0.2], shuffle=True, seed=42)
