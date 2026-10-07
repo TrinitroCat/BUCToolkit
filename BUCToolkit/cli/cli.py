@@ -22,7 +22,7 @@ import yaml
 from BUCToolkit.cli.main import launch_task
 from BUCToolkit.utils._CheckModules import check_module
 from BUCToolkit.cli.print_logo import generate_display_art
-from BUCToolkit.cli.input_stub import CONFIG_STUB
+from BUCToolkit.cli.input_stub import CONFIG_STUB, apply_runtime_defaults
 from BUCToolkit.cli._config import load_input_config, prepare_output_root
 
 has_prmt = (check_module('prompt_toolkit') is not None)
@@ -131,6 +131,7 @@ def _strip_path_quotes(path: str) -> str | None:
 class BaseCLI:
 
     def __init__(self, *args, **kwargs):
+        apply_runtime_defaults()  # load the default arg values
         self.closed = False
         self.INPUT_FILE = None  # current input information
         self._is_config = False
@@ -551,10 +552,9 @@ class BaseCLI:
             self.logger.error(f"Unknown task: {task}\nAvailable task_name: {", ".join(self._TASK.keys())}")
             return
         else:
-            ARGS_WORK = TASK_TEMPLATES[self._TASK[task]]
+            task = self._TASK[task]
         if inp_file is None:  # if not input file, use default configs
-            AGRS_NOW = '\n'.join([ARGS_GLOBAL, ARGS_IO, ARGS_MODEL, ARGS_WORK])
-            inp_args = yaml.safe_load(AGRS_NOW)
+            inp_args = _task_input_defaults(task)
             self.INPUT_FILE = './task.inp'
         else:
             try:
@@ -934,210 +934,52 @@ class BaseCLI:
                 self._close()
 
 
-ARGS_GLOBAL = """
-# global configs
-TASK: !!str MD
-START: !!int 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH
-VERBOSE: !!int 1
-DEVICE: !!str 'cuda:0'
-BATCH_SIZE: !!int 16
-"""
+def _stub_defaults(stub: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract editable YAML values from the interactive keyword stub."""
+    result = {}
+    for key, value in stub.items():
+        if isinstance(value, Mapping):
+            result[key] = _stub_defaults(value)
+        elif isinstance(value, tuple) and len(value) == 3:
+            result[key] = value[0]
+        else:
+            result[key] = value
+    return result
 
-ARGS_IO = """
-LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
-OUTPUT_ROOT: !!str ./output
-OUTPUT_POSTFIX: !!str your_logfile_suffix
-STRICT_LOAD: !!bool true  # whether to strictly load model parameter
-REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
-SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
-DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC']
-DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
-DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
-FSDATA_PATH: !!str your/final/state/data/path  # used for calc. requiring both initial and final states, e.g., CI-NEB
-DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., Dimer
-VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
-VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
-DATA_LOADER_KWARGS: {}      # other kwargs for data loader.
-IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calculating.
-"""
 
-ARGS_MODEL = """
-# model configs
-MODEL_TYPE: !!str pyg  # Literal['pyg', 'vasp', 'custom']
-MODEL_FILE: !!str your/model/file/path/template_model.py  # function file path of torch model
-MODEL_NAME: !!str YourModel   # the specific name of the model in `MODEL_FILE`
-MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CONFIG)`
-  hyperparameter1: 'xxx'
-  hyperparameter2: 'xxx'
-MODEL_WRAPPER_CONFIG: {}  # arguments passed to the selected model wrapper
-MODEL_WRAPPER_FILE: null  # custom wrapper source file; only for MODEL_TYPE=custom
-MODEL_WRAPPER_NAME: null  # custom wrapper name; only for MODEL_TYPE=custom
-"""
-
-ARGS_TRAIN = """
-# training
-TRAIN:
-  # epoches & val set
-  EPOCH: !!int 10
-  VAL_BATCH_SIZE: !!int 20  # batch size for validation. default is the same as BATCH_SIZE
-  VAL_PER_STEP: !!int 100   # validate every `VAL_PER_STEP` steps. step = `BATCH_SIZE` * `ACCUMULATE_STEP`
-  VAL_IF_TRN_LOSS_BELOW: !!float 1.e5  # only validating after training loss < `VAL_IF_TRN_LOSS_BELOW`
-  ACCUMULATE_STEP: !!int 12  # gradient accumulation steps
-  # loss configs
-  LOSS: !!str Energy_Loss  # 'MSE': nn.MSELoss, 'MAE': nn.L1Loss, 'Hubber': nn.HuberLoss, 'CrossEntropy': nn.CrossEntropyLoss 'Energy_Force_Loss': Energy_Force_Loss, 'Energy_Loss': Energy_Loss
-  LOSS_CONFIG:             # other kwargs for loss function
-    loss_E: !!str SmoothMAE
-
-  METRICS:  # tuple of ones in [E_MAE, F_MAE, F_MaxE, E_R2, MSE, MAE, R2, RMSE], F_MaxE is the max absolute error of forces.
-    - !!str E_MAE
-    - !!str E_R2
-  METRICS_CONFIG: {}  # other kwargs for metrics
-  #  - F_MaxE
-
-  # optimizer configs
-  OPTIM: !!str AdamW  # model optimizer. Available values:
-                      # 'Adam': th.optim.Adam, 'SGD': th.optim.SGD, 'AdamW': th.optim.AdamW, 'Adadelta': th.optim.Adadelta,
-                      # 'Adagrad': th.optim.Adagrad, 'ASGD': th.optim.ASGD, 'Adamax': th.optim.Adamax, 'FIRE': FIRELikeOptimizer,
-  OPTIM_CONFIG:       # optimizer kwargs
-    lr: !!float 2.e-4
-    # ...
-  LAYERWISE_OPTIM_CONFIG: # Supporting regular expression to selection layers and set them.
-    'force_block.*': { 'lr': 5.e-4 }
-    'energy_block.*': { 'lr': 2.e-4 }
-    '.*_bias_layer.*': { 'lr': 2.e-4 }
-
-  GRAD_CLIP: !!bool true  # whether to toggle on gradient clip
-  GRAD_CLIP_MAX_NORM: !!float 10.  # maximum grad. norm to clip
-  GRAD_CLIP_CONFIG: {}    # other kwargs for `nn.utils.clip_grad_norm_` function
-  LR_SCHEDULER: !!str None  # learning rate scheduler. Available values:
-                            # 'StepLR': StepLR, 'ExponentialLR': ExponentialLR, 'ChainedScheduler': ChainedScheduler,
-                            # 'ConstantLR': ConstantLR, 'LambdaLR': LambdaLR, 'LinearLR': LinearLR,
-                            # 'CosineAnnealingWarmRestarts': CosineAnnealingWarmRestarts, 'CyclicLR': CyclicLR,
-                            # 'MultiStepLR': MultiStepLR, 'CosineAnnealingLR': CosineAnnealingLR, 'None': None,
-  LR_SCHEDULER_CONFIG: {} # kwargs of above `LR_SCHEDULER`
-  EMA: !!bool false       # whether to toggle on EMA (Exponential Moving Average)
-  EMA_DECAY: !!float 0.999  # EMA decay rate
-"""
-
-ARGS_PREDICT = """"""
-
-ARGS_OPT = """
-# relaxation
-RELAXATION:
-  ALGO: !!str 'FIRE'  # CG, BFGS, FIRE
-  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, 'PR+', 'FR', 'SD'
-  E_THRES: !!float 1.e4  # threshold of Energy difference
-  F_THRES: !!float 0.05  # threshold of max Force
-  MAXITER: !!int 300
-  STEPLENGTH: !!float 0.5
-  USE_BB: !!bool true
-  LINESEARCH: !!str 'B'  # 'Backtrack'/'B', 'Wolfe'/'W'/'MT', 'EXACT', 'None'/'N'
-  LINESEARCH_MAXITER: !!int 8  # max iterations of linear search.
-  LINESEARCH_THRES: !!float 0.02  # only for LINESEARCH = 'EXACT', threshold of exact line search.
-  LINESEARCH_FACTOR: !!float 0.5  # shrinkage factor for Backtrack line search.
-  REQUIRE_GRAD: !!bool False
-"""
-
-ARGS_TS = """
-# transition state
-TRANSITION_STATE:
-  ALGO: !!str DIMER
-  X_DIFF_ATTR: !!str x_dimer
-  E_THRES: !!float 1.e-4
-  TORQ_THRES: !!float 1.e-2
-  F_THRES: !!float 5.e-2
-  MAXITER_TRANS: !!int 300
-  MAXITER_ROT: !!int 5
-  MAX_STEPLENGTH: !!float 0.5
-  DX: !!float 1.e-1
-  REQUIRE_GRAD: !!bool False
-"""
-
-ARGS_VIB = """
-# vibration analyses (harmonic)
-VIBRATION:
-  METHOD: !!str 'EnergyDiff'  # EnergyDiff / GradDiff / Autograd.
-  BLOCK_SIZE: !!int 1
-  DELTA: !!float 1e-2
-  SAVE_HESSIAN: !!bool false
-"""
-
-ARGS_NEB = """
-# NEB transition state
-NEB:
-  ALGO: !!str 'CI-NEB'
-  N_IMAGES: !!int 7
-  SPRING_CONST: 5.0
-  OPTIMIZER: !!str FIRE
-  #OPTIMIZER_CONFIGS: Optional[Dict[str, Any]] = None, other kwargs of optimizer.
-  STEPLENGTH: !!float 0.2
-  E_THRESHOLD: !!float 1.e-3
-  F_THRESHOLD: !!float 0.05
-  MAXITER: !!int 20
-  REQUIRE_GRAD: !!bool False
-"""
-
-ARGS_MD = """
-# molecular dynamics
-MD:
-  ENSEMBLE: !!str NVT
-  THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
-  THERMOSTAT_CONFIG:
-    DAMPING_COEFF: !!float 0.01
-    TIME_CONST: !!float 120
-  TIME_STEP: !!float 1  # Unit: fs
-  MAX_STEP: !!int 100  # total time (fs) = TIME_STEP * MAX_STEP
-  T_INIT: !!float 298.15  # Initial Temperature, Unit: K. For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist.
-  OUTPUT_COORDS_PER_STEP: !!int 1  # To control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted.
-  REQUIRE_GRAD: !!bool False
-"""
-
-ARGS_CMD = """
-MD:
-  ENSEMBLE: !!str NVT
-  CONSTR_MD_SCHEME: !!str BLUE_MOON
-  N_IMAGES: !!int 3  # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies
-  THERMOSTAT: !!str CSVR  # only for ENSEMBLE=NVT, 'Langevin', 'VR', 'Nose-Hoover', 'CSVR'
-  THERMOSTAT_CONFIG:
-    DAMPING_COEFF: !!float 0.01
-    TIME_CONST: !!float 120
-  TIME_STEP: !!float 1  # Unit: fs
-  MAX_STEP: !!int 100  # total time (fs) = TIME_STEP * MAX_STEP
-  T_INIT: !!float 298.15  # Initial Temperature, Unit: K. For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist.
-  OUTPUT_COORDS_PER_STEP: !!int 1  # To control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted.
-  REQUIRE_GRAD: !!bool False
-  # Optional: constraints
-  CONSTRAINTS_FILE: !!str ./constraints.py
-  CONSTRAINTS_FUNC: !!str func
-  CONSTRAINTS_VAL_FUNC: null  # optional constr_val(t) in CONSTRAINTS_FILE
-"""
-
-ARGS_MC = """
-# Monte Carlo
-MC:
-  TYPE: !!str Metropolis
-  ITER_SCHEME: !!str Gaussian
-  COORDINATE_UPDATE_PARAM: !!float 0.2
-  MAXITER: !!int 10000
-  T_INIT: !!float 298.15
-  T_SCHEME: !!str constant
-  T_UPDATE_FREQ: !!int 1
-  T_SCHEME_PARAM: !!float 0.0
-  OUTPUT_COORDS_PER_STEP: !!int 1
-  MOVE_TO_CENTER_FREQ: !!int 20
-"""
-
-TASK_TEMPLATES = {
-    'TRAIN': ARGS_TRAIN,
-    'PREDICT': ARGS_PREDICT,
-    'OPT': ARGS_OPT,
-    'TS': ARGS_TS,
-    'VIB': ARGS_VIB,
-    'NEB': ARGS_NEB,
-    'MD': ARGS_MD,
-    'CMD': ARGS_CMD,
-    'MC': ARGS_MC,
-}
+def _task_input_defaults(task: str) -> dict[str, Any]:
+    """Build one task input from runtime defaults and the shared keyword stub."""
+    from BUCToolkit.api._io import CONFIG_DEFAULTS
+    stub_defaults = _stub_defaults(CONFIG_STUB)
+    common_keys = (
+        'TASK', 'START', 'VERBOSE', 'DEVICE', 'BATCH_SIZE', 'LOAD_CHK_FILE_PATH',
+        'OUTPUT_ROOT', 'OUTPUT_POSTFIX',
+        'STRICT_LOAD', 'REDIRECT', 'SAVE_PREDICTIONS', 'DATA_TYPE', 'DATA_PATH',
+        'DATA_NAME_SELECTOR', 'DATA_READER_KWARGS', 'DATA_LOADER_KWARGS',
+        'FSDATA_PATH', 'DISPDATA_PATH', 'VAL_SET_PATH', 'VAL_SPLIT_RATIO',
+        'IS_SHUFFLE', 'MODEL_TYPE', 'MODEL_FILE', 'MODEL_NAME', 'MODEL_CONFIG',
+        'MODEL_WRAPPER_CONFIG', 'MODEL_WRAPPER_FILE', 'MODEL_WRAPPER_NAME',
+    )
+    config = {key: stub_defaults[key] for key in common_keys if key in stub_defaults}
+    config.update({key: value for key, value in CONFIG_DEFAULTS.items() if key not in config})
+    config['OUTPUT_PATH'] = os.path.join(config['OUTPUT_ROOT'], 'logs')
+    config['PREDICTIONS_SAVE_FILE'] = os.path.join(
+        config['OUTPUT_ROOT'], 'results', 'result'
+    )
+    config['TASK'] = task
+    task_sections = {
+        'TRAIN': ('TRAIN',),
+        'OPT': ('RELAXATION',),
+        'TS': ('TRANSITION_STATE',),
+        'VIB': ('VIBRATION',),
+        'NEB': ('NEB',),
+        'MD': ('MD',),
+        'CMD': ('MD',),
+        'MC': ('MC',),
+    }
+    for section in task_sections.get(task, ()):
+        config[section] = stub_defaults[section]
+    return config
 
 if __name__ == '__main__':
     f = BaseCLI()

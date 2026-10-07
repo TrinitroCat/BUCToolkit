@@ -12,6 +12,8 @@ import numpy as np
 import torch as th
 from torch import nn
 
+from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
+
 
 _MACE_COMPONENTS: Dict[str, Any] | None = None
 
@@ -401,4 +403,34 @@ class MACEWrapper(nn.Module):
         )
 
 
-__all__ = ['MACEDataAdapter', 'MACEWrapper']
+class MACEModelWrapper(_BaseWrapper):
+    """Expose :class:`MACEWrapper` through the Energy/Grad calculator protocol."""
+
+    def __init__(self, model: MACEWrapper) -> None:
+        super().__init__(model)
+        self.X = None
+
+    def Energy(self, X, data):
+        self.X = X
+        if hasattr(data, 'pos'):
+            data.pos = X.reshape(-1, 3).contiguous()
+        result = self._model(data)
+        self.forces = result['forces']
+        return result['energy']
+
+    def Grad(self, X, data):
+        origin_shape = X.shape
+        if self.X is None or not compare_tensors(X, self.X):
+            self.forces = None
+        if self.forces is None:
+            self.X = X
+            if hasattr(data, 'pos'):
+                data.pos = X.reshape(-1, 3).contiguous()
+            result = self._model(data)
+            return -result['forces'].reshape(origin_shape).contiguous()
+        force = self.forces
+        self.forces = None
+        return -force.reshape(origin_shape).contiguous()
+
+
+__all__ = ['MACEDataAdapter', 'MACEWrapper', 'MACEModelWrapper']

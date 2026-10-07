@@ -1,6 +1,5 @@
 """ Input / Output Module """
-import gc
-import copy
+
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -15,6 +14,8 @@ import time
 import traceback
 import warnings
 from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
+import gc
+import copy
 
 import numpy as np
 import torch as th
@@ -27,7 +28,47 @@ from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 from BUCToolkit.BatchStructures import Batch
-from BUCToolkit.cli._config import load_input_config
+from BUCToolkit.cli._config import (
+    raise_output_backup_warning,
+    backup_output,
+    load_input_config,
+)
+from BUCToolkit.utils.model_wrappers.pyg_model_wrappers import (
+    Model_Wrapper_pyg,
+    Model_Wrapper_pyg_only_X,
+    Model_Wrapper_regularBatch_pyg,
+)
+from BUCToolkit.utils.model_wrappers.dgl_model_wrappers import Model_Wrapper_dgl
+
+# Compatibility aliases for older API imports. Implementations live in
+# ``utils.model_wrappers`` so the CLI and API use one adapter definition.
+_Model_Wrapper_pyg = Model_Wrapper_pyg
+_Model_Wrapper_pyg_only_X = Model_Wrapper_pyg_only_X
+_Model_Wrapper_regularBatch_pyg = Model_Wrapper_regularBatch_pyg
+_Model_Wrapper_dgl = Model_Wrapper_dgl
+
+
+# The default values of args, that are managed uniformly
+CONFIG_DEFAULTS = {
+    'TASK': 'PREDICT',
+    'START': 0,
+    'VERBOSE': 1,
+    'DEVICE': 'cpu',
+    'BATCH_SIZE': 1,
+    'OUTPUT_ROOT': './output',
+    'OUTPUT_POSTFIX': 'Untitled',
+    'STRICT_LOAD': True,
+    'REDIRECT': True,
+    'SAVE_PREDICTIONS': True,
+    'DATA_TYPE': 'BS',
+    'DATA_NAME_SELECTOR': '.*$',
+    'DATA_READER_KWARGS': {},
+    'DATA_LOADER_KWARGS': {},
+    'VAL_SPLIT_RATIO': 0.1,
+    'IS_SHUFFLE': False,
+    'MODEL_TYPE': 'pyg',
+    'MODEL_WRAPPER_CONFIG': {},
+}
 
 
 class _LoggingEnd:
@@ -56,7 +97,7 @@ class _CONFIGS(object):
     A base class of loading configs.
     """
 
-    _CURRENT_MODEL_TYPES = frozenset({'pyg', 'vasp', 'custom'})
+    _CURRENT_MODEL_TYPES = frozenset({'pyg', 'pyg_multi', 'mace', 'vasp', 'custom'})
 
     def __init__(self, config_file: str) -> None:
         self.config_file = config_file
@@ -66,8 +107,12 @@ class _CONFIGS(object):
         self.param = None
         self._has_load_data = False
         self._data_loader = None
+        self._pending_output_warnings = []
         self.reload_config(config_file)
         self.reset_logger()
+        for message in self._pending_output_warnings:
+            self.logger.warning(message)
+        self._pending_output_warnings.clear()
 
     def set_device(self, device: str | th.device) -> None:
         """ reset the device that model would train on """
@@ -428,6 +473,10 @@ class _CONFIGS(object):
             output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
             # check whether path exists
             if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
+            if os.path.lexists(output_file):
+                backup_path = backup_output(output_file, 'file')
+                message = raise_output_backup_warning(output_file, backup_path)
+                self.logger.warning(message)
             # set log handler
             self.log_handler = logging.FileHandler(output_file, 'w', delay=True)
             self.log_handler.setLevel(logging.INFO)
@@ -469,23 +518,23 @@ class _CONFIGS(object):
                 }
 
         # global information
-        self.START = self.config.get('START', 0)
+        self.START = self.config.get('START', CONFIG_DEFAULTS['START'])
         if self.START != 'from_scratch' and self.START != 0:
             self.LOAD_CHK_FILE_PATH: str = self.config['LOAD_CHK_FILE_PATH']
             if not isinstance(self.LOAD_CHK_FILE_PATH, str): raise TypeError('LOAD_CHK_FILE_PATH must be a str.')
             self.STRICT_LOAD: bool = self.config.get('STRICT_LOAD', True)
             if not isinstance(self.STRICT_LOAD, bool): raise TypeError(f'STRICT_LOAD must be a boolean, but got {type(self.STRICT_LOAD)}')
         self.COMMENTS: str = self.config.get('COMMENTS', 'None.')
-        self.VERBOSE: int = int(self.config.get('VERBOSE', 1))
-        self.DEVICE: str|th.device = self.config.get('DEVICE', 'cpu')
-        self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', 1)
+        self.VERBOSE: int = int(self.config.get('VERBOSE', CONFIG_DEFAULTS['VERBOSE']))
+        self.DEVICE: str|th.device = self.config.get('DEVICE', CONFIG_DEFAULTS['DEVICE'])
+        self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', CONFIG_DEFAULTS['BATCH_SIZE'])
 
         # model info
         self.MODEL_NAME: str = self.config.get('MODEL_NAME', 'Untitled')
         if not isinstance(self.MODEL_NAME, str): raise TypeError('MODEL_NAME must be a str.')
         self.MODEL_CONFIG = self.config.get('MODEL_CONFIG', dict())
         if not isinstance(self.MODEL_CONFIG, Dict): raise ValueError('MODEL_CONFIG must be a dictionary.')
-        self.MODEL_TYPE = str(self.config.get('MODEL_TYPE', 'pyg')).lower()
+        self.MODEL_TYPE = str(self.config.get('MODEL_TYPE', CONFIG_DEFAULTS['MODEL_TYPE'])).lower()
         if self.MODEL_TYPE not in self._CURRENT_MODEL_TYPES:
             raise ValueError(
                 f"`MODEL_TYPE` must be one of {self._CURRENT_MODEL_TYPES}, "
@@ -513,26 +562,35 @@ class _CONFIGS(object):
         self.REDIRECT = self.config.get('REDIRECT', True)
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', True)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
-            raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
-        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './BUCToolkit_results.db')
+            raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but got {type(self.SAVE_PREDICTIONS)}.')
+        self._PREDICTIONS_SAVE_FILE = self.config.get(
+            'PREDICTIONS_SAVE_FILE',
+            os.path.join(self.config['OUTPUT_ROOT'], 'results', 'result'),
+        )
         if self.SAVE_PREDICTIONS:
-            while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
-                warnings.warn(
-                    f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
-                    f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
-                    RuntimeWarning
+            if not isinstance(self._PREDICTIONS_SAVE_FILE, str):
+                raise TypeError(
+                    f'`PREDICTIONS_SAVE_FILE` must be a string when `SAVE_PREDICTIONS` is true, '
+                    f'but got {type(self._PREDICTIONS_SAVE_FILE)}.'
                 )
-                self._PREDICTIONS_SAVE_FILE += '_1'
+            if os.path.lexists(self._PREDICTIONS_SAVE_FILE):
+                old_path = self._PREDICTIONS_SAVE_FILE
+                backup_path = backup_output(old_path, 'file')
+                message = raise_output_backup_warning(old_path, backup_path)
+                if self.logger is None:
+                    self._pending_output_warnings.append(message)
+                else:
+                    self.logger.warning(message)
         else:
             self._PREDICTIONS_SAVE_FILE = None
-        if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
-            raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
             os.makedirs(os.path.dirname(self.PREDICTIONS_SAVE_FILE) or '.', exist_ok=True)
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
         if self.REDIRECT:
-            self.OUTPUT_PATH = self.config.get('OUTPUT_PATH', './')
-            self.OUTPUT_POSTFIX = self.config.get('OUTPUT_POSTFIX', 'Untitled')
+            self.OUTPUT_PATH = self.config.get(
+                'OUTPUT_PATH', os.path.join(self.config['OUTPUT_ROOT'], 'logs')
+            )
+            self.OUTPUT_POSTFIX = self.config.get('OUTPUT_POSTFIX', CONFIG_DEFAULTS['OUTPUT_POSTFIX'])
 
         # debug mode
         self.DEBUG_MODE = self.config.get('DEBUG_MODE', False)
@@ -697,6 +755,9 @@ class _BaseAPI(_CONFIGS):
         if model_type == 'vasp':
             from BUCToolkit.utils.model_wrappers import VASP_PluginModel
             return VASP_PluginModel(**model_wrapper_config)
+        if model_type == 'mace':
+            from BUCToolkit.utils.model_wrappers import MACEWrapper
+            return MACEWrapper(**model_config)
         return model(**model_config)
 
     def _build_model_wrapper(
@@ -751,207 +812,19 @@ class _BaseAPI(_CONFIGS):
                     f'but got {type(wrapper)}.'
                 )
             return wrapper
+        if model_type == 'mace':
+            from BUCToolkit.utils.model_wrappers import MACEModelWrapper
+            return MACEModelWrapper(model)
+        if model_type == 'pyg_multi':
+            from BUCToolkit.utils.model_wrappers import Model_Wrapper_pyg_MultiDevice
+            return Model_Wrapper_pyg_MultiDevice(model, **model_wrapper_config)
         if regular_batch:
-            return _Model_Wrapper_regularBatch_pyg(model, **model_wrapper_config)
-        return _Model_Wrapper_pyg(model, **model_wrapper_config)
+            return Model_Wrapper_regularBatch_pyg(model, **model_wrapper_config)
+        return Model_Wrapper_pyg(model, **model_wrapper_config)
 
     def _set_data_type(self, data_type: str) -> None:
         """Store a validated graph data type on a task instance."""
         self.data_type = self._validate_data_type(data_type)
-
-
-class _Model_Wrapper_pyg(_BaseWrapper):
-
-    __slots__ = ('_model', 'forces', 'X', )
-
-    def __init__(self, model, pos_attr_name='pos',) -> None:
-        """
-        A format transformer for converting Tensor X into PygData.pos
-        Wrap the model(graph, ...) into f(X)
-
-        Args:
-            model: An instantiate nn.Module
-
-        Methods:
-            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
-
-        """
-        super().__init__(model)
-        self.pos_attr_name = pos_attr_name
-        #if check_module('torch_geometric') is None:
-        #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
-        pass
-
-    def Energy(self, X, graph: Batch):
-        self.X = X
-        if hasattr(graph, 'pos'):
-            graph.pos = self.X.reshape(-1,3).contiguous()
-        if hasattr(graph, 'positions'):
-            graph.positions = self.X.reshape(-1,3).contiguous()
-        y = self._model(graph)
-        energy = y['energy']
-        self.forces = y['forces']
-        return energy
-
-    def Grad(self, X, graph: Batch):
-        origin_shape = X.shape
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.X = X
-            if hasattr(graph, 'pos'):
-                graph.pos = self.X.reshape(-1, 3).contiguous()
-            if hasattr(graph, 'positions'):
-                graph.positions = self.X.reshape(-1, 3).contiguous()
-            return - ((self._model(graph))['forces']).reshape(origin_shape)
-        else:
-            force = self.forces
-            self.forces = None
-            return - force.reshape(origin_shape).contiguous()
-
-
-class _Model_Wrapper_pyg_only_X(_BaseWrapper):
-    def __init__(self, model , graph: Batch) -> None:
-        """
-        A format transformer for converting Tensor X into PygData.pos
-        Wrap the model(graph, ...) into f(X)
-
-        Args:
-            model: An instantiate nn.Module
-
-        Methods:
-            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
-        """
-        super().__init__(model)
-        self.graph = graph
-        #if check_module('torch_geometric') is None:
-        #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
-        pass
-
-    def Energy(self, X,):
-        self.X = X
-        self.graph.pos = self.X.squeeze(0).reshape(-1,3)
-        y = self._model(self.graph )
-        energy = y['energy']
-        energy = th.sum(energy).unsqueeze(0)
-        return energy
-
-    def Grad(self, X):
-        origin_shape = X.shape
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.X = X
-            self.graph.pos = self.X.reshape(-1, 3)
-            return - ((self._model(self.graph))['forces']).reshape(origin_shape)
-        else:
-            force = self.forces
-            self.forces = None
-            return - force.reshape(origin_shape).contiguous()
-
-
-class _Model_Wrapper_dgl(_BaseWrapper):
-    """Deprecated DGL adapter retained only for source compatibility."""
-    def __init__(self, model) -> None:
-        """
-        A format transformer for converting Tensor X into DGLGraph.ndata['pos'] i.e., wrapping the model(graph, ...) into f(X)
-        The output DGLGraph has format as follows:
-        dgl.heterograph(
-            {
-                ('atom', 'bond', 'atom'): ([], []),
-                ('cell', 'disp', 'cell'): ([], [])
-            },
-            num_nodes_dict={
-                'atom': n_atom,
-                'cell': 1
-            }
-        )
-        data.nodes['atom'].data['pos']: (n_atom, 3), Atom positions in Cartesian coordinates.
-        data.nodes['atom'].data['Z']: (n_atom, ), Atomic numbers.
-        data.nodes['cell'].data['cell']: (1, 3, 3), Cell vectors.
-
-        Args:
-            model: An instantiate nn.Module subclass
-
-        Methods:
-            Energy: input Tensor `X` and DGLGraph `graph`, it will update data.nodes['atom'].data['pos'] into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and DGLGraph `graph`, it will update data.nodes['atom'].data['pos'] into X and return model(graph)['forces'].
-
-        """
-        super().__init__(model)
-        if check_module('dgl') is None:
-            ImportError('The method is unavailable because the `dgl` cannot be imported.')
-        pass
-
-    def Energy(self, X, graph, return_format: Literal['sum', 'origin'] = 'origin'):
-        self.X = X
-        graph.nodes['atom'].data['pos'] = self.X.squeeze(0)
-        y = self._model(graph)
-        energy = y['energy']
-        self.forces = y['forces']
-        if return_format == 'sum':
-            energy = th.sum(energy).unsqueeze(0)
-        return energy
-
-    def Grad(self, X, graph):
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.X = X
-            graph.nodes['atom'].data['pos'] = self.X.squeeze(0)
-            return - ((self._model(graph))['forces']).unsqueeze(0)
-        else:
-            force = self.forces
-            self.forces = None
-            return - force.unsqueeze(0)
-
-
-class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
-    def __init__(self, model) -> None:
-        """
-        A format transformer for converting Tensor X into PygData.pos
-        Wrap the model(graph, ...) into f(X), but here the batch size of graph is only 1, and the batch size (1st dimension) of X is many.
-        This wrapper would expand batch of graph into the same as X.
-
-        Args:
-            model: An instantiate nn.Module
-
-        Methods:
-            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
-
-        """
-        super().__init__(model)
-        _pyg = check_module('torch_geometric.data')
-        if _pyg is not None:
-            import torch_geometric.data as _pyg
-            self.pygBatch = _pyg.Batch
-        else:
-            #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
-            self.pygBatch = Batch
-
-    def Energy(self, X: th.Tensor, graph: Batch):
-        self.X = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
-        batch_size = X.size(0)
-        if graph.batch_size == 1:
-            graph = self.pygBatch.from_data_list([graph] * batch_size, exclude_keys=['batch', 'ptr'])
-        graph.pos = self.X
-        y = self._model(graph)  # (n_batch, )
-        energy = y['energy']
-        self.forces = y['forces']
-        return energy
-
-    def Grad(self, X, graph: Batch):
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.Energy(X, graph)
-
-        force: th.Tensor = self.forces
-        self.forces = None
-        return -force.reshape_as(X)
 
 
 class ExpMovingAverage:

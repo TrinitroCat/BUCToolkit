@@ -5,50 +5,9 @@
 #  Environment: Python 3.12
 import inspect
 import os
-import time
-from typing import Literal
+from BUCToolkit.cli._config import raise_output_backup_warning, backup_output
 from BUCToolkit.io import read_md_traj, read_mc_traj, read_opt_structures, OUTCAR2Feat, POSCARs2Feat, Cif2Feat, ASETraj2Feat
 import BUCToolkit as bt
-
-
-def backup_output(path: str, expected_kind: Literal['file', 'directory']) -> str | None:
-    """Move an existing output to a timestamped backup path.
-
-    Args:
-        path: Output path that may already exist.
-        expected_kind: Whether ``path`` is required to be a regular file or a
-            directory when it exists.
-
-    Returns:
-        The absolute backup path, or ``None`` when ``path`` did not exist.
-
-    Raises:
-        ValueError: If the output is a symbolic link or ``expected_kind`` is
-            unsupported.
-        IsADirectoryError: If a file output names an existing directory.
-        NotADirectoryError: If a directory output names an existing file.
-        OSError: If the existing output cannot be renamed.
-    """
-    path = os.path.abspath(path)
-    if not os.path.lexists(path):
-        return None
-    if os.path.islink(path):
-        raise ValueError(f"Output `{path}` must not be a symbolic link.")
-    if expected_kind == 'file' and not os.path.isfile(path):
-        raise IsADirectoryError(f"Output file `{path}` is an existing directory.")
-    if expected_kind == 'directory' and not os.path.isdir(path):
-        raise NotADirectoryError(f"Output directory `{path}` is an existing file.")
-    if expected_kind not in {'file', 'directory'}:
-        raise ValueError(f"Unknown output kind `{expected_kind}`.")
-
-    backup_base = f"{path}.bak{time.strftime('%Y%m%d_%H%M%S')}"
-    backup_path = backup_base
-    suffix = 1
-    while os.path.lexists(backup_path):
-        backup_path = f'{backup_base}_{suffix}'
-        suffix += 1
-    os.rename(path, backup_path)
-    return backup_path
 
 
 def _conversion_paths(input_path: str, output_path: str) -> tuple[str, str]:
@@ -130,7 +89,9 @@ def main_convert(inp: str, ipath: str, out: str, opath: str):
     else:
         f = converter(ipath)
 
-    backup_output(opath, 'directory')
+    old_output = backup_output(opath, 'directory')
+    if old_output is not None:
+        raise_output_backup_warning(opath, old_output)
     os.makedirs(opath)
     out_format = OUT_DICT[out]
     if out_format is not None:

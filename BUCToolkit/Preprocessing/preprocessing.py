@@ -47,6 +47,7 @@ ALL_ELEMENT = {'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg',
 __all__ = [
     "CreateASE",
     "CreatePygData",
+    "CreateLoadableData",
     "CreateDglData",
     "BlockedRW",
     "split_dataset"
@@ -570,6 +571,7 @@ class CreatePygData:
         if self.verbose: print('Done.')
         return data_list
 
+
     def feat2data_list(self, feat: BatchStructures, n_core: int = 1) -> List[pygData]:
         r"""
         Convert BatchStructures into a list of pyg.Data for fair-chem model
@@ -616,6 +618,105 @@ class CreatePygData:
 
         if self.verbose: print('Done.')
         return data_list
+
+
+_AUTO_LABELS = object()
+
+
+class CreateLoadableData(CreatePygData):
+    """Build existing DataLoader input mappings from structures or ASE data.
+
+    This helper only assembles the dictionaries already consumed by the public
+    DataLoaders. It does not define a new data protocol.
+
+    Args:
+        verbose: Conversion verbosity forwarded to :class:`CreatePygData`.
+        n_core: Number of workers used by structure conversion.
+    """
+
+    def __init__(self, verbose: int = 0, n_core: int = 1) -> None:
+        super().__init__(verbose=verbose)
+        if not isinstance(n_core, int) or n_core <= 0:
+            raise ValueError(f'`n_core` must be a positive integer, but got {n_core}.')
+        self.n_core = n_core
+
+    def _to_pyg_list(self, data: Any) -> list[Any]:
+        """Convert one supported structure collection to PyG-like objects."""
+        if isinstance(data, BatchStructures):
+            return self.feat2data_list(data, n_core=self.n_core)
+        if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
+            return self.ase2data_list(data, n_core=self.n_core)
+        raise TypeError(
+            '`data` must be BatchStructures or a sequence of ASE Atoms, '
+            f'but got {type(data).__name__}.'
+        )
+
+    @staticmethod
+    def _labels(data: Any) -> dict[str, Any] | None:
+        """Extract labels already stored in a structure collection."""
+        if isinstance(data, BatchStructures):
+            energies = None if data.Energies is None else list(data.Energies)
+            forces = None if data.Forces is None else list(data.Forces)
+            return {'energy': energies, 'forces': forces}
+        if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
+            results = [getattr(getattr(atoms, 'calc', None), 'results', None) or {} for atoms in data]
+            if len(results) > 0 and all('energy' in result for result in results):
+                energies = [result['energy'] for result in results]
+                has_forces = all('forces' in result for result in results)
+                forces = [result['forces'] for result in results] if has_forces else None
+                return {'energy': energies, 'forces': forces}
+        return None
+
+    def to_pyg_loader(
+            self,
+            data: Any,
+            labels: dict[str, Any] | None | object = _AUTO_LABELS,
+    ) -> dict[str, Any]:
+        """Return the mapping consumed by ``PyGDataLoader``."""
+        resolved_labels = self._labels(data) if labels is _AUTO_LABELS else labels
+        return {'data': self._to_pyg_list(data), 'labels': resolved_labels}
+
+    def to_ext_proc_loader(
+            self,
+            data: Any,
+            labels: dict[str, Any] | None | object = _AUTO_LABELS,
+    ) -> dict[str, Any]:
+        """Return the PyG mapping consumed by ``ExtProcDataLoader``."""
+        return self.to_pyg_loader(data, labels=labels)
+
+    def to_isfs_pyg_loader(self, data_is: Any, data_fs: Any) -> dict[str, Any]:
+        """Return paired PyG data for initial/final-state loaders."""
+        data_is_list = self._to_pyg_list(data_is)
+        data_fs_list = self._to_pyg_list(data_fs)
+        if len(data_is_list) != len(data_fs_list):
+            raise ValueError('Initial-state and final-state data must have the same number of samples.')
+        return {'dataIS': data_is_list, 'dataFS': data_fs_list}
+
+    def _to_mace_list(self, data: Any, adapter: Any) -> list[Any]:
+        """Convert one collection through an existing MACE adapter."""
+        if adapter is None or not hasattr(adapter, 'to_atomic_data_list'):
+            raise TypeError('MACE conversion requires a MACEDataAdapter instance.')
+        return adapter.to_atomic_data_list(self._to_pyg_list(data))
+
+    def to_mace_loader(
+            self,
+            data: Any,
+            adapter: Any,
+            labels: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the mapping consumed by ``MACEDataLoader``."""
+        return {
+            'data': self._to_mace_list(data, adapter),
+            'labels': self._labels(data) if labels is None else labels,
+        }
+
+    def to_isfs_mace_loader(self, data_is: Any, data_fs: Any, adapter: Any) -> dict[str, Any]:
+        """Return paired MACE data for initial/final-state loaders."""
+        data_is_list = self._to_mace_list(data_is, adapter)
+        data_fs_list = self._to_mace_list(data_fs, adapter)
+        if len(data_is_list) != len(data_fs_list):
+            raise ValueError('Initial-state and final-state data must have the same number of samples.')
+        return {'dataIS': data_is_list, 'dataFS': data_fs_list}
 
 
 class CreateDglData:
@@ -920,7 +1021,3 @@ def split_dataset(
     if shuffle: data.rearrange(inv_indx)
 
     return result_list if save_path is None else None
-
-
-
-

@@ -335,17 +335,48 @@ to specify the data path, data type, model file, and task type,
 users can directly launch tasks in a shell like:
 ```shell
 buctoolkit -i './input_file.inp'
+# or
+buctoolkit './input_file.inp'
 ```
 Paths inside YAML input files are resolved relative to the input file's
 directory. Command-line paths passed to `-i`, `-o`, or `--convert` remain
 relative to the directory where the command is invoked.
 
-Each one-line task requires `OUTPUT_ROOT` (the legacy `OUTPUT_PATH` is used as
-the root when `OUTPUT_ROOT` is absent). A missing root is created; an existing
-root must be an empty, non-symbolic-link directory. Logs default to
+`OUTPUT_ROOT` defaults to `./output` (the legacy `OUTPUT_PATH` is used as
+the root when `OUTPUT_ROOT` is absent). A missing root is created; a non-empty
+existing root is moved to a timestamped `.bak...` directory. Logs default to
 `OUTPUT_ROOT/logs`, results to `OUTPUT_ROOT/results/result`, and training
 checkpoints to `OUTPUT_ROOT/chk`. Explicit `OUTPUT_PATH`,
 `PREDICTIONS_SAVE_FILE`, and `TRAIN.CHK_SAVE_PATH` values take precedence.
+
+#### Executable input rules
+
+The executable path keeps model loading and model adaptation separate:
+
+- `MODEL_TYPE: pyg` loads the class named by `MODEL_NAME` from `MODEL_FILE` and
+  uses the standard PyG wrapper.
+- `MODEL_TYPE: pyg_multi` uses the multiprocessing PyG wrapper. Its device and
+  worker settings belong in `MODEL_WRAPPER_CONFIG`; this mode is selected
+  explicitly and does not infer GPU settings from the model file.
+- `MODEL_TYPE: mace` constructs the built-in MACE model from `MODEL_CONFIG`.
+  MACE training uses the MACE data adapter and loader; other MACE tasks use
+  the ordinary structure conversion path before the MACE wrapper evaluates it.
+- `MODEL_TYPE: vasp` uses the external-process wrapper and
+  `MODEL_WRAPPER_CONFIG`; it does not require a Python model constructor.
+- `MODEL_TYPE: custom` loads `MODEL_WRAPPER_NAME` from `MODEL_WRAPPER_FILE`.
+  The custom wrapper must inherit `_BaseWrapper`. The model file remains
+  separate and is still selected by `MODEL_FILE` and `MODEL_NAME` when needed.
+
+`DATA_READER_KWARGS` is passed to the selected structure reader.
+`DATA_LOADER_KWARGS` is passed to the API `DataLoader`. Older input files that
+only contain `DATA_LOADER_KWARGS` remain readable: that mapping is also used
+for the reader and a deprecation warning is emitted. Paired tasks such as
+NEB and Blue-Moon CMD continue to use their task-specific paired loaders.
+
+The no-argument interactive CLI is a configuration editor and keyword lookup
+tool. `task` creates a reference input file with the same runtime defaults as
+the API; scientific model, data, and task values still need to be filled in by
+the user before `run`.
 
 An interactive command-line interface can be used as well by inputting no argument:
 ```
@@ -404,10 +435,10 @@ using BUCToolkit as an executable program, and those that start with "#" are nor
 
 # global configs
 ###TASK: !!str MD          # task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC', 'TRAIN', 'PREDICT'
-START: !!int 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
+START: !!int 0          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
 VERBOSE: !!int 1        # verbosity level for log output
-DEVICE: !!str 'cuda:0'  # the device on which the task would run
-BATCH_SIZE: !!int 16    # the batch size of input data during calculation
+DEVICE: !!str cpu       # the device on which the task would run
+BATCH_SIZE: !!int 1     # the batch size of input data during calculation
 
 # I/O configs
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
@@ -425,7 +456,8 @@ SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output prediction
 ###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., Dimer
 ###VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
 ###VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
-###DATA_LOADER_KWARGS: {}      # other kwargs for data loader.
+###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader.
+###DATA_LOADER_KWARGS: {}      # keyword arguments for the API DataLoader.
 ###IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calculating.
 
 # training
@@ -560,12 +592,16 @@ MC:
   MOVE_TO_CENTER_FREQ: !!int 20    # see `MD` section above
 
 # model configs
+MODEL_TYPE: !!str pyg  # pyg, pyg_multi, mace, vasp, or custom
 ###MODEL_FILE: !!str your/model/file/path/template_model.py  # function file path of torch models
 MODEL_NAME: !!str YourModel   # the specific name of the model in `MODEL_FILE`
 MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CONFIG)`
   hyperparameter1: xxx
   hyperparameter2: xxx
   # ...
+MODEL_WRAPPER_CONFIG: {}  # arguments passed to the selected model wrapper
+###MODEL_WRAPPER_FILE: null  # custom wrapper source file; only for MODEL_TYPE=custom
+###MODEL_WRAPPER_NAME: null  # custom wrapper name; only for MODEL_TYPE=custom
 
 ```
 
@@ -598,11 +634,17 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 This command will convert all files in `$input_path` with assumed format of `$input_type` into 
 `$output_path` in the format of `$output_type`.
 
-Direct outputs are never silently overwritten. If `-o FILE` names an existing
-regular file, it is moved to `FILE.bakYYYYmmdd_HHMMSS` first. A conversion
-destination is backed up as a whole directory with the same suffix. Backup
-name collisions in the same second receive `_1`, `_2`, and so on; files,
-directories, or symbolic links of the wrong kind are rejected.
+Output targets are never silently overwritten. A non-empty `OUTPUT_ROOT`, an
+existing `PREDICTIONS_SAVE_FILE`, or an output supplied with `-o` is moved to a
+timestamped `.bakYYYYMMDD_HHMMSS` path before the new output is created. A
+conversion destination is backed up as a whole directory with the same
+suffix. Backup name collisions in the same second receive `_1`, `_2`, and so
+on; files, directories, or symbolic links of the wrong kind are rejected.
+
+`CreateLoadableData` is available when assembling data for the existing API
+loaders from `BatchStructures` or ASE structures. It provides helpers for
+ordinary PyG, paired PyG, MACE, paired MACE, and external-process loader
+mappings; it does not introduce a new data protocol.
 
 For a finer control, the following Python script can be used:
 ```python

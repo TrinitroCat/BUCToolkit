@@ -1,6 +1,10 @@
 """Small shared helpers for reading CLI input files."""
 
 import os
+import sys
+import time
+import warnings
+import copy
 from collections.abc import Mapping
 from typing import Any
 
@@ -57,6 +61,58 @@ def _absolute_path(value: str, input_directory: str) -> str:
     return os.path.abspath(value)
 
 
+def backup_output(path: str, expected_kind: str) -> str | None:
+    """Move an existing output to a timestamped backup path.
+
+    Args:
+        path: Output path that may already exist.
+        expected_kind: ``"file"`` or ``"directory"``.
+
+    Returns:
+        The backup path, or ``None`` when ``path`` does not exist.
+
+    Raises:
+        ValueError: If ``path`` is a symbolic link or ``expected_kind`` is invalid.
+        IsADirectoryError: If a file output names a directory.
+        NotADirectoryError: If a directory output names a file.
+    """
+    if expected_kind not in {"file", "directory"}:
+        raise ValueError(f"Unknown output kind `{expected_kind}`.")
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.lexists(path):
+        return None
+    if os.path.islink(path):
+        raise ValueError(f"Output `{path}` must not be a symbolic link.")
+    if expected_kind == "file" and not os.path.isfile(path):
+        raise IsADirectoryError(f"Output file `{path}` is an existing directory.")
+    if expected_kind == "directory" and not os.path.isdir(path):
+        raise NotADirectoryError(f"Output directory `{path}` is an existing file.")
+
+    backup_base = f"{path}.bak{time.strftime('%Y%m%d_%H%M%S')}"
+    backup_path = backup_base
+    suffix = 1
+    while os.path.lexists(backup_path):
+        backup_path = f"{backup_base}_{suffix}"
+        suffix += 1
+    os.rename(path, backup_path)
+    return backup_path
+
+
+def raise_output_backup_warning(path: str, backup_path: str) -> str:
+    """Announce one output backup on the standard warning channel.
+
+    Args:
+        path: Original output path.
+        backup_path: Path receiving the previous output.
+
+    Returns:
+        The warning message emitted to the user.
+    """
+    message = f"WARNING: Output `{path}` already exists and was moved to `{backup_path}`. Be sure to make a backup!"
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    return message
+
+
 def load_input_config(input_path: str, require_output_root: bool = False) -> dict[str, Any]:
     """Load a CLI input file and resolve its known path fields.
 
@@ -66,18 +122,18 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
 
     Args:
         input_path: YAML input file to load.
-        require_output_root: Whether absence of both ``OUTPUT_ROOT`` and the
-            legacy ``OUTPUT_PATH`` is an error.
+        require_output_root: Retained for call compatibility. Missing roots
+            use `./output`; legacy `OUTPUT_PATH` remains a fallback.
 
     Returns:
         A mapping containing validated configuration data, resolved known
-        paths, and output-path fallbacks when an output root is available.
+        paths, and output-path fallbacks.
 
     Raises:
         FileNotFoundError: If ``input_path`` does not exist.
         TypeError: If a known typed field has an incompatible type.
-        ValueError: If the YAML document is empty, its top level is not a
-            mapping, or an output root is required but missing.
+        ValueError: If the YAML document is empty or its top level is not a
+            mapping.
         yaml.YAMLError: If the input is not valid YAML.
     """
     input_path = os.path.abspath(input_path)
@@ -94,6 +150,12 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
             f"expected a mapping, got {type(config).__name__}",
         )
     config = dict(config)
+
+    from BUCToolkit.api._io import CONFIG_DEFAULTS
+    for key, value in CONFIG_DEFAULTS.items():
+        if key in {"OUTPUT_ROOT", "DATA_READER_KWARGS", "DATA_LOADER_KWARGS"}:
+            continue
+        config.setdefault(key, copy.deepcopy(value))
 
     for field in ("TASK", "DATA_TYPE", "MODEL_TYPE", "MODEL_WRAPPER_NAME"):
         if field in config and not isinstance(config[field], str):
@@ -149,14 +211,8 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
         if output_root is not None:
             config["OUTPUT_ROOT"] = output_root
     if output_root is None:
-        if require_output_root:
-            raise _field_error(
-                ValueError,
-                input_path,
-                "OUTPUT_ROOT",
-                "set OUTPUT_ROOT or the legacy OUTPUT_PATH",
-            )
-        return config
+        output_root = _absolute_path("./output", input_directory)
+        config["OUTPUT_ROOT"] = output_root
 
     config.setdefault("OUTPUT_PATH", os.path.join(output_root, "logs"))
     config.setdefault(
@@ -169,15 +225,17 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
     return config
 
 
-def prepare_output_root(output_root: str) -> str:
+def prepare_output_root(output_root: str, backup_existing: bool = True) -> str:
     """Prepare the root directory used by one CLI task.
 
     Args:
         output_root: Directory that will own logs, results, and checkpoints.
+        backup_existing: Move a non-empty existing directory to a timestamped
+            backup before recreating the output root.
 
     Returns:
         The absolute output-root path. A missing directory is created before
-        it is returned.
+        it is returned; non-empty existing roots are backed up by default.
 
     Raises:
         ValueError: If the path is a symbolic link or a file.
@@ -189,9 +247,13 @@ def prepare_output_root(output_root: str) -> str:
             raise ValueError(f"Output root `{output_root}` must not be a symbolic link.")
         if not os.path.isdir(output_root):
             raise ValueError(f"Output root `{output_root}` must be a directory.")
-        #with os.scandir(output_root) as entries:
-        #    if next(entries, None) is not None:
-        #        raise ValueError(f"Output root `{output_root}` must be empty.")
+        with os.scandir(output_root) as entries:
+            has_entries = next(entries, None) is not None
+        if backup_existing and has_entries:
+            backup_path = backup_output(output_root, "directory")
+            if backup_path is not None:
+                raise_output_backup_warning(output_root, backup_path)
+            os.makedirs(output_root)
     else:
         os.makedirs(output_root)
     return output_root

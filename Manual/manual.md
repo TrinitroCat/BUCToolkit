@@ -21,7 +21,8 @@ Regular batches use `(batch_size, n_atom, 3)`. Irregular batches use
 
 ## YAML Input Reference
 
-The executable CLI reads YAML with `buctoolkit -i input.yml`. Fields marked as
+The executable CLI reads YAML with `buctoolkit -i input.yml` or
+`buctoolkit input.yml`. Fields marked as
 task-specific are only read by the corresponding task. Paths inside the YAML
 file are resolved relative to that file.
 
@@ -40,7 +41,7 @@ file are resolved relative to that file.
 | Field | Values / type | Meaning |
 | --- | --- | --- |
 | `LOAD_CHK_FILE_PATH` | path | Checkpoint loaded when `START` is `1` or `2`. |
-| `OUTPUT_ROOT` | path | Root directory for logs, results, and checkpoints. A missing root is created; an existing root must be empty. |
+| `OUTPUT_ROOT` | path | `./output` | Root directory for logs, results, and checkpoints. A missing root is created; a non-empty existing root is moved to a timestamped `.bak...` directory. |
 | `OUTPUT_PATH` | path | Legacy or explicit log directory. With `OUTPUT_ROOT`, defaults to `OUTPUT_ROOT/logs`. |
 | `OUTPUT_POSTFIX` | string | Suffix used in log names. |
 | `PREDICTIONS_SAVE_FILE` | path | Binary output path when saving is enabled. |
@@ -50,11 +51,12 @@ file are resolved relative to that file.
 | `DATA_TYPE` | `POSCAR`, `OUTCAR`, `CIF`, `ASE_TRAJ`, `BS`, `OPT`, `MD`, `MC` | CLI input format. `BS` is BUCToolkit's binary structure format. [Load data](examples.md#load-and-convert-structures) |
 | `DATA_PATH` | path | Initial or training data. |
 | `DATA_NAME_SELECTOR` | regular-expression string | Selects structures by sample name. |
+| `DATA_READER_KWARGS` | mapping | `{}` | Extra keyword arguments passed to the selected structure reader. |
 | `FSDATA_PATH` | path | Final-state data for paired tasks such as NEB and Blue-Moon CMD. [Blue-Moon CMD](examples.md#blue-moon-cmd) |
 | `DISPDATA_PATH` | path | Initial dimer displacement/direction data for TS searches. |
 | `VAL_SET_PATH` | path | Explicit training validation set. |
 | `VAL_SPLIT_RATIO` | float in `[0, 1)` | Validation fraction when `VAL_SET_PATH` is absent. |
-| `DATA_LOADER_KWARGS` | mapping | Extra keyword arguments for the selected loader. |
+| `DATA_LOADER_KWARGS` | mapping | `{}` | Extra keyword arguments for the selected API DataLoader. When reading an older input with this field but no `DATA_READER_KWARGS`, the same mapping is also passed to the structure reader with a deprecation warning. |
 | `IS_SHUFFLE` | boolean | Shuffle unpaired calculation data. Paired tasks and CMD use deterministic order. |
 
 ### `TRAIN`
@@ -175,11 +177,14 @@ For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` and uses
 
 ### Model fields
 
-`MODEL_TYPE` selects the model protocol (`pyg`, `vasp`, or `custom`). For the
-default PyG protocol, `MODEL_FILE` and `MODEL_NAME` identify the model and
-`MODEL_CONFIG` is passed to its constructor. `MODEL_WRAPPER_CONFIG` configures
-the wrapper; VASP uses it directly and does not read `MODEL_CONFIG`. Custom
-wrappers are loaded from `MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME`.
+`MODEL_TYPE` selects the model path (`pyg`, `pyg_multi`, `mace`, `vasp`, or
+`custom`). `pyg` and `pyg_multi` import a model class from `MODEL_FILE` and
+`MODEL_NAME`; `MODEL_CONFIG` is passed to its constructor. `pyg_multi` selects
+the multiprocessing PyG wrapper, configured with `MODEL_WRAPPER_CONFIG`.
+`mace` constructs the built-in MACE model from `MODEL_CONFIG`. `vasp` uses the
+external-process wrapper configured by `MODEL_WRAPPER_CONFIG`. Custom wrappers
+are loaded from `MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME` and must inherit
+from `_BaseWrapper`.
 `START`, `LOAD_CHK_FILE_PATH`, and `STRICT_LOAD` control parameter loading.
 See [model and checkpoint](examples.md#configure-a-model-and-checkpoint).
 
@@ -274,7 +279,9 @@ energy protocol and accepts `X`, `Element_list`, optional `Cell_vector`,
 Main preprocessing readers are `POSCARs2Feat`, `OUTCAR2Feat`, `ExtXyz2Feat`,
 `Cif2Feat`, and `ASETraj2Feat`. Their common options are `path`, `verbose`,
 file selection, and format-specific tags. `CreatePygData`, `CreateDglData`,
-and `CreateASE` convert the in-memory feature representation.
+and `CreateASE` convert the in-memory feature representation. `CreateLoadableData`
+extends `CreatePygData` with helpers that assemble the existing PyG, MACE,
+paired-state, and external-process loader mappings.
 
 `PyGDataLoader` and `DglGraphLoader` take a `data` mapping, `batch_size`,
 `device`, `shuffle`, `is_train`, and optional `data_names`.

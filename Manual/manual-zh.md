@@ -20,7 +20,7 @@ amu（质量）、fs（时间）和 K（温度）。模型的 `func(X, ...)` 返
 
 ## YAML 输入参数
 
-CLI 使用 `buctoolkit -i input.yml` 读取 YAML。标注了任务的字段只在对应任务
+CLI 使用 `buctoolkit -i input.yml` 或 `buctoolkit input.yml` 读取 YAML。标注了任务的字段只在对应任务
 中生效。YAML 内部的相对路径相对于输入文件所在目录解析。
 
 ### 全局参数
@@ -38,7 +38,7 @@ CLI 使用 `buctoolkit -i input.yml` 读取 YAML。标注了任务的字段只�
 | 参数 | 取值/类型 | 说明 |
 | --- | --- | --- |
 | `LOAD_CHK_FILE_PATH` | 路径 | `START` 为 `1` 或 `2` 时读取的 checkpoint。 |
-| `OUTPUT_ROOT` | 路径 | 日志、结果和 checkpoint 的根目录。缺失时创建；已有目录必须为空。 |
+| `OUTPUT_ROOT` | 路径 | 日志、结果和 checkpoint 的根目录，默认 `./output`。缺失时创建；非空的已有目录会移至带时间戳的 `.bak...` 备份目录。 |
 | `OUTPUT_PATH` | 路径 | 旧版或显式日志目录；设置 `OUTPUT_ROOT` 时默认是 `OUTPUT_ROOT/logs`。 |
 | `OUTPUT_POSTFIX` | 字符串 | 日志文件名后缀。 |
 | `PREDICTIONS_SAVE_FILE` | 路径 | 开启保存时的二进制输出路径。 |
@@ -48,11 +48,12 @@ CLI 使用 `buctoolkit -i input.yml` 读取 YAML。标注了任务的字段只�
 | `DATA_TYPE` | `POSCAR`、`OUTCAR`、`CIF`、`ASE_TRAJ`、`BS`、`OPT`、`MD`、`MC` | CLI 输入格式；`BS` 是 BUCToolkit 内置结构格式。[数据读取](examples-zh.md#load-and-convert-structures) |
 | `DATA_PATH` | 路径 | 初态或训练数据路径。 |
 | `DATA_NAME_SELECTOR` | 正则表达式 | 按样本名筛选结构。 |
+| `DATA_READER_KWARGS` | 映射 | `{}` | 传给对应结构读取器的额外关键字参数。 |
 | `FSDATA_PATH` | 路径 | NEB、Blue-Moon CMD 等成对任务的终态数据。[Blue-Moon CMD](examples-zh.md#blue-moon-cmd) |
 | `DISPDATA_PATH` | 路径 | Dimer 过渡态搜索的初始位移/方向数据。 |
 | `VAL_SET_PATH` | 路径 | 训练时显式指定验证集。 |
 | `VAL_SPLIT_RATIO` | `[0, 1)` 的浮点数 | 未指定 `VAL_SET_PATH` 时的验证集比例。 |
-| `DATA_LOADER_KWARGS` | 映射 | 传给 DataLoader 的额外参数。 |
+| `DATA_LOADER_KWARGS` | 映射 | `{}` | 传给 API DataLoader 的额外关键字参数。旧输入仅有此字段而没有 `DATA_READER_KWARGS` 时，为兼容性也会传给结构读取器并发出弃用警告。 |
 | `IS_SHUFFLE` | 布尔值 | 是否打乱非成对计算数据；成对任务和 CMD 使用确定顺序。 |
 
 ### `TRAIN`
@@ -149,10 +150,12 @@ CLI 的 `BLUE_MOON` 从 `DATA_PATH`/`FSDATA_PATH` 读取成对结构并使用
 
 ### 模型参数
 
-`MODEL_TYPE` 选择模型协议（`pyg`、`vasp` 或 `custom`）。默认 PyG 协议使用
-`MODEL_FILE` 和 `MODEL_NAME` 指定模型，并将 `MODEL_CONFIG` 传给模型构造函数。
-`MODEL_WRAPPER_CONFIG` 配置包装器；VASP 直接使用它且不读取 `MODEL_CONFIG`。
-自定义包装器通过 `MODEL_WRAPPER_FILE` 和 `MODEL_WRAPPER_NAME` 加载。
+`MODEL_TYPE` 选择模型路径（`pyg`、`pyg_multi`、`mace`、`vasp` 或
+`custom`）。`pyg` 和 `pyg_multi` 使用 `MODEL_FILE` 与 `MODEL_NAME` 导入模型，
+并将 `MODEL_CONFIG` 传给模型构造函数；`pyg_multi` 选择多进程 PyG 包装器，
+由 `MODEL_WRAPPER_CONFIG` 配置。`mace` 根据 `MODEL_CONFIG` 构造内置 MACE 模型。
+`vasp` 使用由 `MODEL_WRAPPER_CONFIG` 配置的外部进程包装器。自定义包装器通过
+`MODEL_WRAPPER_FILE` 和 `MODEL_WRAPPER_NAME` 加载，且必须继承 `_BaseWrapper`。
 `START`、`LOAD_CHK_FILE_PATH` 和 `STRICT_LOAD` 控制参数读取。参见[模型与 checkpoint](examples-zh.md#configure-a-model-and-checkpoint)。
 
 ## 高级 API 参数
@@ -243,7 +246,8 @@ low-level `Frequency` 计算器接受 `method`、可选 `block_size`、有限差
 主要预处理读取器为 `POSCARs2Feat`、`OUTCAR2Feat`、`ExtXyz2Feat`、
 `Cif2Feat` 和 `ASETraj2Feat`；共同参数是 `path`、`verbose`、文件选择，
 以及格式专用标签。`CreatePygData`、`CreateDglData` 和 `CreateASE` 用于
-转换内存中的 feature 数据。
+转换内存中的 feature 数据。`CreateLoadableData` 继承 `CreatePygData`，
+用于组装现有 PyG、MACE、成对状态和外部进程 loader 所需的输入映射。
 
 `PyGDataLoader` 和 `DglGraphLoader` 接受 `data` 映射、`batch_size`、
 `device`、`shuffle`、`is_train` 和可选 `data_names`。

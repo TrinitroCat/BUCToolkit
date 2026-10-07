@@ -324,17 +324,43 @@ BUCToolkit 也可以直接作为普通可执行程序使用。通过在输入文
 
 ```shell
 buctoolkit -i './input_file.inp'
+# 或
+buctoolkit './input_file.inp'
 ```
 
 YAML 输入文件中的路径统一相对于输入文件所在目录解析；命令行参数 `-i`、
 `-o` 和 `--convert` 中的路径仍相对于命令执行时的当前目录解析。
 
-每个单行任务都需要 `OUTPUT_ROOT`；若未提供，则兼容地将旧
-`OUTPUT_PATH` 视为根目录。根目录不存在时会创建，已存在时必须是空的、
-非符号链接目录。日志默认写入 `OUTPUT_ROOT/logs`，结果默认写入
+`OUTPUT_ROOT` 默认是 `./output`；若未提供，则兼容地将旧
+`OUTPUT_PATH` 视为根目录。根目录不存在时会创建；非空的已有目录会移至
+带时间戳的 `.bak...` 备份目录。日志默认写入 `OUTPUT_ROOT/logs`，结果默认写入
 `OUTPUT_ROOT/results/result`，训练检查点默认写入
 `OUTPUT_ROOT/chk`。显式的 `OUTPUT_PATH`、`PREDICTIONS_SAVE_FILE` 和
 `TRAIN.CHK_SAVE_PATH` 始终优先。
+
+#### 可执行输入规则
+
+可执行模式保持模型加载和模型适配分离：
+
+- `MODEL_TYPE: pyg` 从 `MODEL_FILE` 导入 `MODEL_NAME` 指定的模型类，并使用普通 PyG wrapper。
+- `MODEL_TYPE: pyg_multi` 使用多进程 PyG wrapper。设备和 worker 参数写在
+  `MODEL_WRAPPER_CONFIG` 中；该模式必须显式选择，不会从模型文件推断 GPU 设置。
+- `MODEL_TYPE: mace` 根据 `MODEL_CONFIG` 构造内置 MACE 模型。MACE 训练使用
+  MACE 数据适配器和 loader；其他 MACE 任务仍先按普通结构路径转换数据，再由 MACE wrapper 计算。
+- `MODEL_TYPE: vasp` 使用外部进程 wrapper，由 `MODEL_WRAPPER_CONFIG` 配置，
+  不要求 Python 模型构造器。
+- `MODEL_TYPE: custom` 从 `MODEL_WRAPPER_FILE` 导入 `MODEL_WRAPPER_NAME`。
+  自定义 wrapper 必须继承 `_BaseWrapper`。模型文件仍与 wrapper 分离，必要时继续由
+  `MODEL_FILE` 和 `MODEL_NAME` 指定。
+
+`DATA_READER_KWARGS` 传给结构读取器，`DATA_LOADER_KWARGS` 传给 API
+`DataLoader`。只有旧输入文件包含 `DATA_LOADER_KWARGS` 而没有
+`DATA_READER_KWARGS` 时，为保持兼容会同时将该映射传给读取器，并发出弃用警告。
+NEB、Blue-Moon CMD 等成对任务仍使用任务专用的 paired loader。
+
+不带参数启动的交互式 CLI 是配置编辑器和关键词查询工具。`task` 创建的输入文件
+使用与 API 相同的运行时默认值；科学模型、数据和任务参数仍需用户根据实际研究任务填写，
+然后再执行 `run`。
 
 如果不带任何参数运行，则进入交互式命令行界面：
 
@@ -390,10 +416,10 @@ run       : 在 CLI 中启动一个任务。
 
 # 全局配置
 ###TASK: !!str MD          # 任务名称。可选：'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC', 'TRAIN', 'PREDICT'
-START: !!int 1          # 0: 从头开始；1: 从 LOAD_CHK_FILE_PATH 加载检查点继续；2: 仅加载模型参数/权值
+START: !!int 0          # 0: 从头开始；1: 从 LOAD_CHK_FILE_PATH 加载检查点继续；2: 仅加载模型参数/权值
 VERBOSE: !!int 1        # 日志输出的详细程度
-DEVICE: !!str 'cuda:0'  # 任务运行的设备
-BATCH_SIZE: !!int 16    # 计算时输入数据的批大小
+DEVICE: !!str cpu       # 任务运行的设备
+BATCH_SIZE: !!int 1     # 计算时输入数据的批大小
 
 # I/O 配置
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
@@ -411,7 +437,8 @@ SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出�
 ###DISPDATA_PATH: !!str your/displacement/data/path  # 用于需要初始方向猜测的计算，如 Dimer
 ###VAL_SET_PATH: !!str your/validation/set/path  # 训练时需要的验证集路径
 ###VAL_SPLIT_RATIO: !!float 0.1  # 验证集占总数据集的比例；若指定了 VAL_SET_PATH，此参数被忽略
-###DATA_LOADER_KWARGS: {}      # 数据加载器的其他关键字参数
+###DATA_READER_KWARGS: {}      # 结构读取器的关键字参数
+###DATA_LOADER_KWARGS: {}      # API DataLoader 的关键字参数
 ###IS_SHUFFLE: !!bool false    # 计算前是否随机打乱数据集
 
 # 训练配置
@@ -539,12 +566,16 @@ MC:
   MOVE_TO_CENTER_FREQ: !!int 20    # 同 MD 中说明
 
 # 模型配置
+MODEL_TYPE: !!str pyg  # pyg、pyg_multi、mace、vasp 或 custom
 ###MODEL_FILE: !!str your/model/file/path/template_model.py  # torch 模型文件路径
 MODEL_NAME: !!str YourModel   # MODEL_FILE 中具体的模型类名
 MODEL_CONFIG:   # 模型超参数，将传递给 `YourModel.__init__(**MODEL_CONFIG)`
   hyperparameter1: xxx
   hyperparameter2: xxx
   # ...
+MODEL_WRAPPER_CONFIG: {}  # 传给所选模型 wrapper 的参数
+###MODEL_WRAPPER_FILE: null  # 自定义 wrapper 文件；仅用于 MODEL_TYPE=custom
+###MODEL_WRAPPER_NAME: null  # 自定义 wrapper 名称；仅用于 MODEL_TYPE=custom
 ```
 
 ### 后处理
@@ -576,10 +607,14 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 
 该命令会将 `$input_path` 下所有假定格式为 `$input_type` 的文件转换为 `$output_path` 中格式为 `$output_type` 的文件。
 
-直接输出不会静默覆盖已有内容。若 `-o FILE` 指向已有普通文件，CLI 会先
-将其改名为 `FILE.bakYYYYmmdd_HHMMSS`；转换目标则会以相同后缀整体备份。
-同一秒内发生重名时依次追加 `_1`、`_2`。类型不符的文件、目录或符号链接
-会被拒绝。
+输出目标不会被静默覆盖。非空的 `OUTPUT_ROOT`、已有的
+`PREDICTIONS_SAVE_FILE` 或 `-o` 指定的输出文件，都会先移动到带时间戳的
+`.bakYYYYMMDD_HHMMSS` 路径，再创建新输出。转换目标会以相同后缀整体备份。
+同一秒内发生重名时依次追加 `_1`、`_2`。类型不符的文件、目录或符号链接会被拒绝。
+
+从 `BatchStructures` 或 ASE 结构为现有 API loader 组装输入时，可以使用
+`CreateLoadableData`。它提供普通 PyG、成对 PyG、MACE、成对 MACE 以及外部进程
+loader 所需映射的便捷方法，但不引入新的数据协议。
 
 如需更精细的控制，可使用以下 Python 脚本：
 

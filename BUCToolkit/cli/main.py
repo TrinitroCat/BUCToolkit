@@ -25,10 +25,20 @@ import BUCToolkit as bt
 from BUCToolkit.BatchGenerate.coords_interp import direction_for_finite_diff
 from BUCToolkit.cli.print_logo import generate_display_art
 import BUCToolkit.api as api
-from BUCToolkit.api.DataLoaders import PyGDataLoader, ISFSPyGDataLoader
+from BUCToolkit.api.DataLoaders import (
+    PyGDataLoader,
+    ISFSPyGDataLoader,
+    MACEDataLoader,
+    ISFSMACEDataLoader,
+)
 import BUCToolkit.Preprocessing.load_files as load_files
-from BUCToolkit.cli.convert_data import backup_output, main_convert
-from BUCToolkit.cli._config import load_input_config, prepare_output_root
+from BUCToolkit.cli.convert_data import main_convert
+from BUCToolkit.cli._config import (
+    raise_output_backup_warning,
+    backup_output,
+    load_input_config,
+    prepare_output_root,
+)
 
 
 def _selected_sample_indices(data, pattern: str | None) -> list[int]:
@@ -163,7 +173,7 @@ def parse_center_input_file(
     if output_root_override is None:
         prepare_output_root(config['OUTPUT_ROOT'])
     else:
-        os.makedirs(config['OUTPUT_ROOT'], exist_ok=True)
+        config['OUTPUT_ROOT'] = prepare_output_root(config['OUTPUT_ROOT'])
 
     TASKS_TYPE = {
         'TRAIN': api.Trainer,
@@ -224,6 +234,9 @@ def parse_center_input_file(
     if model_type == 'vasp':
         from BUCToolkit.utils.model_wrappers import VASP_PluginModel
         udf_model = VASP_PluginModel
+    elif model_type == 'mace':
+        from BUCToolkit.utils.model_wrappers import MACEWrapper
+        udf_model = MACEWrapper
     elif model_override is None:
         model_file = config.get('MODEL_FILE', None)
         model_name = config.get('MODEL_NAME', None)
@@ -240,8 +253,23 @@ def parse_center_input_file(
     data_path = config.get('DATA_PATH', '')
     data_selector = config.get('DATA_NAME_SELECTOR', None)
     if data_path == '': raise ValueError(f'`DATA_PATH` is not defined.')
+    data_reader_kwargs = config.get('DATA_READER_KWARGS')
+    if data_reader_kwargs is None and 'DATA_LOADER_KWARGS' in config:
+        data_reader_kwargs = config['DATA_LOADER_KWARGS']
+        warnings.warn(
+            '`DATA_LOADER_KWARGS` now configures the API DataLoader; use '
+            '`DATA_READER_KWARGS` for legacy structure-reader arguments.',
+            FutureWarning,
+            stacklevel=2,
+        )
+    if data_reader_kwargs is None:
+        data_reader_kwargs = {}
     data_loader_kwargs = config.get('DATA_LOADER_KWARGS', {})
-    source_data: bt.Structures = load_data(data_type, data_path, data_loader_kwargs)
+    if not isinstance(data_reader_kwargs, dict):
+        raise TypeError('`DATA_READER_KWARGS` must be a mapping.')
+    if not isinstance(data_loader_kwargs, dict):
+        raise TypeError('`DATA_LOADER_KWARGS` must be a mapping.')
+    source_data: bt.Structures = load_data(data_type, data_path, data_reader_kwargs)
     selected_indices = _selected_sample_indices(source_data, data_selector)
     data = source_data[selected_indices]
     is_shuffle = config.get('IS_SHUFFLE', False)
@@ -252,7 +280,7 @@ def parse_center_input_file(
         val_set_path = config.get('VAL_SET_PATH', None)
         validation_ratio = config.get('VAL_SPLIT_RATIO', None)
         if val_set_path is not None:
-            val_data = load_data(data_type, val_set_path, data_loader_kwargs)
+            val_data = load_data(data_type, val_set_path, data_reader_kwargs)
             if data_selector is not None:
                 val_data = val_data.select_by_sample_id(rf"{data_selector}")
         elif validation_ratio is not None:
@@ -271,21 +299,18 @@ def parse_center_input_file(
         else:
             raise ValueError(f"THERE IS NO VALIDATION DATA SPECIFIED. TRAINING MAY BE MEANINGLESS.")
 
-        data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
-        val_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(val_data, n_core=1)
-
-        trn_ener = [data[atm.idx].Energies[0] for atm in data_list]
-        if data.Forces is None:
-            trn_forc = None
-        else:
-            trn_forc = [data[atm.idx].Forces[0] for atm in data_list]
-        train_data = {'data': data_list, 'labels': {'energy': trn_ener, 'forces': trn_forc}}
-        val_ener = [val_data[atm.idx].Energies[0] for atm in val_data_list]
-        if val_data.Forces is None:
-            val_forc = None
-        else:
-            val_forc = [val_data[atm.idx].Forces[0] for atm in val_data_list]
-        valid_data = {'data': val_data_list, 'labels': {'energy': val_ener, 'forces': val_forc}}
+        converter = bt.preprocessing.CreateLoadableData(verbose=1)
+        train_data = converter.to_pyg_loader(data)
+        valid_data = converter.to_pyg_loader(val_data)
+        if model_type == 'mace':
+            adapter = bt.utils.model_wrappers.MACEDataAdapter(
+                atomic_numbers=config['MODEL_CONFIG']['atomic_numbers'],
+                r_max=config['MODEL_CONFIG']['r_max'],
+                heads=config['MODEL_CONFIG'].get('heads'),
+                default_head=config['MODEL_CONFIG'].get('default_head'),
+            )
+            train_data = converter.to_mace_loader(data, adapter)
+            valid_data = converter.to_mace_loader(val_data, adapter)
         dataset_args = (train_data, valid_data)
 
     elif task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):
@@ -294,20 +319,28 @@ def parse_center_input_file(
         # handle the final state configuration data
         fs_data_path = config.get('FSDATA_PATH', None)
         if fs_data_path is not None:
-            fs_data = load_data(data_type, fs_data_path, data_loader_kwargs)
+            fs_data = load_data(data_type, fs_data_path, data_reader_kwargs)
         else:
             raise ValueError(f"`FSDATA_PATH` is not defined. For TASK `{task_type}`, "
                              f"you must specify the final-state-configuration data path by `FSDATA_PATH`.")
         _validate_paired_structures(source_data, fs_data, 'FSDATA_PATH')
         fs_data = fs_data[selected_indices]
-        is_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
-        fs_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(fs_data, n_core=1)
-        run_data = {'dataIS': is_data_list, 'dataFS': fs_data_list}
+        converter = bt.preprocessing.CreateLoadableData(verbose=1)
+        if model_type == 'mace':
+            adapter = bt.utils.model_wrappers.MACEDataAdapter(
+                atomic_numbers=config['MODEL_CONFIG']['atomic_numbers'],
+                r_max=config['MODEL_CONFIG']['r_max'],
+                heads=config['MODEL_CONFIG'].get('heads'),
+                default_head=config['MODEL_CONFIG'].get('default_head'),
+            )
+            run_data = converter.to_isfs_mace_loader(data, fs_data, adapter)
+        else:
+            run_data = converter.to_isfs_pyg_loader(data, fs_data)
         dataset_args = (run_data,)
 
     elif task_type == 'CMD':
-        data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
-        run_data = {'data': data_list, 'labels': None}
+        converter = bt.preprocessing.CreateLoadableData(verbose=1)
+        run_data = converter.to_pyg_loader(data, labels=None)
         dataset_args = (run_data,)
 
     elif task_type == 'TS':  # Need a dimer initial guess
@@ -322,11 +355,12 @@ def parse_center_input_file(
         else:
             displace_flag = displace_flag.get('X_DIFF_ATTR', None)
 
-        is_data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
+        converter = bt.preprocessing.CreateLoadableData(verbose=1)
+        is_data_list = converter.to_pyg_loader(data, labels=None)['data']
 
         if displace_flag is not None:  # IF DISPDATA_PATH is given, canonically use data read from DISPDATA_PATH
             if disp_data_path is not None:
-                disp_data = load_data(data_type, disp_data_path, data_loader_kwargs)
+                disp_data = load_data(data_type, disp_data_path, data_reader_kwargs)
                 _validate_paired_structures(source_data, disp_data, 'DISPDATA_PATH')
                 disp_data = disp_data[selected_indices]
                 for i, dat in enumerate(is_data_list):
@@ -335,7 +369,7 @@ def parse_center_input_file(
             else:
                 fs_data_path = config.get('FSDATA_PATH', None)  # ELIF FSDATA_PATH, use interpolated middle point of is/fs conf.
                 if fs_data_path is not None:
-                    fs_data = load_data(data_type, fs_data_path, data_loader_kwargs)
+                    fs_data = load_data(data_type, fs_data_path, data_reader_kwargs)
                     _validate_paired_structures(source_data, fs_data, 'FSDATA_PATH')
                     fs_data = fs_data[selected_indices]
                     # convert to displacement by interpolation
@@ -351,8 +385,8 @@ def parse_center_input_file(
         dataset_args = (run_data,)
 
     else:
-        data_list = bt.preprocessing.CreatePygData(1).feat2data_list(data, n_core=1)
-        run_data = {'data': data_list, 'labels': None}
+        converter = bt.preprocessing.CreateLoadableData(verbose=1)
+        run_data = converter.to_pyg_loader(data, labels=None)
         dataset_args = (run_data,)
 
     # dataloader
@@ -365,7 +399,9 @@ def parse_center_input_file(
         from BUCToolkit.api.DataLoaders import ExtProcDataLoader
         dataloader = ExtProcDataLoader
     elif task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):
-        dataloader = ISFSPyGDataLoader
+        dataloader = ISFSMACEDataLoader if model_type == 'mace' else ISFSPyGDataLoader
+    elif model_type == 'mace' and task_type == 'TRAIN':
+        dataloader = MACEDataLoader
     else:
         dataloader = PyGDataLoader
 
@@ -379,13 +415,13 @@ def parse_center_input_file(
             **model_wrapper_config_override,
         }
     runner.set_dataset(*dataset_args, )  # type: ignore
-    if dataloader is ISFSPyGDataLoader:
+    if dataloader in {ISFSPyGDataLoader, ISFSMACEDataLoader}:
         dataloader_config = {}
     elif task_type == 'CMD':
         dataloader_config = {'shuffle': False}
     else:
         dataloader_config = {'shuffle': is_shuffle}
-    runner.set_dataloader(dataloader, dataloader_config)
+    runner.set_dataloader(dataloader, {**data_loader_kwargs, **dataloader_config})
     # set constraints function
     if task_type == 'CMD':
         md_config = config.get('MD', {})
@@ -548,9 +584,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group(required=False)
 
     group.add_argument('-i', '--input', help='The path to input file.', default=None)
+    parser.add_argument('input_path', nargs='?', help='Input YAML file (equivalent to --input).')
     parser.add_argument(
         '-o', '--output',
         help='The path to output file. It will change the stdout. One can also cleanly redirect output by setting '
@@ -579,20 +616,24 @@ def main():
             args = parser.parse_args()
             if args.convert is not None and args.output is not None:
                 parser.error('`-o/--output` cannot be used with `-c/--convert`.')
-            if args.input is not None:
+            if args.input is not None and args.input_path is not None:
+                parser.error('Provide the input file either positionally or with `-i/--input`, not both.')
+            input_file = args.input or args.input_path
+            if input_file is not None:
                 if args.output is not None:
                     backup_path = backup_output(args.output, 'file')
                     if backup_path is not None:
-                        warnings.warn(
-                            f'Output file `{args.output}` already exists. Moved it to `{backup_path}`.',
-                            stacklevel=2,
-                        )
+                        raise_output_backup_warning(args.output, backup_path)
                     opened_file = open(args.output, 'w')
                     sys.stdout = opened_file
-                launch_task(args.input)
+                launch_task(input_file)
             elif args.convert is not None:
                 inp = args.convert
                 main_convert(*inp)
+            elif args.output is not None:
+                parser.error('`-o/--output` requires an input task provided with `-i` or as a positional argument.')
+            else:
+                parser.error('Provide an input task with `-i INPUT` or convert files with `-c ...`.')
     finally:
         if opened_file is not None:
             if not opened_file.closed:

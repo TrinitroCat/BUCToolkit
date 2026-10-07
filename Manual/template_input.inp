@@ -3,10 +3,10 @@
 
 # global configs
 ###TASK: !!str MD          # task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC', 'TRAIN', 'PREDICT'
-START: !!int 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
+START: !!int 0          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
 VERBOSE: !!int 1        # verbosity level for log output
-DEVICE: !!str 'cuda:0'  # the device on which the task would run
-BATCH_SIZE: !!int 16    # the batch size of input data during calculation
+DEVICE: !!str cpu       # the device on which the task would run
+BATCH_SIZE: !!int 1     # the batch size of input data during calculation
 
 # I/O configs
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
@@ -24,7 +24,8 @@ SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output prediction
 ###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., Dimer
 ###VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
 ###VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
-###DATA_LOADER_KWARGS: {}      # other kwargs for data loader.
+###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader.
+###DATA_LOADER_KWARGS: {}      # keyword arguments for the API DataLoader.
 ###IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calculating.
 
 # training
@@ -159,7 +160,7 @@ MC:
   MOVE_TO_CENTER_FREQ: !!int 20    # see `MD` section above
 
 # model configs
-MODEL_TYPE: !!str pyg  # Literal['pyg', 'vasp', 'custom']
+MODEL_TYPE: !!str pyg  # Literal['pyg', 'pyg_multi', 'mace', 'vasp', 'custom']
 MODEL_FILE: !!str your/model/file/path/template_model.py  # function file path of torch models
 MODEL_NAME: !!str YourModel   # the specific name of the model in `MODEL_FILE`
 MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CONFIG)`

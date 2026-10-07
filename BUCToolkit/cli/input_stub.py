@@ -4,15 +4,16 @@
 #  File: input_stub.py
 #  Environment: Python 3.12
 from typing import Any
+import copy
 
 # The parameter dictionary in the format:
 # key: (value, type, description)
 CONFIG_STUB = {
     "TASK": ("MD", str, "task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC'"),
-    "START": (1, int, "0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights"),
+    "START": (0, int, "0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights"),
     "VERBOSE": (1, int, "verbosity level for log output"),
-    "DEVICE": ("cuda:0", str, "the device on which the task would run"),
-    "BATCH_SIZE": (16, int, "the batch size of input data during calculation"),
+    "DEVICE": ("cpu", str, "the device on which the task would run"),
+    "BATCH_SIZE": (1, int, "the batch size of input data during calculation"),
 
     # I/O configs
     "LOAD_CHK_FILE_PATH": ("your/model/checkpoint/file/path", str, "path of model checkpoint to load"),
@@ -30,7 +31,8 @@ CONFIG_STUB = {
     "DISPDATA_PATH": ("your/displacement/data/path", str, "path for displacement data, used for calculations requiring initial guess of a direction, e.g., Dimer"),
     "VAL_SET_PATH": ("your/validation/set/path", str, "path for validation set, used for training that requires validation data"),
     "VAL_SPLIT_RATIO": (0.1, float, "ratio of validation set in the total dataset. Ignored if VAL_SET_PATH is provided"),
-    "DATA_LOADER_KWARGS": ({}, dict, "other keyword arguments for data loader"),
+    "DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader"),
+    "DATA_LOADER_KWARGS": ({}, dict, "keyword arguments for the API DataLoader"),
     "IS_SHUFFLE": (False, bool, "whether to randomly shuffle dataset before calculating"),
 
     # Training
@@ -156,7 +158,7 @@ CONFIG_STUB = {
     },
 
     # Model configs
-    "MODEL_TYPE": ("pyg", str, "Model protocol: pyg, vasp, or custom"),
+    "MODEL_TYPE": ("pyg", str, "Model path: pyg, pyg_multi, mace, vasp, or custom"),
     "MODEL_FILE": ("your/model/file/path/template_model.py", str, "path to model definition file"),
     "MODEL_NAME": ("YourModel", str, "name of the model class in MODEL_FILE"),
     "MODEL_CONFIG": {
@@ -167,3 +169,16 @@ CONFIG_STUB = {
     "MODEL_WRAPPER_FILE": (None, str, "path to custom model wrapper source file"),
     "MODEL_WRAPPER_NAME": (None, str, "name of custom model wrapper in MODEL_WRAPPER_FILE"),
 }
+
+def apply_runtime_defaults(stub: dict[str, Any] = CONFIG_STUB) -> dict[str, Any]:
+    """Synchronize editable values with API defaults when the CLI is used.
+
+    The import is intentionally delayed because ``api._io`` imports the CLI
+    logging helpers while the package is being initialized.
+    """
+    from BUCToolkit.api._io import CONFIG_DEFAULTS
+    for key, default in CONFIG_DEFAULTS.items():
+        value = stub.get(key)
+        if isinstance(value, tuple) and len(value) == 3:
+            stub[key] = (copy.deepcopy(default), value[1], value[2])
+    return stub
