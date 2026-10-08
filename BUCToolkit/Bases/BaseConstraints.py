@@ -300,8 +300,8 @@ class BaseConstr(BaseIO):
             y = self._constr_val_func(t)
             if isinstance(y, (Tuple, List)):
                 y = th.vstack(y).mT
-            elif not self._constr_val_uses_c0:
-                y = y.reshape(-1, 1)
+            else:
+                y = y.view(self._constr_val_c0.shape)
 
             return y, y
 
