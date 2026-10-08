@@ -184,6 +184,17 @@ def constr_val(t: torch.Tensor) -> torch.Tensor:
     return (1.5 + 0.001 * t).reshape(1, 1)
 ```
 
+The callback may also accept the initial constraint value computed for the
+current run:
+
+```python
+def constr_val(t: torch.Tensor, c0: torch.Tensor) -> torch.Tensor:
+    return c0 + 0.001 * t
+```
+
+Here `c0` is recomputed by every `initialize()` call and remains fixed for the
+trajectory. The callback can be arbitrary and thus does not have to return `c0` at `t=0`.
+
 Both functions must be differentiable with respect to coordinates. In the
 CLI, omit `MD.CONSTRAINTS_VAL_FUNC` or set it to `null` to retain the initial
 value behavior.

@@ -182,6 +182,16 @@ def constr_val(t: torch.Tensor) -> torch.Tensor:
     return (1.5 + 0.001 * t).reshape(1, 1)
 ```
 
+constr_val函数也可以接收本次运行初始坐标计算出的约束值：
+
+```python
+def constr_val(t: torch.Tensor, c0: torch.Tensor) -> torch.Tensor:
+    return c0 + 0.001 * t
+```
+
+其中 `c0` 会在每次 `initialize()` 时重新计算，并在该轨迹中保持不变。
+constr_val的返回值可以是任意的，并不要求在 `t=0` 时精确返回 `c0`。
+
 两个函数都必须对坐标可微。CLI 中省略 `MD.CONSTRAINTS_VAL_FUNC` 或设为
 `null`，即可保持初始约束值行为。
 

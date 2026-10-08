@@ -63,6 +63,11 @@ class ConstrainedMolecularDynamics(_BaseAPI):
         self.config_file = config_file
         self._set_data_type(data_type)
         self.reload_config(config_file)
+        if type(self.BATCH_SIZE) is not int or self.BATCH_SIZE != 1:
+            raise ValueError(
+                '`BATCH_SIZE` must be the integer 1 for constrained molecular '
+                f'dynamics, but got {self.BATCH_SIZE}. BATCH_SIZE > 1 for CMD is not supported yet.'
+            )
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
@@ -120,10 +125,26 @@ class ConstrainedMolecularDynamics(_BaseAPI):
             raise RuntimeError(f'Images of configurations must be greater than 0, but got {self.N_IMAGES}.')
 
     def set_constr_func(self, constr_func: Callable) -> None:
+        r"""
+        Set the constraint function for CMD api. Details see `constr_func` of _BaseConstr.
+        Args:
+            constr_func: Callable of the constraints function: X \in R^n -> c \in R^k
+
+        Returns: None
+
+        """
         self.constr_func = constr_func
         pass
 
-    def set_constr_val(self, constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor) -> None:
+    def set_constr_val(self, constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor) -> None:
+        """
+        Set the constraint value for CMD api. Details see `constr_val` of _BaseConstr.
+        Args:
+            constr_val: A single value for static constraints, or a callable for time-dependent constraints.
+
+        Returns:
+
+        """
         self.constr_val = constr_val
         pass
 
@@ -218,10 +239,7 @@ class ConstrainedMolecularDynamics(_BaseAPI):
                     return n_batch_
 
                 def get_init_veloc(data):
-                    veloc = getattr(data, 'velocity', None)
-                    if veloc is not None:
-                        veloc = veloc.unsqueeze(0)
-                    return veloc
+                    return getattr(data, 'velocity', None)
 
                 def rebatched_graph(single_graph, X):
                     """ expand batches """
@@ -375,12 +393,14 @@ class ConstrainedMolecularDynamics(_BaseAPI):
                 X_init_ = linear_interpolation_tens(X_is, X_fs, self.N_IMAGES)
                 origin_elem_list = get_atomic_number(dataIS)
                 dataIS = rebatched_graph(dataIS, X_init_)
+                _init_V = get_init_veloc(dataIS)
+                _init_V = _init_V if _init_V is None else _init_V.reshape_as(X_init_)
 
                 mole_dynam.run(
                     model_wrap.Energy, X_init_,
                     [origin_elem_list] * self.N_IMAGES,
                     Cell_vector=np.repeat(_cell, self.N_IMAGES, axis=0),
-                    V_init=get_init_veloc(dataIS),
+                    V_init=_init_V,
                     grad_func=model_wrap.Grad,
                     func_args=(dataIS,), grad_func_args=(dataIS,),
                     is_grad_func_contain_y=False,
@@ -448,12 +468,14 @@ class ConstrainedMolecularDynamics(_BaseAPI):
                 X_init_ = X_is.unsqueeze(0).expand(self.N_IMAGES, *X_is.shape)
                 origin_elem_list = get_atomic_number(dataIS)
                 dataIS = rebatched_graph(dataIS, X_init_)
+                _init_V = get_init_veloc(dataIS)
+                _init_V = _init_V if _init_V is None else _init_V.reshape_as(X_init_)
 
                 mole_dynam.run(  #  Model not support the regular batch, although our code do.
                     model_wrap.Energy, X_init_,
                     [origin_elem_list] * self.N_IMAGES,
                     Cell_vector=np.repeat(_cell, self.N_IMAGES, axis=0),
-                    V_init=get_init_veloc(dataIS),
+                    V_init=_init_V,
                     grad_func=model_wrap.Grad,
                     func_args=(dataIS,), grad_func_args=(dataIS,),
                     is_grad_func_contain_y=False,

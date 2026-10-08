@@ -29,7 +29,6 @@ from BUCToolkit.api.DataLoaders import (
     PyGDataLoader,
     ISFSPyGDataLoader,
     MACEDataLoader,
-    ISFSMACEDataLoader,
 )
 import BUCToolkit.Preprocessing.load_files as load_files
 from BUCToolkit.cli.convert_data import main_convert
@@ -228,6 +227,16 @@ def parse_center_input_file(
     else:
         task_type = TASKS_TYPE_ALIAS[task_type]
 
+    md_config = config.get('MD', {})
+    cmd_scheme = md_config.get('CONSTR_MD_SCHEME', 'BLUE_MOON') if task_type == 'CMD' else None
+    if task_type == 'CMD':
+        batch_size = config.get('BATCH_SIZE', 1)
+        if type(batch_size) is not int or batch_size != 1:
+            raise ValueError(
+                '`BATCH_SIZE` must be the integer 1 for constrained molecular '
+                f'dynamics, but got {batch_size!r}.'
+            )
+
     model_type = str(config.get('MODEL_TYPE', 'pyg')).lower()
 
     # Section: load model
@@ -273,8 +282,6 @@ def parse_center_input_file(
     selected_indices = _selected_sample_indices(source_data, data_selector)
     data = source_data[selected_indices]
     is_shuffle = config.get('IS_SHUFFLE', False)
-    cmd_scheme = config.get('MD', {}).get('CONSTR_MD_SCHEME', 'BLUE_MOON') if task_type == 'CMD' else None
-
     if task_type == 'TRAIN':
         # handle the validation set data
         val_set_path = config.get('VAL_SET_PATH', None)
@@ -326,16 +333,7 @@ def parse_center_input_file(
         _validate_paired_structures(source_data, fs_data, 'FSDATA_PATH')
         fs_data = fs_data[selected_indices]
         converter = bt.preprocessing.CreateLoadableData(verbose=1)
-        if model_type == 'mace':
-            adapter = bt.utils.model_wrappers.MACEDataAdapter(
-                atomic_numbers=config['MODEL_CONFIG']['atomic_numbers'],
-                r_max=config['MODEL_CONFIG']['r_max'],
-                heads=config['MODEL_CONFIG'].get('heads'),
-                default_head=config['MODEL_CONFIG'].get('default_head'),
-            )
-            run_data = converter.to_isfs_mace_loader(data, fs_data, adapter)
-        else:
-            run_data = converter.to_isfs_pyg_loader(data, fs_data)
+        run_data = converter.to_isfs_pyg_loader(data, fs_data)
         dataset_args = (run_data,)
 
     elif task_type == 'CMD':
@@ -399,7 +397,7 @@ def parse_center_input_file(
         from BUCToolkit.api.DataLoaders import ExtProcDataLoader
         dataloader = ExtProcDataLoader
     elif task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):
-        dataloader = ISFSMACEDataLoader if model_type == 'mace' else ISFSPyGDataLoader
+        dataloader = ISFSPyGDataLoader
     elif model_type == 'mace' and task_type == 'TRAIN':
         dataloader = MACEDataLoader
     else:
@@ -415,7 +413,7 @@ def parse_center_input_file(
             **model_wrapper_config_override,
         }
     runner.set_dataset(*dataset_args, )  # type: ignore
-    if dataloader in {ISFSPyGDataLoader, ISFSMACEDataLoader}:
+    if dataloader is ISFSPyGDataLoader:
         dataloader_config = {}
     elif task_type == 'CMD':
         dataloader_config = {'shuffle': False}

@@ -575,7 +575,7 @@ MD:
   # Optional: constraints
   CONSTRAINTS_FILE: !!str ./constraints.py  # function file path of constraints. This function should receive torch.Tensors and support auto-grad.
   CONSTRAINTS_FUNC: !!str func              # the specific function name in `CONSTRAINTS_FILE`
-  CONSTRAINTS_VAL_FUNC: null                # optional time-dependent constr_val(t), loaded from CONSTRAINTS_FILE; null keeps the initial-value default
+  CONSTRAINTS_VAL_FUNC: null                # optional constr_val(t) or constr_val(t, c0), loaded from CONSTRAINTS_FILE; null keeps the initial-value default
   REQUIRE_GRAD: !!bool False  # see above
 
 # Monte Carlo
@@ -866,7 +866,8 @@ runner = bt.BatchMD.ConstrNVT(
   device=DEVICE,
   verbose=0
 )
-# `constr_val` can also be a Callable[[ScalarTensor], Tensor] to express the time-dependent constraints. 
+# `constr_val` can be `constr_val(t)` or `constr_val(t, c0)` for time-dependent
+# constraints; `c0` is `constr_func(X_init)` for the current initialization.
 
 runner.run(...)   # See the section `Using as a Python Package` above
 

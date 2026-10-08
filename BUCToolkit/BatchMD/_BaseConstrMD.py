@@ -31,8 +31,8 @@ class _BaseConstrMD(_BaseMD):
         max_step: int, maximum steps.
         T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k. It takes one or more arguments, one of which must be a Tensor, and returns one Tensor with shape (k, ). `None` for identity function. see example below.
-        constr_val: Callable[th.Tensor[1], th.Tensor] | th.Tensor, the constraint value of `constr_func`, i.e., constraints are `constr_func(X) = constr_val`.
-        By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor, it can be set to the time-dependent constraints.
+        constr_val: Callable[..., th.Tensor] | th.Tensor, the constraint value of `constr_func`, i.e., constraints are `constr_func(X) = constr_val`.
+        A time-dependent callback may be `constr_val(t)` or `constr_val(t, c0)`, where `c0` is `constr_func(X_init)` from the current initialization.
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
         output_structures_per_step: int, output structures per output_structures_per_step steps.
         device: str|torch.device, device that program rum on.
@@ -79,7 +79,7 @@ class _BaseConstrMD(_BaseMD):
             max_step: int,
             T_init: float = 298.15,
             constr_func: Callable | None = None,
-            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
+            constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
             require_fixman: bool = False,
             output_file: str | None = None,
@@ -176,6 +176,9 @@ class _BaseConstrMD(_BaseMD):
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
     ):
+        # Each run starts a fresh trajectory; reset the shared clock before
+        # BaseConstr evaluates a time-dependent target and its derivative.
+        self.time_now = th.scalar_tensor(0., device=self.device)
         # BaseConstr owns mass factors, lazy targets, eager validation,
         # Jacobian compilation, QR initialization, and X_cache.
         # Keeping that lifecycle in one public method prevents proxy users from
@@ -197,8 +200,6 @@ class _BaseConstrMD(_BaseMD):
             fixed_atom_tensor=fixed_atom_tensor,
             is_fix_mass_center=is_fix_mass_center,
         )
-        # re-initialise the `time_new` to ensure the constr value correct when calling `run` more than one time.
-        self.time_now = th.scalar_tensor(0., device=self.device)
         # Register selected constraint fields with correctly shaped prototypes.
         # Ordered dictionaries update repeated names without duplicating them.
         _n_batch = X.shape[0]

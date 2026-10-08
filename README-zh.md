@@ -549,7 +549,7 @@ MD:
   # 可选：约束
   CONSTRAINTS_FILE: !!str ./constraints.py  # 约束函数的文件路径，函数应接收 torch.Tensor 并支持自动梯度
   CONSTRAINTS_FUNC: !!str func              # CONSTRAINTS_FILE 中具体的函数名称
-  CONSTRAINTS_VAL_FUNC: null                # 可选的时间约束目标 constr_val(t)，从 CONSTRAINTS_FILE 加载；null 保持初始值默认行为
+  CONSTRAINTS_VAL_FUNC: null                # 可选的时间约束目标 constr_val(t) 或 constr_val(t, c0)，从 CONSTRAINTS_FILE 加载；null 默认固定为初始构型的约束函数值
   REQUIRE_GRAD: !!bool False  # 同上
 
 # 蒙特卡洛
@@ -819,7 +819,8 @@ runner = bt.BatchMD.ConstrNVT(
   device=DEVICE,
   verbose=0
 )
-# `constr_val` 也可以设为 Callable[[ScalarTensor], Tensor]，以表示时变约束。
+# `constr_val` 可以是 `constr_val(t)` 或 `constr_val(t, c0)` 以表示时变约束；
+# `c0` 是本次初始化中 `constr_func(X_init)` 的结果。
 
 runner.run(...)   # 见 `作为 Python 包使用` 一节
 

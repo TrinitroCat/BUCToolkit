@@ -26,7 +26,8 @@ class ConstrNVT(_BaseConstrMD):
         time_step: float, time per step (ps).
         max_step: int, maximum steps.
         constr_func: Callable[[th.Tensor], th.Tensor] = None, the constraint function.
-        constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on the accumulate time.
+        constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on time.
+            It may accept `(t)` or `(t, c0)` which `c0` is the initial constraint values.
         constr_threshold: float = 1e-5, the constraint error tolerance.
         require_fixman: bool = False, whether to calculate the Fixman term for constraint MD.
         thermostat: str, the thermostat of NVT ensemble.
@@ -52,7 +53,7 @@ class ConstrNVT(_BaseConstrMD):
             thermostat: Literal['Langevin', 'VR', 'Nose-Hoover', 'CSVR'],
             thermostat_config: Dict | None = None,
             constr_func: Callable[[th.Tensor], th.Tensor] = None,
-            constr_val: Callable[[th.Tensor], th.Tensor | Tuple[th.Tensor]] | th.Tensor = None,
+            constr_val: Callable[..., th.Tensor | Tuple[th.Tensor]] | th.Tensor = None,
             constr_threshold: float = 1e-5,
             require_fixman: bool = False,
             T_init: float = 298.15,
@@ -70,7 +71,8 @@ class ConstrNVT(_BaseConstrMD):
             time_step: float, time per step (ps).
             max_step: int, maximum steps.
             constr_func: Callable[[th.Tensor], th.Tensor] = None, the constraint function.
-            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on the accumulate time.
+            constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on time.
+                It may accept `(t)` or `(t, c0)` which `c0` is the initial constraint values.
             constr_threshold: float = 1e-5, the constraint error tolerance.
             require_fixman: bool = False, whether to calculate the Fixman term for constraint MD.
             thermostat: str, the thermostat of NVT ensemble.

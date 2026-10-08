@@ -139,7 +139,7 @@ CONFIG_STUB = {
         "REQUIRE_FIXMAN": ("auto", str, "`auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually"),
         "CONSTRAINTS_FILE": ("./constraints.py", str, "path to constraints function file"),
         "CONSTRAINTS_FUNC": ("func", str, "name of constraints function in CONSTRAINTS_FILE"),
-        "CONSTRAINTS_VAL_FUNC": (None, str, "optional name of constr_val(t) in CONSTRAINTS_FILE; null keeps the initial-value default"),
+        "CONSTRAINTS_VAL_FUNC": (None, str, "optional name of constr_val(t) or constr_val(t, c0) in CONSTRAINTS_FILE, where c0 is constr_func(X_init).  `null` keeps the initial-value default"),
         "REQUIRE_GRAD": (False, bool, "whether to toggle on auto-gradient during calculation"),
     },
 

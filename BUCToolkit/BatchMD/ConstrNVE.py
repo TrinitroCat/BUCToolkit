@@ -30,7 +30,8 @@ class ConstrNVE(_BaseConstrMD):
         time_step: float, time per step (ps).
         max_step: int, maximum steps.
         constr_func: Callable[[th.Tensor], th.Tensor] = None, the constraint function.
-        constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on the accumulate time.
+        constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on time.
+            It may accept `(t)` or `(t, c0)` which `c0` is the initial constraint values.
         constr_threshold: float = 1e-5, the constraint error tolerance.
         require_fixman: bool = False, whether to calculate the Fixman term for constraint MD.
         T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
@@ -53,7 +54,7 @@ class ConstrNVE(_BaseConstrMD):
             time_step: float,
             max_step: int,
             constr_func: Callable[[th.Tensor], th.Tensor] = None,
-            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor = None,
+            constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor = None,
             constr_threshold: float = 1e-5,
             require_fixman: bool = False,
             T_init: float = 298.15,

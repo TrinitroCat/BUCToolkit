@@ -15,6 +15,102 @@ def _distance_constraints(X: th.Tensor) -> th.Tensor:
 
 
 class BaseConstraintsRegressionTest(unittest.TestCase):
+    @staticmethod
+    def _single_coordinate_constraint(X: th.Tensor) -> th.Tensor:
+        """Return the first coordinate for each structure."""
+        return X[0, 0].reshape(1)
+
+    def _initialize_constraint(self, constr_val):
+        """Initialize a small CPU constraint fixture without compilation."""
+        X = th.tensor(
+            (
+                ((1., 0., 0.),),
+                ((2., 0., 0.),),
+            ),
+            dtype=th.float32,
+        )
+        constr = BaseConstr(
+            self._single_coordinate_constraint,
+            constr_val,
+            device='cpu',
+            verbose=0,
+        )
+        constr.initialize(
+            func=None,
+            X=X,
+            Element_list=None,
+            masses=th.ones_like(X),
+            compile_jacobian=False,
+        )
+        return constr, X
+
+    def test_binary_time_target_receives_initial_constraint_and_derivative(self):
+        """A binary target receives c0 and differentiates with respect to time."""
+        calls = []
+
+        def target(t: th.Tensor, c0: th.Tensor) -> th.Tensor:
+            calls.append(c0)
+            return c0 + 2. * t
+
+        constr, X = self._initialize_constraint(target)
+        c0 = th.tensor(((1.,), (2.,)), dtype=X.dtype)
+
+        self.assertTrue(th.allclose(calls[0], c0))
+        self.assertTrue(th.allclose(constr.constr_val_now, c0))
+        self.assertTrue(th.allclose(constr.d_constr, th.full_like(c0, 2.)))
+
+        constr._update_constr(th.tensor(0.5))
+        self.assertTrue(th.allclose(constr.constr_val_now, c0 + 1.))
+        self.assertTrue(th.allclose(constr.d_constr, th.full_like(c0, 2.)))
+
+    def test_binary_time_target_reinitialization_refreshes_c0(self):
+        """Each initialization binds the binary target to its new c0."""
+        def target(t: th.Tensor, c0: th.Tensor) -> th.Tensor:
+            return c0 + t
+
+        constr, X = self._initialize_constraint(target)
+        first_target = constr.constr_val_now.clone()
+
+        X_second = X + 3.
+        constr.initialize(
+            func=None,
+            X=X_second,
+            Element_list=None,
+            masses=th.ones_like(X_second),
+            compile_jacobian=False,
+        )
+
+        self.assertTrue(th.allclose(first_target, th.tensor(((1.,), (2.,)))))
+        self.assertTrue(th.allclose(
+            constr.constr_val_now,
+            th.tensor(((4.,), (5.,)), dtype=X.dtype),
+        ))
+
+    def test_unary_time_target_remains_compatible(self):
+        """The original constr_val(t) callback form remains supported."""
+        def target(t: th.Tensor) -> th.Tensor:
+            return (3. + t).reshape(1)
+
+        constr, _ = self._initialize_constraint(target)
+        self.assertTrue(th.allclose(constr.constr_val_now, th.tensor(((3.,),))))
+        self.assertTrue(th.allclose(constr.d_constr, th.ones_like(constr.constr_val_now)))
+
+    def test_time_target_type_error_from_body_is_not_signature_detection(self):
+        """A TypeError raised by the callback body propagates unchanged."""
+        def target(t: th.Tensor, c0: th.Tensor) -> th.Tensor:
+            raise TypeError('target body failure')
+
+        with self.assertRaisesRegex(TypeError, 'target body failure'):
+            self._initialize_constraint(target)
+
+    def test_binary_time_target_shape_mismatch_keeps_existing_error(self):
+        """Invalid target shapes still fail during initialization."""
+        def target(t: th.Tensor, c0: th.Tensor) -> th.Tensor:
+            return th.ones(3, dtype=c0.dtype)
+
+        with self.assertRaisesRegex(RuntimeError, 'same shape'):
+            self._initialize_constraint(target)
+
     def test_fixman_linear_constraint_has_zero_geometric_force(self):
         """A constant constraint Jacobian gives finite w and exactly zero G."""
         def linear_constraint(X: th.Tensor) -> th.Tensor:

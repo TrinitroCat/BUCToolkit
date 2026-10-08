@@ -3,6 +3,7 @@
 #  Version: 1.0b
 #  File: BaseConstraints.py
 #  Environment: Python 3.12
+import inspect
 import os
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
@@ -40,10 +41,11 @@ class BaseConstr(BaseIO):
         constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k.
             It takes one or more arguments, one of which must be a Tensor, and returns one Tensor with shape (k, ).
             `None` for constant function that always return [0., ]. It should support auto-gradient ops. see example below.
-        constr_val: Callable[th.Tensor[1], th.Tensor] | th.Tensor, the constraint value of `constr_func`,
+        constr_val: Callable[..., th.Tensor] | th.Tensor, the constraint value of `constr_func`,
             i.e., constraints are `constr_func(X) = constr_val`.
-            By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor,
-            it can be set to the time-dependent constraints.
+            A time-dependent callback may be `constr_val(t)` or
+            `constr_val(t, c0)`, where `t` is a scalar Tensor and `c0` is the
+            value of `constr_func(X_init)` computed at initialization.
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
         require_fixman: bool, whether to calculate fixman
         device: str|torch.device, device that program rum on.
@@ -77,7 +79,7 @@ class BaseConstr(BaseIO):
     def __init__(
             self,
             constr_func: Callable | None = None,
-            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
+            constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
             require_fixman: bool = False,
             device: str | th.device = 'cpu',
@@ -91,6 +93,9 @@ class BaseConstr(BaseIO):
         self.time_now = th.scalar_tensor(0., device=device)
         self.is_const_constr = False
         self.constr_val_func_raw = None
+        self._constr_val_func = None
+        self._constr_val_uses_c0 = False
+        self._constr_val_c0 = None
         self.time_step = 1.
         self.require_fixman = require_fixman
 
@@ -101,7 +106,7 @@ class BaseConstr(BaseIO):
         elif callable(constr_val):
             self.is_const_constr = False
             self.constr_val_func_raw = constr_val
-            self.constr_val_now = constr_val(self.time_now)
+            self.constr_val_now = None
         elif constr_val is None:
             self.is_const_constr = True
             self.constr_val_func_raw = None
@@ -194,6 +199,8 @@ class BaseConstr(BaseIO):
 
         Raises:
             TypeError: If ``compile_jacobian`` is not ``bool``.
+                Also raised when a time-dependent ``constr_val`` callback has
+                no inspectable signature accepting ``(t)`` or ``(t, c0)``.
             RuntimeError: If ``constr_val`` and ``constr_func(X)`` have
                 different shapes.
             ValueError: If the batched constraint residual is not two-dimensional.
@@ -205,10 +212,36 @@ class BaseConstr(BaseIO):
         if masses is None: masses = th.ones_like(X)
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
-        self._update_constr(self.time_now)
         _y_check = th.vmap(self.constr_func)(X)
         if self._lazy_calc_constr_val:
             self.constr_val_now = _y_check
+        elif not self.is_const_constr:
+            # Keep the initial target as a detached, immutable run reference;
+            # later time updates must not retain the coordinate autograd graph.
+            self._constr_val_c0 = _y_check.detach().clone()
+            try:
+                constr_val_signature = inspect.signature(self.constr_val_func_raw)
+            except (TypeError, ValueError) as error:
+                raise TypeError(
+                    '`constr_val` must have an inspectable signature accepting '
+                    '(t) or (t, c0).'
+                ) from error
+
+            try:
+                constr_val_signature.bind(self.time_now, self._constr_val_c0)
+            except TypeError:
+                try:
+                    constr_val_signature.bind(self.time_now)
+                except TypeError as unary_error:
+                    raise TypeError(
+                        '`constr_val` must accept either (t) or (t, c0).'
+                    ) from unary_error
+                self._constr_val_uses_c0 = False
+                self._constr_val_func = self.constr_val_func_raw
+            else:
+                self._constr_val_uses_c0 = True
+                self._constr_val_func = lambda t: self.constr_val_func_raw(t, self._constr_val_c0)
+            self._update_constr(self.time_now)
         if self.verbose > 0:
             self.logger.info(
                 f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
@@ -264,10 +297,10 @@ class BaseConstr(BaseIO):
         if self.is_const_constr:
             return None
         else:
-            y = self.constr_val_func_raw(t)
+            y = self._constr_val_func(t)
             if isinstance(y, (Tuple, List)):
                 y = th.vstack(y).mT
-            else:
+            elif not self._constr_val_uses_c0:
                 y = y.reshape(-1, 1)
 
             return y, y
