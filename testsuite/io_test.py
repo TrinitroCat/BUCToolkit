@@ -91,7 +91,7 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         bs_outcar.write2text(poscar_dir, file_format='POSCAR', n_core=2)
         bs_poscar = POSCARs2Feat(poscar_dir, verbose=0)
-        bs_poscar.read(n_core=2)
+        bs_poscar.read()
         assert len(bs_poscar) == n_structs, \
             f'POSCAR count mismatch: {len(bs_poscar)} vs {n_structs}'
         pos_sigs = [_build_signature(e, n)
