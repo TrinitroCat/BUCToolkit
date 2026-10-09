@@ -10,6 +10,7 @@ import os
 import tarfile
 import shutil
 import random
+from contextlib import nullcontext
 from typing import List
 
 import numpy as np
@@ -353,18 +354,25 @@ MODEL_CONFIG:
 """)
 
 
-def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> List[str]:
+def run_api_tests(
+    tmp_base: str = '/dev/shm',
+    config: dict | None = None,
+    profile_section=None,
+) -> List[str]:
     r"""Run Trainer + Predictor tests and return error messages.
 
     Args:
         tmp_base: Temporary output directory used by generated API inputs.
         config: Optional iteration configuration from the central YAML file.
+        profile_section: Optional context factory used to profile one API
+            operation without profiling data preparation or result checks.
 
     Return:
         A list of error messages; an empty list means all API checks passed.
     """
     errors = []
     config = config or {}
+    profile_section = profile_section or (lambda _name: nullcontext())
     train_epochs = config.get('train_epochs', 3)
     opt_maxiter = config.get('opt_maxiter', 100)
     md_max_step = config.get('md_max_step', 200)
@@ -458,7 +466,10 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
                 trainer.set_loss_fn(loss_cls, {})
                 trainer.set_optimizer(opt_cls, opt_cfg)
                 trainer.OUTPUT_POSTFIX = trainer.OUTPUT_POSTFIX + '_' + opt_name
-                trainer.train(GNNLJDirectionalEAM)
+                with profile_section(
+                    f'test_APIS.Trainer.{loss_name}_{opt_name}.04samp'
+                ):
+                    trainer.train(GNNLJDirectionalEAM)
 
                 print(f'    {loss_name} + {opt_name} OK')
 
@@ -477,7 +488,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
             {'data': data_list[:12], 'labels': {'energy': energies[:12], 'forces': forces[:12]}},
         )
         predictor.set_dataloader(PyGDataLoader, {'shuffle': False})
-        predictor.predict(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.Predictor.04samp'):
+            predictor.predict(GNNLJDirectionalEAM)
 
         print(f'  Predictor: {min(12, n_use)} structures OK')
 
@@ -493,7 +505,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         optimizer = StructureOptimization(opt_inp)
         optimizer.set_dataset(opt_data)
         optimizer.set_dataloader(PyGDataLoader)
-        optimizer.relax(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.OPT.04samp'):
+            optimizer.relax(GNNLJDirectionalEAM)
         print(f'  StructureOptimization: {min(12, n_use)} structures OK')
 
         # ----------------------------------------------------------------
@@ -508,7 +521,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         runner = MolecularDynamics(md_inp)
         runner.set_dataset(md_data)
         runner.set_dataloader(PyGDataLoader)
-        runner.run(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.MD.04samp'):
+            runner.run(GNNLJDirectionalEAM)
         print(f'  MolecularDynamics: {min(12, n_use)} structures OK')
 
         # ----------------------------------------------------------------
@@ -523,7 +537,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         runner_mc = MonteCarlo(mc_inp)
         runner_mc.set_dataset(mc_data)
         runner_mc.set_dataloader(PyGDataLoader)
-        runner_mc.run(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.MC.04samp'):
+            runner_mc.run(GNNLJDirectionalEAM)
         print(f'  MonteCarlo: {min(12, n_use)} structures OK')
 
         # ----------------------------------------------------------------
@@ -535,7 +550,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         runner_vib = VibrationAnalysis(vib_inp)
         runner_vib.set_dataset(vib_data)
         runner_vib.set_dataloader(PyGDataLoader, {'shuffle': False})
-        runner_vib.run(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.VIB.01samp'):
+            runner_vib.run(GNNLJDirectionalEAM)
         print(f'  VibrationAnalysis: {min(12, n_use)} structures OK')
 
         # ----------------------------------------------------------------
@@ -555,7 +571,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
 
         runner_cmd.set_dataset(cmd_data)
         runner_cmd.set_dataloader(PyGDataLoader)
-        runner_cmd.run(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.CMD.01samp'):
+            runner_cmd.run(GNNLJDirectionalEAM)
         print(f'  ConstrainedMD (Slow-growth): {min(12, n_use)} structures OK')
 
         # ----------------------------------------------------------------
@@ -574,7 +591,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         runner_neb = ClimbingImageNudgedElasticBand(neb_inp)
         runner_neb.set_dataset(neb_data)
         runner_neb.set_dataloader(ISFSPyGDataLoader, )
-        runner_neb.run(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.NEB.01samp'):
+            runner_neb.run(GNNLJDirectionalEAM)
         print(f'  NEB: 2 bands OK')
 
         # ----------------------------------------------------------------
@@ -595,7 +613,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
 
         runner_cmd.set_dataset(blum_data)
         runner_cmd.set_dataloader(ISFSPyGDataLoader)
-        runner_cmd.run(GNNLJDirectionalEAM)
+        with profile_section('test_APIS.CMD.01samp'):
+            runner_cmd.run(GNNLJDirectionalEAM)
         print(f'  ConstrainedMD (Blue-Moon): {min(12, n_use)} structures OK')
 
         # ----------------------------------------------------------------
@@ -607,7 +626,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         runner_ts = StructureOptimization(ts_inp)
         runner_ts.set_dataset(ts_data)
         runner_ts.set_dataloader(PyGDataLoader)
-        runner_ts.run(GNNLJDirectionalEAM, mode='ts')
+        with profile_section('test_APIS.TS.04samp'):
+            runner_ts.run(GNNLJDirectionalEAM, mode='ts')
         print(f'  TS(DIMER): {min(12, n_use)} structures OK')
 
     except Exception as e:

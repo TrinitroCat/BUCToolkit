@@ -158,7 +158,7 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
         config.setdefault(key, copy.deepcopy(value))
 
     for field in ("TASK", "DATA_TYPE", "MODEL_TYPE", "MODEL_WRAPPER_NAME"):
-        if field in config and not isinstance(config[field], str):
+        if (field in config) and (config[field] is not None) and not isinstance(config[field], str):
             raise _field_error(
                 TypeError,
                 input_path,
@@ -171,6 +171,8 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
         if field not in config:
             continue
         value = config[field]
+        if value is None:
+            continue
         if not isinstance(value, str):
             raise _field_error(
                 TypeError,
@@ -196,6 +198,8 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
         if field not in section_config:
             continue
         value = section_config[field]
+        if value is None:
+            continue
         if not isinstance(value, str):
             raise _field_error(
                 TypeError,

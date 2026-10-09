@@ -122,7 +122,7 @@ class _CONFIGS(object):
         """
         Set the new configs (hyperparameters) of model.
         """
-        if model_config is None: model_config = dict()
+        self._MODEL_CONFIG_FROM_CHECKPOINT = model_config is None
         self.MODEL_CONFIG = model_config
 
     def set_output(self, output_path: str, prediction_path: str | None = None) -> None:
@@ -329,6 +329,8 @@ class _CONFIGS(object):
         if self.VERBOSE > 1:
             self.logger.info(f'\tHYPER-PARAMETERS:')
             model_config = self.MODEL_CONFIG if model_hyperparam is None else model_hyperparam['MODEL_CONFIG']
+            if model_config is None:
+                model_config = dict()
             for hp, hpv in model_config.items():
                 self.logger.info(f'\t\t{hp}: {hpv}')
             if isinstance(checkpoint_hyperparam, dict):
@@ -532,25 +534,29 @@ class _CONFIGS(object):
         # model info
         self.MODEL_NAME: str = self.config.get('MODEL_NAME', 'Untitled')
         if not isinstance(self.MODEL_NAME, str): raise TypeError('MODEL_NAME must be a str.')
-        self.MODEL_CONFIG = self.config.get('MODEL_CONFIG', dict())
-        if not isinstance(self.MODEL_CONFIG, Dict): raise ValueError('MODEL_CONFIG must be a dictionary.')
+        model_config = self.config.get('MODEL_CONFIG')
+        self._MODEL_CONFIG_FROM_CHECKPOINT = model_config is None
+        self.MODEL_CONFIG = model_config
+        if self.MODEL_CONFIG is not None and not isinstance(self.MODEL_CONFIG, Dict):
+            raise ValueError('MODEL_CONFIG must be a dictionary or null.')
         self.MODEL_TYPE = str(self.config.get('MODEL_TYPE', CONFIG_DEFAULTS['MODEL_TYPE'])).lower()
         if self.MODEL_TYPE not in self._CURRENT_MODEL_TYPES:
             raise ValueError(
                 f"`MODEL_TYPE` must be one of {self._CURRENT_MODEL_TYPES}, "
                 f"but got {self.MODEL_TYPE}."
             )
-        self.MODEL_WRAPPER_CONFIG = self.config.get('MODEL_WRAPPER_CONFIG', dict())
+        self.MODEL_WRAPPER_CONFIG = self.config.get('MODEL_WRAPPER_CONFIG')
+        if self.MODEL_WRAPPER_CONFIG is None:
+            self.MODEL_WRAPPER_CONFIG = dict()
         if not isinstance(self.MODEL_WRAPPER_CONFIG, Dict):
             raise TypeError('`MODEL_WRAPPER_CONFIG` must be a dictionary.')
         self.MODEL_WRAPPER_FILE = self.config.get('MODEL_WRAPPER_FILE', None)
         self.MODEL_WRAPPER_NAME = self.config.get('MODEL_WRAPPER_NAME', None)
-        if self.MODEL_TYPE == 'custom':
-            if not isinstance(self.MODEL_WRAPPER_FILE, str):
-                raise ValueError('`MODEL_WRAPPER_FILE` is required when `MODEL_TYPE` is custom.')
-            if not isinstance(self.MODEL_WRAPPER_NAME, str):
-                raise ValueError('`MODEL_WRAPPER_NAME` is required when `MODEL_TYPE` is custom.')
-        elif self.MODEL_WRAPPER_FILE is not None or self.MODEL_WRAPPER_NAME is not None:
+        if self.MODEL_WRAPPER_FILE is not None and not isinstance(self.MODEL_WRAPPER_FILE, str):
+            raise TypeError('`MODEL_WRAPPER_FILE` must be a string or null.')
+        if self.MODEL_WRAPPER_NAME is not None and not isinstance(self.MODEL_WRAPPER_NAME, str):
+            raise TypeError('`MODEL_WRAPPER_NAME` must be a string or null.')
+        if self.MODEL_TYPE != 'custom' and (self.MODEL_WRAPPER_FILE is not None or self.MODEL_WRAPPER_NAME is not None):
             warnings.warn(
                 '`MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME` are only used with '
                 '`MODEL_TYPE=custom`.',
@@ -563,10 +569,11 @@ class _CONFIGS(object):
         self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', True)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
             raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but got {type(self.SAVE_PREDICTIONS)}.')
-        self._PREDICTIONS_SAVE_FILE = self.config.get(
-            'PREDICTIONS_SAVE_FILE',
-            os.path.join(self.config['OUTPUT_ROOT'], 'results', 'result'),
-        )
+        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE')
+        if self._PREDICTIONS_SAVE_FILE is None:
+            self._PREDICTIONS_SAVE_FILE = os.path.join(
+                self.config['OUTPUT_ROOT'], 'results', 'result'
+            )
         if self.SAVE_PREDICTIONS:
             if not isinstance(self._PREDICTIONS_SAVE_FILE, str):
                 raise TypeError(
@@ -587,9 +594,9 @@ class _CONFIGS(object):
             os.makedirs(os.path.dirname(self.PREDICTIONS_SAVE_FILE) or '.', exist_ok=True)
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
         if self.REDIRECT:
-            self.OUTPUT_PATH = self.config.get(
-                'OUTPUT_PATH', os.path.join(self.config['OUTPUT_ROOT'], 'logs')
-            )
+            self.OUTPUT_PATH = self.config.get('OUTPUT_PATH')
+            if self.OUTPUT_PATH is None:
+                self.OUTPUT_PATH = os.path.join(self.config['OUTPUT_ROOT'], 'logs')
             self.OUTPUT_POSTFIX = self.config.get('OUTPUT_POSTFIX', CONFIG_DEFAULTS['OUTPUT_POSTFIX'])
 
         # debug mode
@@ -702,7 +709,13 @@ class _BaseAPI(_CONFIGS):
         return merged, conflicts, union_notes
 
     def _checkpoint_hyperparameters(self, chk_hyperparam):
-        """Merge checkpoint MODEL metadata with input MODEL configuration."""
+        """Merge checkpoint MODEL metadata with input MODEL configuration.
+
+        ``MODEL_CONFIG: null`` (or an omitted field) means that the model
+        configuration is supplied by the checkpoint when available.  An
+        explicitly provided mapping continues to use the normal recursive
+        conflict-resolution strategy.
+        """
         input_hyperparam = self._current_model_hyperparameters()
         if chk_hyperparam is None:
             self.logger.info('Checkpoint hyperparameters were not found; input MODEL configuration will be used.')
@@ -714,7 +727,21 @@ class _BaseAPI(_CONFIGS):
         if not isinstance(chk_model, dict):
             self.logger.warning('Checkpoint MODEL hyperparameters have an invalid format; input MODEL configuration will be used.')
             return input_hyperparam
-        merged, conflicts, union_notes = self._merge_model_hyperparameters(input_hyperparam, chk_model)
+        chk_model_for_merge = chk_model
+        if self._MODEL_CONFIG_FROM_CHECKPOINT:
+            checkpoint_model_config = chk_model.get('MODEL_CONFIG')
+            if isinstance(checkpoint_model_config, dict):
+                input_hyperparam['MODEL_CONFIG'] = copy.deepcopy(checkpoint_model_config)
+            else:
+                chk_model_for_merge = {
+                    key: value for key, value in chk_model.items()
+                    if key != 'MODEL_CONFIG'
+                }
+                if checkpoint_model_config is not None:
+                    self.logger.warning(
+                        'Checkpoint MODEL_CONFIG has an invalid format; input MODEL configuration will be used.'
+                    )
+        merged, conflicts, union_notes = self._merge_model_hyperparameters(input_hyperparam, chk_model_for_merge)
         if conflicts:
             self.logger.warning(
                 'Checkpoint MODEL hyperparameters differ from input; checkpoint values will be used:\n'
@@ -752,6 +779,8 @@ class _BaseAPI(_CONFIGS):
         model_type = hyperparam['MODEL_TYPE']
         model_config = hyperparam['MODEL_CONFIG']
         model_wrapper_config = hyperparam['MODEL_WRAPPER_CONFIG']
+        if model_config is None:
+            model_config = dict()
         if model_type == 'vasp':
             from BUCToolkit.utils.model_wrappers import VASP_PluginModel
             return VASP_PluginModel(**model_wrapper_config)
@@ -776,7 +805,7 @@ class _BaseAPI(_CONFIGS):
             A wrapper exposing the standard ``Energy`` and ``Grad`` protocol.
 
         Raises:
-            ValueError: If a custom wrapper configuration is incomplete.
+            ValueError: If a configured custom wrapper import is incomplete.
         """
         if hyperparam is None:
             hyperparam = {
@@ -803,6 +832,19 @@ class _BaseAPI(_CONFIGS):
             }
             return model
         if model_type == 'custom':
+            if self.MODEL_WRAPPER_FILE is None and self.MODEL_WRAPPER_NAME is None:
+                if isinstance(model, _BaseWrapper):
+                    return model
+                raise ValueError(
+                    '`MODEL_TYPE=custom` requires both `MODEL_WRAPPER_FILE` and '
+                    '`MODEL_WRAPPER_NAME`, unless the supplied model already '
+                    'implements `_BaseWrapper`.'
+                )
+            if self.MODEL_WRAPPER_FILE is None or self.MODEL_WRAPPER_NAME is None:
+                raise ValueError(
+                    '`MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME` must be '
+                    'provided together for a file-based custom wrapper.'
+                )
             from BUCToolkit.cli.main import load_model
             wrapper_class = load_model(self.MODEL_WRAPPER_FILE, self.MODEL_WRAPPER_NAME)
             wrapper = wrapper_class(model, **model_wrapper_config)

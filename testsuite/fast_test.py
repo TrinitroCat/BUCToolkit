@@ -8,6 +8,7 @@ import unittest
 import os
 import glob
 import sys
+from contextlib import nullcontext
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # add BUCToolkit root to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -94,6 +95,18 @@ class FastTest(unittest.TestCase):
             Configuration mapping for the requested test.
         """
         return get_test_section(self.test_config, test_name)
+
+    def _profile_section(self, name: str | None):
+        """Return the profiling context for one calculation section.
+
+        Args:
+            name: Section label, or ``None`` when the section is not sampled.
+
+        Return:
+            A context manager.  The fast suite uses a no-op context; the
+            profile suite overrides this method with the Torch profiler.
+        """
+        return nullcontext()
 
     def test_Train(self):
         """
@@ -199,22 +212,25 @@ class FastTest(unittest.TestCase):
             print("*"*89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*"*89 + '\n')
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
-            runner.run(
-                model_test.Energy,
-                _data.pos,
-                elem_list,
-                None,
-                None,
-                model_test.Grad,
-                (_data, ),
-                None,
-                (_data, ),
-                None,
-                False,
-                self.REQUIRE_GRAD,
-                [len(_.pos) for _ in _data.to_data_list()],
-                move_to_center_freq=-1
-            )
+            with self._profile_section(
+                f'test_MD.MD.{len(_data.to_data_list()):02d}samp'
+            ):
+                runner.run(
+                    model_test.Energy,
+                    _data.pos,
+                    elem_list,
+                    None,
+                    None,
+                    model_test.Grad,
+                    (_data, ),
+                    None,
+                    (_data, ),
+                    None,
+                    False,
+                    self.REQUIRE_GRAD,
+                    [len(_.pos) for _ in _data.to_data_list()],
+                    move_to_center_freq=-1
+                )
             th.cuda.synchronize()
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
             fbs = read_md_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
@@ -386,19 +402,22 @@ class FastTest(unittest.TestCase):
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             t_st = time.perf_counter()
-            runner.run(
-                model_test.Energy,
-                _pos,           # X: (B, N, 3) — regular batch
-                elem_list,
-                None, None,
-                model_test.Grad,
-                (_graph,),      # graph with pos0, batch
-                None,
-                (_graph,), None,
-                False, False,   # is_grad_contain_y, require_grad
-                None,           # batch_indices=None → regular batch
-                move_to_center_freq=-1
-            )
+            with self._profile_section(
+                f'test_CMD.CMD.{len(data_list):02d}samp'
+            ):
+                runner.run(
+                    model_test.Energy,
+                    _pos,           # X: (B, N, 3) — regular batch
+                    elem_list,
+                    None, None,
+                    model_test.Grad,
+                    (_graph,),      # graph with pos0, batch
+                    None,
+                    (_graph,), None,
+                    False, False,   # is_grad_contain_y, require_grad
+                    None,           # batch_indices=None → regular batch
+                    move_to_center_freq=-1
+                )
             if runner.device.type == 'cuda':
                 th.cuda.synchronize()
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
@@ -518,17 +537,20 @@ class FastTest(unittest.TestCase):
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
-            runner.run(
-                model_test.Energy,
-                _data.pos,
-                elem_list,
-                None,
-                (_data,),
-                None,
-                [len(_.pos) for _ in _data.to_data_list()],
-                fixed_atom_tensor=None,
-                move_to_center_freq=-1
-            )
+            with self._profile_section(
+                f'test_MC.MC.{len(_data.to_data_list()):02d}samp'
+            ):
+                runner.run(
+                    model_test.Energy,
+                    _data.pos,
+                    elem_list,
+                    None,
+                    (_data,),
+                    None,
+                    [len(_.pos) for _ in _data.to_data_list()],
+                    fixed_atom_tensor=None,
+                    move_to_center_freq=-1
+                )
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
             # validation
             fbs = read_mc_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
@@ -738,20 +760,23 @@ class FastTest(unittest.TestCase):
             # set dump metadata
             _atm_per_struct = [[26] * (8**3), [13] * (5**3), [46] * (10**3)]
             runner.set_system_info(atomic_numbers=_atm_per_struct)
-            y, x_min, g = runner.run(
-                model_test.Energy,
-                _data.pos,
-                model_test.Grad,
-                (_data,),
-                None,
-                (_data, ),
-                None,
-                False,
-                self.REQUIRE_GRAD,
-                True,
-                None,
-                [len(_.pos) for _ in _data.to_data_list()],
-            )
+            with self._profile_section(
+                f'test_OPT.OPT.{len(_data.to_data_list()):02d}samp'
+            ):
+                y, x_min, g = runner.run(
+                    model_test.Energy,
+                    _data.pos,
+                    model_test.Grad,
+                    (_data,),
+                    None,
+                    (_data, ),
+                    None,
+                    False,
+                    self.REQUIRE_GRAD,
+                    True,
+                    None,
+                    [len(_.pos) for _ in _data.to_data_list()],
+                )
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s\n")
             # validation
             ene1, ene2, ene3 = y[0], y[1], y[2]
@@ -878,9 +903,10 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); dimer.set_batch_updater(updater)
             t_st = time.perf_counter()
-            y_d, X_d = dimer.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
-                               grad_func_args=(data,), batch_indices=bi,
-                               is_grad_func_contain_y=False, require_grad=False)
+            with self._profile_section(f'test_TS.TS.{len(bi):02d}samp'):
+                y_d, X_d = dimer.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                                   grad_func_args=(data,), batch_indices=bi,
+                                   is_grad_func_contain_y=False, require_grad=False)
             th.cuda.synchronize()
             print(
                 f'  [{dtp}] Dimer:          E={float(y_d.abs().max()):.6e}, |X|={float(X_d.abs().max()):.6e}, '
@@ -900,9 +926,10 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); kn.set_batch_updater(updater)
             t_st = time.perf_counter()
-            y_kn, X_kn = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
-                                grad_func_args=(data,), batch_indices=bi,
-                                is_grad_func_contain_y=False, require_grad=False)
+            with self._profile_section(f'test_TS.TS.{len(bi):02d}samp'):
+                y_kn, X_kn = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                                    grad_func_args=(data,), batch_indices=bi,
+                                    is_grad_func_contain_y=False, require_grad=False)
             th.cuda.synchronize()
             print(
                 f'  [{dtp}] KrylovNewton:   E={float(y_kn.abs().max()):.6e}, |X|={float(X_kn.abs().max()):.6e}, '
@@ -922,9 +949,10 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); kd.set_batch_updater(updater)
             t_st = time.perf_counter()
-            y_kd, X_kd = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
-                                grad_func_args=(data,), batch_indices=bi,
-                                is_grad_func_contain_y=False, require_grad=False, extra_krylov_dim=1)
+            with self._profile_section(f'test_TS.TS.{len(bi):02d}samp'):
+                y_kd, X_kd = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                                    grad_func_args=(data,), batch_indices=bi,
+                                    is_grad_func_contain_y=False, require_grad=False, extra_krylov_dim=1)
             th.cuda.synchronize()
             print(
                 f'  [{dtp}] KrylovDynamics: E={float(y_kd.abs().max()):.6e}, |X|={float(X_kd.abs().max()):.6e}, '
@@ -1021,13 +1049,16 @@ class FastTest(unittest.TestCase):
                             dump_hessian=True,
                         )
                         try:
-                            frequencies, normal_mode = calculator.normal_mode(
-                                energy,
-                                coordinates.clone(),
-                                grad_func=gradient,
-                                fixed_atom_tensor=free_atom_mask,
-                                save_hessian=True,
-                            )
+                            with self._profile_section(
+                                f'test_VIB.VIB.{1:02d}samp'
+                            ):
+                                frequencies, normal_mode = calculator.normal_mode(
+                                    energy,
+                                    coordinates.clone(),
+                                    grad_func=gradient,
+                                    fixed_atom_tensor=free_atom_mask,
+                                    save_hessian=True,
+                                )
                         finally:
                             calculator.dumper.close()
 
@@ -1078,11 +1109,14 @@ class FastTest(unittest.TestCase):
         try:
             for n_atom in (7, 8):
                 coordinates = th.zeros(n_atom, 3)
-                calculator.normal_mode(
-                    lambda X: X.square().sum(dim=(-2, -1)),
-                    coordinates,
-                    grad_func=lambda X: 2. * X,
-                )
+                with self._profile_section(
+                    f'test_VIB.VIB.{n_atom:02d}samp'
+                ):
+                    calculator.normal_mode(
+                        lambda X: X.square().sum(dim=(-2, -1)),
+                        coordinates,
+                        grad_func=lambda X: 2. * X,
+                    )
         finally:
             calculator.dumper.close()
         dumped = read_freq(output_file)
@@ -1287,7 +1321,9 @@ class FastTest(unittest.TestCase):
         for name, runner in runners.items():
             print(f"TASK: {name} started... ")
             # main loop
-            for i in range(1, len(SMALL_BATCHES)+1, 4):
+            for batch_iteration, i in enumerate(
+                range(1, len(SMALL_BATCHES) + 1, 4)
+            ):
                 # handle inp data
                 ATOMS = SMALL_BATCHES[:i]
                 data = build_cubic_lattice_batch(ATOMS, 3., 1.)
@@ -1301,61 +1337,76 @@ class FastTest(unittest.TestCase):
                 # running
                 _data = data.to(runner.device).clone()
                 t_st = time.perf_counter()
+                profile_name = (
+                    f'test_parallel.OPT.{i:02d}samp'
+                    if batch_iteration % 4 == 0 else None
+                )
                 if name.startswith('opt_'):
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
                     updater = PygBatchUpdater()
                     updater.initialize()
                     runner.set_batch_updater(updater, updater)
                     runner: FIRE
-                    y, x_min, g = runner.run(
-                        model_test.Energy,
-                        _data.pos,
-                        model_test.Grad,
-                        (_data,),
-                        None,
-                        (_data,),
-                        None,
-                        False,
-                        self.REQUIRE_GRAD,
-                        True,
-                        None,
-                        [len(_.pos) for _ in _data.to_data_list()],
-                    )
+                    with self._profile_section(profile_name):
+                        y, x_min, g = runner.run(
+                            model_test.Energy,
+                            _data.pos,
+                            model_test.Grad,
+                            (_data,),
+                            None,
+                            (_data,),
+                            None,
+                            False,
+                            self.REQUIRE_GRAD,
+                            True,
+                            None,
+                            [len(_.pos) for _ in _data.to_data_list()],
+                        )
                     th.cuda.synchronize()
 
                 elif name.startswith('md_'):
                     runner: NVT
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
-                    runner.run(
-                        model_test.Energy,
-                        _data.pos,
-                        elem_list,
-                        None,
-                        None,
-                        model_test.Grad,
-                        (_data,),
-                        None,
-                        (_data,),
-                        None,
-                        False,
-                        self.REQUIRE_GRAD,
-                        [len(_.pos) for _ in _data.to_data_list()],
-                        move_to_center_freq=-1
+                    profile_name = (
+                        f'test_parallel.MD.{i:02d}samp'
+                        if batch_iteration % 4 == 0 else None
                     )
+                    with self._profile_section(profile_name):
+                        runner.run(
+                            model_test.Energy,
+                            _data.pos,
+                            elem_list,
+                            None,
+                            None,
+                            model_test.Grad,
+                            (_data,),
+                            None,
+                            (_data,),
+                            None,
+                            False,
+                            self.REQUIRE_GRAD,
+                            [len(_.pos) for _ in _data.to_data_list()],
+                            move_to_center_freq=-1
+                        )
                     th.cuda.synchronize()
 
                 elif name.startswith('mc_'):
                     runner: MMC
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
-                    runner.run(
-                        model_test.Energy,
-                        _data.pos,
-                        elem_list,
-                        None,
-                        func_args=(_data,),
-                        batch_indices=[len(_.pos) for _ in _data.to_data_list()],
-                        move_to_center_freq=-1
+                    profile_name = (
+                        f'test_parallel.MC.{i:02d}samp'
+                        if batch_iteration % 4 == 0 else None
                     )
+                    with self._profile_section(profile_name):
+                        runner.run(
+                            model_test.Energy,
+                            _data.pos,
+                            elem_list,
+                            None,
+                            func_args=(_data,),
+                            batch_indices=[len(_.pos) for _ in _data.to_data_list()],
+                            move_to_center_freq=-1
+                        )
 
                 print(
                     f"BATCH SIZE: {i}, ATOMS: {sum(_ ** 3 for _ in ATOMS)}. "
@@ -1382,7 +1433,11 @@ class FastTest(unittest.TestCase):
         tmp = self.out_pt
         try:
             from test_apis import run_api_tests
-            errors = run_api_tests(tmp, config=self._config('test_APIS'))
+            errors = run_api_tests(
+                tmp,
+                config=self._config('test_APIS'),
+                profile_section=self._profile_section,
+            )
             if errors:
                 self.fail('\n'.join(errors))
         finally:
