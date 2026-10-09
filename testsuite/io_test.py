@@ -73,7 +73,7 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         _untar(outcar_dir)
         bs_outcar = OUTCAR2Feat(outcar_dir, verbose=0)
-        bs_outcar.read()
+        bs_outcar.read(n_core=2)
         n_structs = len(bs_outcar)
         assert n_structs > 0, 'No structures read from OUTCARs'
         print(f'  OUTCAR read: {n_structs} structures')
@@ -89,9 +89,9 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         # Step 2: Write POSCAR → read back → compare element/cell identity
         # ----------------------------------------------------------------
-        bs_outcar.write2text(poscar_dir, file_format='POSCAR')
+        bs_outcar.write2text(poscar_dir, file_format='POSCAR', n_core=2)
         bs_poscar = POSCARs2Feat(poscar_dir, verbose=0)
-        bs_poscar.read()
+        bs_poscar.read(n_core=2)
         assert len(bs_poscar) == n_structs, \
             f'POSCAR count mismatch: {len(bs_poscar)} vs {n_structs}'
         pos_sigs = [_build_signature(e, n)
@@ -105,9 +105,9 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         # Step 3: Write CIF → read back → compare element/cell identity
         # ----------------------------------------------------------------
-        bs_outcar.write2text(cif_dir, file_format='cif')
+        bs_outcar.write2text(cif_dir, file_format='cif', n_core=2)
         bs_cif = Cif2Feat(cif_dir, verbose=0)
-        bs_cif.read()
+        bs_cif.read(n_core=2)
         assert len(bs_cif) == n_structs, \
             f'CIF count mismatch: {len(bs_cif)} vs {n_structs}'
         cif_sigs = [_build_signature(e, n)
@@ -118,9 +118,19 @@ def run_io_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         # Step 4: Write CIF → read back → compare element/cell identity
         # ----------------------------------------------------------------
-        bs_outcar.write2text_traj(xdat_dir, file_format='XDATCAR')
-        bs_outcar.write2text_traj(xyz_dir, file_format='xyz')
-        bs_outcar.write2text_traj(xyzf_dir, file_format='xyz_forces')
+        print(
+            '  Note: Cartesian/fractional coordinate conversion warnings in '
+            'the following trajectory exports are expected.'
+        )
+        bs_outcar.write2text_traj(
+            xdat_dir, file_format='XDATCAR', file_name='XDATCAR'
+        )
+        bs_outcar.write2text_traj(
+            xyz_dir, file_format='xyz', file_name='trajectory.xyz'
+        )
+        bs_outcar.write2text_traj(
+            xyzf_dir, file_format='xyz_forces', file_name='trajectory.xyzf'
+        )
 
         # ----------------------------------------------------------------
         # Step 5: Binary save/load (mode='w') — full fidelity

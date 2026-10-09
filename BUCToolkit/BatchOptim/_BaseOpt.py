@@ -1125,6 +1125,8 @@ class _BaseOpt(BaseMotion, ABC):
                 _log_thread.join()
                 if not self._HOLD_DUMPER:
                     dumper.close()
+                else:
+                    dumper.truncate()
 
         # output
         if output_grad:

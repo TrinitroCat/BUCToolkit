@@ -236,9 +236,11 @@ class WritePOSCARs:
                     coord_type=coord_type[i]
                 )
 
-    def write2one(self):
+    def write2one(self, file_name: str | None = None):
         """
         Write all structures to one file in format of XDATCAR in VASP >= 5.4.4
+        Args:
+            file_name: str|None, the file name to write. If None, the 1st element of `file_name_list` will be set.
         Returns: None
 
         """
@@ -269,9 +271,11 @@ class WritePOSCARs:
         )
         if 'C' in coord_type:
             warnings.warn(f"XDATCAR format requires direct/fractional coordinates, but now some are Cartesian.")
-        #if len(file_name_list) > 1:
-        #    warnings.warn(f"`write2one` only writes one file, so only the `file_name_list[0]` will be used.")
-        file_name = file_name_list[0]
+
+        if file_name is None:
+            if len(file_name_list) > 1:
+                warnings.warn(f"`write2one` only writes one file, so only the `file_name_list[0]` will be used.")
+            file_name = file_name_list[0]
         # Now only implement the serial version
         with open(os.path.join(output_path, file_name), 'w') as POSCAR:
             for i in range(n_batch):
@@ -726,9 +730,12 @@ class Write2xyz:
                 for ii, fn in enumerate(file_name_list)
             )
 
-    def write2one(self):
+    def write2one(self, file_name: str|None = None):
         """
         Write all structures to one file as a trajectory.
+        Args:
+            file_name: the file name of the concatenated trajectory.
+                If None, it will be set to the 1st element of the `file_name_list`
         Returns: None
 
         """
@@ -761,9 +768,11 @@ class Write2xyz:
             self.forces,
             self.output_xyz_type
         )
-        if len(file_name_list) > 1:
-            warnings.warn(f"`write2one` only writes one file, so only the `file_name_list[0]` will be used.")
-        file_name = file_name_list[0]
+        if file_name is None:
+            if len(file_name_list) > 1:
+                warnings.warn(f"`write2one` only writes one file, so only the `file_name_list[0]` will be used.")
+            file_name = file_name_list[0]
+
         # Now only implement the serial version
         with open(os.path.join(output_path, file_name), 'w') as xyz:
             for i in range(n_batch):

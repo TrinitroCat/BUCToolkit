@@ -381,6 +381,8 @@ class _BaseMC(BaseMotion):
         finally:
             if not self._HOLD_DUMPER:
                 self.dumper.close()
+            else:
+                self.dumper.truncate()
 
     def _run(
             self,

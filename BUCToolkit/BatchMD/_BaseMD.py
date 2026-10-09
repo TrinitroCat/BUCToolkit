@@ -422,6 +422,8 @@ class _BaseMD(BaseMotion):
         finally:
             if not self._HOLD_DUMPER:
                 self.dumper.close()
+            else:
+                self.dumper.truncate()
 
     def __run_on_cuda(
             self,

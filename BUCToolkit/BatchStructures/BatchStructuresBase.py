@@ -806,7 +806,7 @@ class BatchStructures(object):
             file_name: str | None = None,
     ):
         """
-        Write structures as a signle file to use as a trajectory.
+        Write structures as a single file to use as a trajectory.
         Args:
             indices: the selection indices of `self`. If Tuple, structures between `indices[0]` and `indices[1]` will be selected.
             file_format: the format of written files.
@@ -814,8 +814,7 @@ class BatchStructures(object):
                 'xyz': ext-xyz file that only contains atomic positions
                 'xyz_forces': ext-xyz file that contains atomic positions and forces
             output_path: the directory of output file.
-            file_name_list: the list of file names. If None, it would be set to `Sample_ids`.
-            n_core: number of CPU cores to write in parallel. `-1` for all available CPU cores.
+            file_name: the list of file names. If None, it would be set to `Sample_ids`.
 
         Returns: None
 
@@ -829,7 +828,7 @@ class BatchStructures(object):
             sub_self = self[indices[0]: indices[1]]
         else:
             sub_self = self[indices]
-        file_name_list = file_name if file_name is not None else sub_self.Sample_ids[0]
+        file_name = file_name if file_name is not None else sub_self.Sample_ids[0]
         self._check_id()
         self._check_len()
         if self.Mode == 'A':
@@ -857,12 +856,12 @@ class BatchStructures(object):
                     sub_self.Numbers,
                     sub_self.Fixed,
                     output_path,
-                    file_name_list,
+                    file_name,
                     sub_self.Sample_ids,
                     sub_self.Coords_type,
                     1,
                 )
-                _.write2one()
+                _.write2one(file_name)
             elif file_format == 'xyz':
                 if 'D' in sub_self.Coords_type:
                     warnings.warn(
@@ -879,11 +878,11 @@ class BatchStructures(object):
                     sub_self.Energies,
                     sub_self.Forces,
                     output_path,
-                    file_name_list,
+                    file_name,
                     output_xyz_type='only_position_xyz',
                     n_core=1
                 )
-                _.write2one()
+                _.write2one(file_name)
             elif file_format == 'xyz_forces':
                 if 'D' in sub_self.Coords_type:
                     warnings.warn(
@@ -900,11 +899,11 @@ class BatchStructures(object):
                     sub_self.Energies,
                     sub_self.Forces,
                     output_path,
-                    file_name_list,
+                    file_name,
                     output_xyz_type='write_position_and_force',
                     n_core=1
                 )
-                _.write2one()
+                _.write2one(file_name)
 
             else:
                 raise NotImplementedError

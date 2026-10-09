@@ -404,14 +404,14 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         # ----------------------------------------------------------------
         _untar(outcar_dir)
         feat = OUTCAR2Feat(outcar_dir, verbose=0)
-        feat.read()
+        feat.read(n_core=2)
 
         # Use at most 50 structures for speed
         n_total = len(feat)
         n_use = min(n_total, 50)
         indices = sorted(random.sample(range(n_total), n_use))
         # Use all as both train and valid for API smoke test
-        data_list = CreatePygData(1).feat2data_list(feat, n_core=1)
+        data_list = CreatePygData(1).feat2data_list(feat, n_core=2)
         data_list = [data_list[i] for i in indices]
 
         energies = [float(feat[i].Energies[0]) for i in indices]
@@ -566,8 +566,8 @@ def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> Lis
         # Use first 2 samples as start/end pair
         # find the same sample pair:
         feat_neb = OUTCAR2Feat(outcar_dir, verbose=0)
-        feat_neb.read(os.listdir(outcar_dir)[0:1])
-        data_neb_list = CreatePygData(0).feat2data_list(feat_neb, n_core=1)
+        feat_neb.read(os.listdir(outcar_dir)[0:1], n_core=1)
+        data_neb_list = CreatePygData(0).feat2data_list(feat_neb, n_core=2)
 
         neb_data = {'dataIS': data_neb_list[0:3], 'dataFS': data_neb_list[-3:]}
         _write_neb_inp(neb_inp, batch_size=1, device=device, output_dir=neb_log_dir, chk_dir=log_dir)
