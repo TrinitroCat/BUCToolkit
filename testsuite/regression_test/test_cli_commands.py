@@ -29,9 +29,10 @@ from testsuite.test_apis import _untar
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_HERE)
-_INPUTS_DIR = os.path.join(_HERE, "inputs4test")
-_STRUCTURES_DIR = os.path.join(_HERE, "test_structures")
+_TESTSUITE_ROOT = os.path.dirname(_HERE)
+_PROJECT_ROOT = os.path.dirname(_TESTSUITE_ROOT)
+_INPUTS_DIR = os.path.join(_TESTSUITE_ROOT, "inputs4test")
+_STRUCTURES_DIR = os.path.join(_TESTSUITE_ROOT, "test_structures")
 _BASE_INPUT = os.path.join(_INPUTS_DIR, "cli_command_base.inp")
 _CONSTRAINTS_FILE = os.path.join(_INPUTS_DIR, "cli_constraints.py")
 

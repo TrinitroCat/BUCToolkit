@@ -1,15 +1,13 @@
 #  Copyright (c) 2026.1.27, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
-#  File: main_test.py
+#  File: fast_test.py
 #  Environment: Python 3.12
 import time
 import unittest
 import os
 import glob
-import math
 import sys
-import warnings
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # add BUCToolkit root to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -34,29 +32,9 @@ from _test_config import get_test_section, load_test_config
 INPUT_PATH = './inputs4test/'
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-class MainTest(unittest.TestCase):
+class FastTest(unittest.TestCase):
 
-    TEST_MODE = 'main'
-
-    @staticmethod
-    def assertStatisticalEqual(a, b, rtol=1e-05, atol=1e-07, msg=None):
-        """
-        Used for MD/MC ensemble validation
-        Args:
-            a: statistical magnitude a
-            b: statistical magnitude b
-            rtol: relative tolerance
-            atol: absolute tolerance
-            msg: custom error message
-
-        Returns: None
-
-        """
-        err_msg = str(msg) if msg is not None else f'Statistical validation Failed.\na: {a}\nb: {b}'
-        if abs(a) * abs(b) < 1e-7:
-            atol = max(1e-7, atol)
-        if not math.isclose(a, b, rel_tol=rtol, abs_tol=atol):
-            raise AssertionError(err_msg)
+    TEST_MODE = 'fast'
 
     def setUp(self):
         """Prepare the shared model fixture and load the selected YAML mode.
@@ -145,17 +123,11 @@ class MainTest(unittest.TestCase):
 
         # static test
         data = self.data
-        MASSES = self.MASSES
         elem_list = self.elem_list
-        masses_list = self.masses_list
-        DOF_vib = self.DOF_vib
-        N = self.N
-        kB = 8.617333262145e-5 # eV/K
         TEMPERATURE = 500.
         TIME_STEP = 1.5
         md_config = self._config('test_MD')
         md_steps = md_config.get('steps', {})
-        md_convergence = md_config.get('convergence', {})
         static_steps = md_steps['static']
         nve_steps = md_steps['nve']
         nvt_steps = md_steps['nvt']
@@ -219,8 +191,6 @@ class MainTest(unittest.TestCase):
             runner_cpu_nose_nvt,
             runner_gpu_nose_nvt,
         ]):
-            #if ('CPU' in RUNNER_NAME[i]) or ('STATICE' in RUNNER_NAME[i]) or ('NVE' in RUNNER_NAME[i]): continue
-            #if 'CPU' in RUNNER_NAME[i] or ('STATIC' in RUNNER_NAME[i]): continue
             _data = data.to(runner.device).clone()
             model_test = self.model_test.to(runner.device)
             if 'STATIC' in RUNNER_NAME[i]:
@@ -247,163 +217,37 @@ class MainTest(unittest.TestCase):
             )
             th.cuda.synchronize()
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
-            #with open(f"{self.out_pt}logs/{RUNNER_NAME[i]}.prof", "w") as f:
-            #    print(
-            #        prof.key_averages(group_by_stack_n=5).table(
-            #            sort_by='cpu_time_total', row_limit=500, max_src_column_width=200, max_name_column_width=200
-            #        ),
-            #        file=f
-            #    )
-            #    if 'GPU' in RUNNER_NAME[i]:
-            #        print('\n\n' + '*'*89 + '\n\n', file=f)
-            #        print(
-            #            prof.key_averages(group_by_stack_n=5).table(
-            #                sort_by='cuda_time_total', row_limit=500, max_src_column_width=200, max_name_column_width=200
-            #            ),
-            #            file=f
-            #        )
-            #continue
-            # validation
             fbs = read_md_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
-            etol1, etol2, etol3 = [], [], []
-            ene1, ene2, ene3 = [], [], []
-            vel1, vel2, vel3 = [], [], []
-            vacf1, vacf2, vacf3 = [], [], []
-            v0_1, v0_2, v0_3 = fbs.Labels[0], fbs.Labels[1], fbs.Labels[2]
-            vv1, vv2, vv3 = np.linalg.norm(v0_1)**2, np.linalg.norm(v0_2)**2, np.linalg.norm(v0_3)**2  # Label attr is actually the velocity
-            ek1, ek2, ek3 = [], [], []
-            mass1, mass2, mass3 = np.asarray(masses_list[0]), np.asarray(masses_list[1]), np.asarray(masses_list[2])
-            max_coord1, max_coord2, max_coord3 = 0., 0., 0.
-
-            # cut the short simulations
-            prebalance =  int(len(fbs) * 0.4)
-            while True:
-                if prebalance % 3 != 0:
-                    prebalance += 1
-                else:
-                    break
-
-            for ibs in range(prebalance, len(fbs), 3):
-                # potential energy
-                ene1.append(fbs.Energies[ibs])
-                ene2.append(fbs.Energies[ibs + 1])
-                ene3.append(fbs.Energies[ibs + 2])
-                vn1, vn2, vn3 = fbs.Labels[ibs], fbs.Labels[ibs + 1], fbs.Labels[ibs + 2]
-                vel1.append(vn1)
-                vel2.append(vn2)
-                vel3.append(vn3)
-                # veloc. auto-correlation func
-                vacf1.append(np.sum(v0_1 * vn1)/(vv1 + 1e-20))
-                vacf2.append(np.sum(v0_2 * vn2)/(vv2 + 1e-20))
-                vacf3.append(np.sum(v0_3 * vn3)/(vv3 + 1e-20))
-                # kinetic energy
-                ek1.append(np.sum(0.5 * mass1[:, None] * vn1 * vn1 * 103.642696562621738))
-                ek2.append(np.sum(0.5 * mass2[:, None] * vn2 * vn2 * 103.642696562621738))
-                ek3.append(np.sum(0.5 * mass3[:, None] * vn3 * vn3 * 103.642696562621738))
-                # total energy
-                etol1.append(ene1[-1] + ek1[-1])
-                etol2.append(ene2[-1] + ek2[-1])
-                etol3.append(ene3[-1] + ek3[-1])
-                # check coords converge
-                max_coord1 = max(np.abs(fbs.Coords[ibs]).max(), max_coord1)
-                max_coord2 = max(np.abs(fbs.Coords[ibs + 1]).max(), max_coord2)
-                max_coord3 = max(np.abs(fbs.Coords[ibs + 2]).max(), max_coord3)
-
-            # Scalar check
-            print(f"Max Coordinates Range: {max_coord1, max_coord2, max_coord3}")
-            TEST_TERM_NAME = [
-                'Ep mean',
-                'Ep var',
-                'Ek mean',
-                'Ek var',
-                'single veloc. mean',
-                'single veloc. var',
-            ]
-            STANDARD_VALUES = [
-                [0.5 * dof * kB * TEMPERATURE for dof in DOF_vib],         # Ep mean
-                [0.5 * dof * (kB * TEMPERATURE)**2 for dof in DOF_vib],    # Ep var
-                [1.5 * (na - 3) * kB * TEMPERATURE for na in N],           # Ek mean
-                [1.5  * (na - 3) * (kB * TEMPERATURE)**2 for na in N],      # Ek var
-                [0., 0., 0.],                                              # single veloc. mean
-                [kB * TEMPERATURE / _m for _m in MASSES]                   # single veloc. var
-            ]
-            TEST_VALUES = [
-                [np.mean(np.asarray(_ep)) for _ep in (ene1, ene2, ene3)],
-                [np.var(np.asarray(_ep)) for _ep in (ene1, ene2, ene3)],
-                [np.mean(np.asarray(_ek)) for _ek in (ek1, ek2, ek3)],
-                [np.var(np.asarray(_ek)) for _ek in  (ek1, ek2, ek3)],
-                [np.mean(np.stack(_v, axis=0)) for _v in (vel1, vel2, vel3)],
-                [(np.var(np.stack(_v, axis=0))*103.642696562621738) for _v in (vel1, vel2, vel3)],
-            ]
-            #print(f"Batch1 Potential Energy Mean: {np.mean(ene1)}, Std: {np.std(ene1)}")
-            #print(f"Batch2 Potential Energy Mean: {np.mean(ene2)}, Std: {np.std(ene2)}")
-            #print(f"Batch3 Potential Energy Mean: {np.mean(ene3)}, Std: {np.std(ene3)}")
-            self.assertListEqual(DOF_vib, (runner.free_degree).tolist(), )
-            #   Static test
-            if 'STATIC' in RUNNER_NAME[i]:
-                for _i, tv in enumerate(TEST_VALUES):
-                    for __i, _tv in enumerate(tv):
-                        try:
-                            self.assertStatisticalEqual(
-                                _tv,
-                                float(0),
-                                atol=md_convergence['static_atol'],
-                                msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                    f'test value: {_tv}\nstandard value: 0.'
-                            )
-                            print(f'"\n{TEST_TERM_NAME[_i]}" Test {__i + 1} passed. <<<<<')
-                        except AssertionError:
-                            print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                    f'test value: {_tv}\nstandard value: 0.')
-                continue
-            if 'NVE' in RUNNER_NAME[i]:
-                for _i, _etol in enumerate((etol1, etol2, etol3)):
-                    _etol_var = len(_etol) * (max(_etol) - min(_etol))/sum(_etol)
-                    try:
-                        self.assertStatisticalEqual(
-                            _etol_var,
-                            0.,
-                            atol=md_convergence['nve_energy_atol'],
-                            msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                                f'test value: {_etol_var}\nstandard value: 0.'
-                        )
-                        print(f"Mean Ep: {TEST_VALUES[1]}, STD Ep: {TEST_VALUES[2]}")
-                        print(f'\n"NVE Energy" Test {_i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                                f'test value: {_etol_var}\nstandard value: 0.')
-                continue
-
-            # NVT test
-            for _i, tv in enumerate(TEST_VALUES):
-                for __i, _tv in enumerate(tv):
-                    try:
-                        self.assertStatisticalEqual(
-                            _tv,
-                            STANDARD_VALUES[_i][__i],
-                            rtol=md_convergence['nvt_rtol'],
-                            msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
-                        )
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
-
-            # purge chk files
+            self._assert_finite_trajectory(fbs, RUNNER_NAME[i])
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
         pass
+
+    def _assert_finite_trajectory(self, trajectory, test_name: str) -> None:
+        """Check numeric trajectory fields for NaN or infinite values.
+
+        Args:
+            trajectory: Parsed MD or MC trajectory.
+            test_name: Runner name used in the assertion message.
+
+        Return:
+            None.
+        """
+        for field_name in ('Energies', 'Coords', 'Labels'):
+            values = getattr(trajectory, field_name, None)
+            if values is None:
+                continue
+            for index, value in enumerate(values):
+                self.assertTrue(
+                    np.isfinite(np.asarray(value, dtype=float)).all(),
+                    f'{test_name} produced non-finite {field_name} at frame {index}.',
+                )
 
     def test_CMD(self):
         """
         Test Constrained Molecular Dynamics with regular batches (B, N, 3).
         All batches have equal size — uniform batch input.
-        Covers NVE, CSVR, Langevin, Nose-Hoover integrators with a multi-type
-        constraint function (distances, angles, soft coord, R_std).
-        Verifies:
-          - NVE: energy conservation
-          - NVT: thermostat equipartition statistics (Ep/Ek mean/var, velocity stats)
-          - All: per-constraint maximum violation vs. tolerance
+        Covers NVE, CSVR, Langevin, and Nose-Hoover integrators with the same
+        constraint function as the strict test, checking only finite output.
         """
         os.makedirs(f'{self.out_pt}logs', exist_ok=True)
         os.makedirs(f'{self.out_pt}results', exist_ok=True)
@@ -416,20 +260,16 @@ class MainTest(unittest.TestCase):
         for resultfile in resultfiles:
             os.remove(resultfile)
 
-        kB = 8.617333262145e-5  # eV/K
         TEMPERATURE = 500.
         TIME_STEP = 0.5
         cmd_config = self._config('test_CMD')
         cmd_steps = cmd_config.get('steps', {})
-        cmd_convergence = cmd_config.get('convergence', {})
         MAX_STEP = cmd_steps['integrator']
-        CONSTR_THRESHOLD = cmd_convergence['constraint_threshold']
-        N_CONSTR = 8  # 3 dist + 2 angle + 2 coord + 1 R_std
+        CONSTR_THRESHOLD = cmd_config['convergence']['constraint_threshold']
         N_BATCH = 3  # 3 batches, all same size → regular batch (B, N, 3)
         N_ATOM = 5**3  # 125 Al atoms per batch → uniform
         ELEM = 'Al'
         MASS_val = MASS[ELEM]
-        MASSES_3 = [MASS_val] * N_BATCH
 
         # ============================================================
         from BUCToolkit.BatchStructures.batch import Batch
@@ -438,9 +278,7 @@ class MainTest(unittest.TestCase):
         graph = Batch.from_data_list(data_list)
         # Regular input X: (B, N, 3)
         pos = th.stack([d.pos for d in data_list])
-        pos0 = th.stack([d.pos0 for d in data_list])
         elem_list = [[ELEM] * N_ATOM] * N_BATCH
-        masses_list = [[MASS_val] * N_ATOM] * N_BATCH
 
         # Model
         raw_model = SimpleSpringPotential(graph.pos0, 10.)
@@ -450,7 +288,7 @@ class MainTest(unittest.TestCase):
         # Multi-type constraint function (8 constraints)
         # ============================================================
         def constr_func(X):
-            # X: (n_atom, n_dim) → returns (N_CONSTR,)
+            # X: (n_atom, n_dim) → returns the configured constraint values.
             y = list()
             # CONSTRAINT 1: fixed distances d(2,4), d(3,7), d(5,8)
             y.append(th.linalg.norm(X[[2, 3, 5]] - X[[4, 7, 8]], dim=-1))
@@ -468,16 +306,6 @@ class MainTest(unittest.TestCase):
             R_std = th.std(R_ij, unbiased=True).unsqueeze(0)
             y.append(R_std)
             return th.cat(y)
-
-        CONSTR_LABELS = [
-            'd(2,4)', 'd(3,7)', 'd(5,8)',
-            'cos(7-5-8)', 'cos(11-9-12)',
-            'CN(14)', 'CN(18)', 'R_std',
-        ]
-
-        # constr_val: None → auto-computed from initial X via vmap
-        # Also keep per-batch list for post-hoc violation check
-        constr_val_per_batch = [constr_func(d.pos) for d in data_list]
 
         # ============================================================
         # Build runners: 4 integrators × (CPU + GPU) = 8 runners
@@ -539,24 +367,6 @@ class MainTest(unittest.TestCase):
             device='cuda:0', verbose=1
         )
 
-        # DOF after constraint reduction
-        DOF_cmd = 3 * N_ATOM - N_CONSTR
-        DOF_cmd_list = [DOF_cmd] * N_BATCH
-
-        # Equipartition standard values (for NVT tests) — all batches identical
-        STANDARD_VALUES = [
-            [0.5 * DOF_cmd * kB * TEMPERATURE] * N_BATCH,
-            [0.5 * DOF_cmd * (kB * TEMPERATURE) ** 2] * N_BATCH,
-            [0.5 * DOF_cmd * kB * TEMPERATURE] * N_BATCH,
-            [0.5 * DOF_cmd * (kB * TEMPERATURE) ** 2] * N_BATCH,
-            [0.] * N_BATCH,
-            [kB * TEMPERATURE / MASS_val] * N_BATCH,
-        ]
-        TEST_TERM_NAME = [
-            'Ep mean', 'Ep var', 'Ek mean', 'Ek var',
-            'single veloc. mean', 'single veloc. var',
-        ]
-
         RUNNER_NAME = [
             'CMD_NVE_CPU', 'CMD_NVE_GPU',
             'CMD_CSVR_CPU', 'CMD_CSVR_GPU',
@@ -595,282 +405,8 @@ class MainTest(unittest.TestCase):
 
             # --- Read trajectory ---
             fbs = read_md_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
-            ene = [[], [], []]
-            ek = [[], [], []]
-            etol = [[], [], []]
-            vel = [[], [], []]
-            mass_arr = np.asarray(masses_list[0])
-            max_coords = [0., 0., 0.]
-            max_viol_per_constr = [0.0] * N_CONSTR
-
-            prebalance = int(len(fbs) * 0.4)
-            while prebalance % 3 != 0:
-                prebalance += 1
-
-            for ibs in range(prebalance, len(fbs), 3):
-                for ib in range(N_BATCH):
-                    idx = ibs + ib
-                    ene[ib].append(fbs.Energies[idx])
-                    vn = fbs.Labels[idx]
-                    vel[ib].append(vn)
-                    ek_val = np.sum(0.5 * mass_arr[:, None] * vn * vn * 103.642696562621738)
-                    ek[ib].append(ek_val)
-                    etol[ib].append(ene[ib][-1] + ek[ib][-1])
-                    max_coords[ib] = max(np.abs(fbs.Coords[idx]).max(), max_coords[ib])
-                    X_i = th.as_tensor(fbs.Coords[idx], dtype=th.float32)
-                    viol_vec = th.abs(constr_func(X_i) - constr_val_per_batch[ib])
-                    for k in range(N_CONSTR):
-                        max_viol_per_constr[k] = max(max_viol_per_constr[k], viol_vec[k].item())
-
-            print(f"Max Coordinates Range: {max_coords}")
-
-            # --- Per-constraint violation report ---
-            print("Per-constraint max violations:")
-            all_viol_ok = True
-            for k in range(N_CONSTR):
-                ok = max_viol_per_constr[k] <= CONSTR_THRESHOLD * cmd_convergence['constraint_factor']
-                flag = "OK" if ok else "FAIL"
-                if not ok:
-                    all_viol_ok = False
-                print(f"  [{flag}] {CONSTR_LABELS[k]:20s}: {max_viol_per_constr[k]:.4e}")
-            try:
-                self.assertTrue(all_viol_ok, msg='One or more constraint violations exceed tolerance.')
-                print('"Constraint Violation" Test passed. <<<<<')
-            except AssertionError:
-                print('"Constraint Violation" Test Failed.')
-
-            # --- DOF check ---
-            self.assertListEqual(DOF_cmd_list, runner.free_degree.tolist())
-
-            TEST_VALUES = [
-                [np.mean(np.asarray(_ep)) for _ep in ene],
-                [np.var(np.asarray(_ep)) for _ep in ene],
-                [np.mean(np.asarray(_ek)) for _ek in ek],
-                [np.var(np.asarray(_ek)) for _ek in ek],
-                [np.mean(np.stack(_v, axis=0)) for _v in vel],
-                [(np.var(np.stack(_v, axis=0)) * 103.642696562621738) for _v in vel],
-            ]
-
-            # --- NVE: energy conservation test ---
-            if 'NVE' in RUNNER_NAME[i]:
-                for _i, _etol in enumerate(etol):
-                    _etol_var = len(_etol) * (max(_etol) - min(_etol)) / sum(_etol)
-                    try:
-                        self.assertStatisticalEqual(
-                            _etol_var, 0.,
-                            atol=cmd_convergence['nve_energy_atol'],
-                            msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                                f'test value: {_etol_var}\nstandard value: 0.'
-                        )
-                        print(f'\n"NVE Energy" Test {_i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                              f'test value: {_etol_var}\nstandard value: 0.')
-                os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
-                continue
-
-            # --- NVT: thermostat equipartition tests ---
-            for _i, tv in enumerate(TEST_VALUES):
-                for __i, _tv in enumerate(tv):
-                    try:
-                        self.assertStatisticalEqual(
-                            _tv, STANDARD_VALUES[_i][__i],
-                            rtol=cmd_convergence['nvt_rtol'],
-                            msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
-                        )
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                              f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
-
+            self._assert_finite_trajectory(fbs, RUNNER_NAME[i])
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
-
-        # ============================================================
-        # Analytic manifold-thermodynamics validation
-        # ============================================================
-        # Use one particle in a three-dimensional harmonic potential,
-        # constrained by xi(X) = |X|^2 = rho. Its configurational manifold is
-        # a two-sphere, for which the constrained canonical distribution and
-        # the Blue-Moon/Fixman quantities are available analytically:
-        #
-        #   G                 = 1 / (2 rho)
-        #   w                 = sqrt(m) / (2 sqrt(rho))
-        #   <K_tangent>       = kB T
-        #   <Fc>              = k/2 - <K_tangent>/rho
-        #   dA/d rho          = k/2 - kB T/(2 rho)
-        #
-        # With the sign convention used by BaseConstr, the last identity is
-        # recovered from <w (Fc + kB T G)> / <w>. This checks the sampled
-        # manifold measure and the existing constraint observables without
-        # making a free-energy postprocessor part of the MD algorithm.
-        MANIFOLD_BATCH = 32
-        MANIFOLD_STEP = cmd_steps['manifold']
-        MANIFOLD_OUTPUT_FREQ = 10
-        MANIFOLD_RHO = 4.0
-        MANIFOLD_K = 0.2
-        MANIFOLD_MASS = MASS['H']
-        MANIFOLD_FILE = f'{self.out_pt}results/CMD_MANIFOLD_CPU'
-
-        def sphere_constr(X):
-            return th.sum(X[0] ** 2).reshape(1)
-
-        def sphere_energy(X):
-            return 0.5 * MANIFOLD_K * th.sum(X ** 2, dim=(-2, -1))
-
-        def sphere_gradient(X, energy):
-            return MANIFOLD_K * X
-
-        # Keep this statistical regression reproducible without changing the
-        # random stream seen by other tests in this class.
-        cpu_rng_state = th.random.get_rng_state()
-        th.manual_seed(12345)
-        sphere_pos = th.randn(MANIFOLD_BATCH, 1, 3)
-        sphere_pos.mul_(
-            math.sqrt(MANIFOLD_RHO)
-            / th.linalg.norm(sphere_pos, dim=-1, keepdim=True)
-        )
-        sphere_target = th.full((MANIFOLD_BATCH, 1), MANIFOLD_RHO)
-
-        sphere_runner = ConstrNVT(
-            TIME_STEP, MANIFOLD_STEP,
-            'Langevin', {'damping_coeff': 0.05},
-            sphere_constr, sphere_target, 1e-6,
-            True, TEMPERATURE,
-            MANIFOLD_FILE, MANIFOLD_OUTPUT_FREQ,
-            device='cpu', verbose=0,
-        )
-        try:
-            sphere_runner.run(
-                sphere_energy,
-                sphere_pos,
-                [['H'] for _ in range(MANIFOLD_BATCH)],
-                None, None,
-                sphere_gradient,
-                tuple(), None,
-                tuple(), None,
-                True, False,
-                None,
-                move_to_center_freq=-1,
-            )
-            manifold_traj = read_md_traj(MANIFOLD_FILE, out_arrays=True)
-        finally:
-            th.random.set_rng_state(cpu_rng_state)
-
-        n_manifold_cycle = len(manifold_traj['Fc']) // MANIFOLD_BATCH
-        manifold_start = int(n_manifold_cycle * 0.3) * MANIFOLD_BATCH
-        manifold_X = np.asarray(manifold_traj['X'][manifold_start:])[:, 0, :]
-        manifold_V = np.asarray(manifold_traj['V'][manifold_start:])[:, 0, :]
-        manifold_Fc = np.asarray([
-            np.asarray(_v).reshape(-1)[0]
-            for _v in manifold_traj['Fc'][manifold_start:]
-        ])
-        manifold_G = np.asarray([
-            np.asarray(_v).reshape(-1)[0]
-            for _v in manifold_traj['G'][manifold_start:]
-        ])
-        manifold_w = np.asarray(manifold_traj['w'][manifold_start:]).reshape(-1)
-
-        # The trajectory must remain on the sphere and retain exactly two
-        # tangent degrees of freedom per independent structure.
-        manifold_rho = np.sum(manifold_X ** 2, axis=-1)
-        self.assertLessEqual(
-            np.max(np.abs(manifold_rho - MANIFOLD_RHO)),
-            5e-6,
-            msg='The analytic sphere trajectory left its constraint manifold.',
-        )
-        self.assertListEqual(
-            [2] * MANIFOLD_BATCH,
-            sphere_runner.free_degree.tolist(),
-        )
-
-        # A uniform canonical measure on the sphere has
-        # <X_i X_j> = rho delta_ij / 3. Multiple independent structures are
-        # used to reduce the rotational diffusion time required by this test.
-        manifold_second_moment = np.einsum(
-            'ni,nj->ij', manifold_X, manifold_X
-        ) / len(manifold_X)
-        self.assertTrue(np.allclose(
-            np.diag(manifold_second_moment),
-            MANIFOLD_RHO / 3.,
-            rtol=0.12,
-            atol=0.,
-        ), msg=(
-            'The sampled constrained position distribution is not isotropic: '
-            f'{manifold_second_moment}'
-        ))
-        off_diagonal = manifold_second_moment - np.diag(np.diag(manifold_second_moment))
-        self.assertLess(
-            np.max(np.abs(off_diagonal)), 0.15,
-            msg=f'Unexpected cross moments on the sphere: {manifold_second_moment}',
-        )
-
-        expected_G = 1. / (2. * MANIFOLD_RHO)
-        expected_w = math.sqrt(MANIFOLD_MASS) / (2. * math.sqrt(MANIFOLD_RHO))
-        self.assertTrue(np.allclose(
-            manifold_G, expected_G,
-            rtol=cmd_convergence['manifold_identity_rtol'],
-            atol=cmd_convergence['manifold_identity_atol'],
-        ))
-        self.assertTrue(np.allclose(
-            manifold_w, expected_w,
-            rtol=cmd_convergence['manifold_identity_rtol'],
-            atol=cmd_convergence['manifold_identity_atol'],
-        ))
-
-        # Two tangent quadratic velocity degrees of freedom give <K> = kB T.
-        manifold_kinetic = (
-            0.5 * MANIFOLD_MASS
-            * np.sum(manifold_V ** 2, axis=-1)
-            * 103.642696562621738
-        )
-        mean_manifold_kinetic = np.mean(manifold_kinetic)
-        self.assertStatisticalEqual(
-            mean_manifold_kinetic,
-            kB * TEMPERATURE,
-            rtol=cmd_convergence['manifold_kinetic_rtol'],
-            msg=(
-                'Constrained tangent-space equipartition failed: '
-                f'{mean_manifold_kinetic} != {kB * TEMPERATURE}'
-            ),
-        )
-
-        # The radial virial balance relates the raw RATTLE multiplier to the
-        # actually sampled tangent kinetic energy. Using measured kinetic
-        # energy separates the multiplier test from thermostat statistics.
-        expected_Fc = 0.5 * MANIFOLD_K - mean_manifold_kinetic / MANIFOLD_RHO
-        self.assertStatisticalEqual(
-            np.mean(manifold_Fc),
-            expected_Fc,
-            rtol=cmd_convergence['manifold_force_rtol'],
-            msg=(
-                'Constraint multiplier does not satisfy the sphere virial identity: '
-                f'{np.mean(manifold_Fc)} != {expected_Fc}'
-            ),
-        )
-
-        # For xi=rho=r^2, the conditional configurational free energy is
-        # A(rho) = k rho/2 - kB T ln(rho)/2 + constant.
-        manifold_mean_force = np.sum(
-            manifold_w * (manifold_Fc + kB * TEMPERATURE * manifold_G)
-        ) / np.sum(manifold_w)
-        expected_mean_force = (
-            0.5 * MANIFOLD_K
-            - 0.5 * kB * TEMPERATURE / MANIFOLD_RHO
-        )
-        self.assertStatisticalEqual(
-            manifold_mean_force,
-            expected_mean_force,
-            rtol=cmd_convergence['manifold_force_rtol'],
-            msg=(
-                'Blue-Moon/Fixman mean-force identity failed: '
-                f'{manifold_mean_force} != {expected_mean_force}'
-            ),
-        )
-        print('"Analytic Manifold Thermodynamics" Test passed. <<<<<')
-
-        if os.path.exists(MANIFOLD_FILE):
-            os.remove(MANIFOLD_FILE)
         pass
 
     def test_MC(self):
@@ -887,17 +423,10 @@ class MainTest(unittest.TestCase):
 
         # static test
         data = self.data
-        MASSES = self.MASSES
         elem_list = self.elem_list
-        masses_list = self.masses_list
-        DOF_vib = self.DOF_vib
-        N = self.N
-        kB = 8.617333262145e-5  # eV/K
         TEMPERATURE = 500.
-        TIME_STEP = 1.5
         mc_config = self._config('test_MC')
         mc_steps = mc_config['steps']
-        mc_convergence = mc_config.get('convergence', {})
 
         # runner sets
         runner_cpu_nvt = MMC(
@@ -977,7 +506,6 @@ class MainTest(unittest.TestCase):
             'MC_GAUSS_NVT_GPU',
             'MC_GAUSS_ANNEAL_GPU',
         ]
-        #import matplotlib.pyplot as plt
         for i, runner in enumerate([
             runner_cpu_nvt,
             runner_cpu_cauchy_nvt,
@@ -985,8 +513,6 @@ class MainTest(unittest.TestCase):
             runner_gpu_nvt,
             runner_gpu_anneal,
         ]):
-            # if ('CPU' in RUNNER_NAME[i]) or ('STATICE' in RUNNER_NAME[i]) or ('NVE' in RUNNER_NAME[i]): continue
-            #if 'CPU' in RUNNER_NAME[i] or ('STATIC' in RUNNER_NAME[i]): continue
             _data = data.to(runner.device).clone()
             model_test = self.model_test.to(runner.device)
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
@@ -1006,54 +532,8 @@ class MainTest(unittest.TestCase):
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
             # validation
             fbs = read_mc_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
-            ene1, ene2, ene3 = ([_ for _ in fbs.Energies[0::3]],
-                                [_ for _ in fbs.Energies[1::3]],
-                                [_ for _ in fbs.Energies[2::3]])
-            STANDARD_VALUES = [
-                [0.5 * dof * kB * TEMPERATURE for dof in DOF_vib],  # Ep mean
-                [math.sqrt(0.5 * dof) * kB * TEMPERATURE for dof in DOF_vib],  # Ep std
-            ]
-            for _i, _en in enumerate((ene1, ene2, ene3)):
-                #plt.plot(_en)
-                #plt.show()
-                #plt.clf()
-                prebalance = int(len(_en) * 0.4)
-                while True:
-                    if prebalance % 3 != 0:
-                        prebalance += 1
-                    else:
-                        break
-                _mean_val = np.mean(_en[prebalance:])
-                _std_val = np.std(_en[prebalance:])
-                try:
-                    if 'ANNEAL' not in RUNNER_NAME[i]:
-                        self.assertStatisticalEqual(
-                            _mean_val, STANDARD_VALUES[0][_i],
-                            rtol=mc_convergence['energy_rtol'],
-                            msg=(
-                                f'{RUNNER_NAME[i]} structure {_i}: potential-energy '
-                                f'mean {_mean_val} != {STANDARD_VALUES[0][_i]}'
-                            ),
-                        )
-                        self.assertStatisticalEqual(
-                            _std_val, STANDARD_VALUES[1][_i],
-                            rtol=mc_convergence['energy_rtol'],
-                            msg=(
-                                f'{RUNNER_NAME[i]} structure {_i}: potential-energy '
-                                f'std {_std_val} != {STANDARD_VALUES[1][_i]}'
-                            ),
-                        )
-                        print(f"Mean Ep: {_mean_val}, STD Ep: {_std_val}")
-                        print(f'\n"MC Energy" Test {_i + 1} passed. <<<<<')
-                    else:
-                        self.assertAlmostEqual(
-                            th.max(th.abs(_data.pos - data.pos0)).item(),
-                            0.,
-                            delta=mc_convergence['anneal_position_delta'],
-                        )
-                except AssertionError:
-                    print(f"WARNING: test value {_mean_val}, std value {STANDARD_VALUES[0][_i]}")
-                    print(f"WARNING: test mean value {_std_val}, std value {STANDARD_VALUES[1][_i]}")
+            self._assert_finite_trajectory(fbs, RUNNER_NAME[i])
+            os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
 
 
     def test_OPT(self):
@@ -1234,7 +714,6 @@ class MainTest(unittest.TestCase):
             'OPT_FIRE_CPU',
             'OPT_FIRE_GPU',
         ]
-        #import matplotlib.pyplot as plt
         for i, runner in enumerate([
             runner_cpu_cg_mt,
             runner_gpu_cg_mt,
@@ -1247,8 +726,6 @@ class MainTest(unittest.TestCase):
             runner_cpu_fire,
             runner_gpu_fire,
         ]):
-            # if ('CPU' in RUNNER_NAME[i]) or ('STATICE' in RUNNER_NAME[i]) or ('NVE' in RUNNER_NAME[i]): continue
-            # if 'CPU' in RUNNER_NAME[i] or ('STATIC' in RUNNER_NAME[i]): continue
             _data = data.to(runner.device).clone()
             model_test = self.model_test.to(runner.device)
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')

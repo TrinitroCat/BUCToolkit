@@ -331,6 +331,19 @@ buctoolkit './input_file.inp'
 YAML 输入文件中的路径统一相对于输入文件所在目录解析；命令行参数 `-i`、
 `-o` 和 `--convert` 中的路径仍相对于命令执行时的当前目录解析。
 
+中心测试也集成在同一个 CLI 中（需要在源码目录运行）：
+
+```shell
+buctoolkit --test main     # 长时间测试, 严格科学正确性检查, 通过Virial定理检查MD/MC的统计力学性质
+buctoolkit --test fast     # 短步数 smoke 检查, 只检查代码通过性
+buctoolkit --test profile  # fast 测试并生成 torch profiler 报告
+```
+
+迭代步数和收敛限统一维护在
+`testsuite/configs/main_test.yaml`，fast 模式的覆盖值在
+`testsuite/configs/fast_test.yaml`。独立的兼容性、压力和回归测试位于
+`testsuite/regression_test/`，不会被上述中心命令自动选中。
+
 `OUTPUT_ROOT` 默认是 `./output`；若未提供，则兼容地将旧
 `OUTPUT_PATH` 视为根目录。根目录不存在时会创建；非空的已有目录会移至
 带时间戳的 `.bak...` 备份目录。日志默认写入 `OUTPUT_ROOT/logs`，结果默认写入

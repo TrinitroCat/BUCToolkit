@@ -568,7 +568,8 @@ def main():
     """Run the command-line interface selected by process arguments.
 
     With no arguments this enters the interactive CLI. Otherwise ``-i`` runs
-    one task and ``-c`` converts structures between supported formats.
+    one task, ``-c`` converts structures, and ``--test`` runs a central test
+    mode.
 
     Returns:
         None.
@@ -585,6 +586,12 @@ def main():
     group = parser.add_mutually_exclusive_group(required=False)
 
     group.add_argument('-i', '--input', help='The path to input file.', default=None)
+    group.add_argument(
+        '--test',
+        choices=('main', 'fast', 'profile'),
+        help='Run the central testsuite in main, fast, or profile mode.',
+        default=None,
+    )
     parser.add_argument('input_path', nargs='?', help='Input YAML file (equivalent to --input).')
     parser.add_argument(
         '-o', '--output',
@@ -616,8 +623,26 @@ def main():
                 parser.error('`-o/--output` cannot be used with `-c/--convert`.')
             if args.input is not None and args.input_path is not None:
                 parser.error('Provide the input file either positionally or with `-i/--input`, not both.')
+            if args.test is not None and any(
+                value is not None for value in (args.input_path, args.output, args.convert)
+            ):
+                parser.error('`--test` cannot be combined with an input task, conversion, or output file.')
             input_file = args.input or args.input_path
-            if input_file is not None:
+            if args.test is not None:
+                repository_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+                if not os.path.isdir(os.path.join(repository_root, 'testsuite')):
+                    raise RuntimeError(
+                        'The central testsuite is not present in this installation. '
+                        'Run `buctoolkit --test ...` from a BUCToolkit source checkout.'
+                    )
+                if repository_root not in sys.path:
+                    sys.path.insert(0, repository_root)
+                from testsuite.test_runner import run_test_suite
+
+                result = run_test_suite(args.test)
+                if not result.wasSuccessful():
+                    raise SystemExit(1)
+            elif input_file is not None:
                 if args.output is not None:
                     backup_path = backup_output(args.output, 'file')
                     if backup_path is not None:

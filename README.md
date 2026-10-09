@@ -342,6 +342,20 @@ Paths inside YAML input files are resolved relative to the input file's
 directory. Command-line paths passed to `-i`, `-o`, or `--convert` remain
 relative to the directory where the command is invoked.
 
+The central source-checkout tests are available through the same CLI:
+
+```shell
+buctoolkit --test main     # strict scientific checks
+buctoolkit --test fast     # short smoke checks
+buctoolkit --test profile  # fast checks with torch profiler reports
+```
+
+Iteration counts and convergence tolerances are maintained in
+`testsuite/configs/main_test.yaml`; fast-mode overrides are in
+`testsuite/configs/fast_test.yaml`. Standalone compatibility and regression
+tests are kept under `testsuite/regression_test/` and are not selected by
+these commands.
+
 `OUTPUT_ROOT` defaults to `./output` (the legacy `OUTPUT_PATH` is used as
 the root when `OUTPUT_ROOT` is absent). A missing root is created; a non-empty
 existing root is moved to a timestamped `.bak...` directory. Logs default to

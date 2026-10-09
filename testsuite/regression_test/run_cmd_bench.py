@@ -6,7 +6,7 @@ comparing wall-clock time and constraint violations.
 Strictly mirrors the parameter set in test_CMD — only varies use_c_backend.
 
 Usage:
-    PYTHONPATH=. python testsuite/run_cmd_bench.py
+    PYTHONPATH=. python testsuite/regression_test/run_cmd_bench.py
 """
 import os, sys, time, contextlib, io
 from unittest.mock import patch

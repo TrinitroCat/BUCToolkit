@@ -1,0 +1,25 @@
+# Fast mode keeps the same test coverage and only shortens expensive motion.
+test_Train: {}
+test_Pred: {}
+test_MD:
+  steps:
+    static: 100
+    nve: 100
+    nvt: 100
+test_CMD:
+  steps:
+    integrator: 100
+    manifold: 100
+test_MC:
+  steps: 100
+test_parallel:
+  maxiter: 100
+  steps:
+    md: 100
+    mc: 100
+    warmup: 100
+test_APIS:
+  md_max_step: 100
+  mc_maxiter: 100
+test_VIB: {}
+test_IO: {}

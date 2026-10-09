@@ -12,18 +12,41 @@ from __future__ import annotations
 
 import os
 import sys
+import importlib
+import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(__file__))
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch as th
+
+
+def _load_matplotlib():
+    """Load matplotlib lazily for optional plotting tests.
+
+    Return:
+        The imported ``matplotlib.pyplot`` module, or ``None`` when matplotlib
+        is unavailable.
+    """
+    try:
+        matplotlib = importlib.import_module("matplotlib")
+        matplotlib.use("Agg")
+        return importlib.import_module("matplotlib.pyplot")
+    except ImportError:
+        warnings.warn(
+            "main_plot_test requires optional dependency matplotlib; "
+            "plotting tests will be skipped.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+
+plt = _load_matplotlib()
 
 import main_test as main_test_module
 from _toy_harmonic_potential import build_cubic_lattice_data
@@ -46,6 +69,7 @@ CONSTRAINT_COLORS = (
 )
 
 
+@unittest.skipUnless(plt is not None, "matplotlib is not installed")
 class MainTestPlot(MainTest):
     """Run the existing motion tests and save their trajectories as figures."""
 
@@ -564,4 +588,6 @@ class MainTestPlot(MainTest):
 if __name__ == "__main__":
     import unittest
 
+    if plt is None:
+        raise SystemExit(0)
     unittest.main()

@@ -2,7 +2,7 @@
 """Run single- and multi-device FIRE/NVE checks for the PyG model wrapper.
 
 Example:
-    python testsuite/multi_devices_wrapper_test.py --devices cuda:0 cuda:1 --batch-size 16 --steps 20
+    python testsuite/regression_test/multi_devices_wrapper_test.py --devices cuda:0 cuda:1 --batch-size 16 --steps 20
 """
 import argparse
 import copy
@@ -13,7 +13,7 @@ from pathlib import Path
 import torch as th
 
 # Prefer this checkout over any separately installed BUCToolkit version.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from BUCToolkit.BatchMD.NVE import NVE
 from BUCToolkit.BatchOptim.minimize.FIRE import FIRE

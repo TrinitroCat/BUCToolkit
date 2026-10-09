@@ -101,7 +101,7 @@ MODEL_CONFIG:
 """)
 
 
-def _write_opt_inp(path, batch_size, device, output_dir, chk_dir):
+def _write_opt_inp(path, batch_size, device, output_dir, chk_dir, maxiter=100):
     with open(path, 'w') as f:
         f.write(f"""TASK: !!str OPT
 START: !!int 2
@@ -118,7 +118,7 @@ RELAXATION:
   OPTIMIZER: !!str FIRE
   STEPLENGTH: !!float 0.05
   F_THRESHOLD: !!float 0.05
-  MAXITER: !!int 100
+  MAXITER: !!int {maxiter}
 
 MODEL_NAME: !!str GNNLJDirectionalEAM
 MODEL_CONFIG:
@@ -130,7 +130,7 @@ MODEL_CONFIG:
 """)
 
 
-def _write_md_inp(path, batch_size, device, output_dir, chk_dir):
+def _write_md_inp(path, batch_size, device, output_dir, chk_dir, max_step=200):
     with open(path, 'w') as f:
         f.write(f"""TASK: !!str MD
 START: !!int 2
@@ -148,7 +148,7 @@ MD:
   THERMOSTAT_CONFIG:
     TIME_CONST: !!float 120
   TIME_STEP: !!float 0.5
-  MAX_STEP: !!int 200
+  MAX_STEP: !!int {max_step}
   T_INIT: !!float 500.0
   OUTPUT_COORDS_PER_STEP: !!int 5
   MOVE_TO_CENTER_FREQ: !!int 5
@@ -164,7 +164,7 @@ MODEL_CONFIG:
 
 
 
-def _write_mc_inp(path, batch_size, device, output_dir, chk_dir):
+def _write_mc_inp(path, batch_size, device, output_dir, chk_dir, maxiter=200):
     with open(path, 'w') as f:
         f.write(f"""TASK: !!str MC
 START: !!int 1
@@ -179,7 +179,7 @@ LOAD_CHK_FILE_PATH: '{chk_dir}/best_checkpoint_test_model_chk.pt'
 MC:
   ENSEMBLE: !!str NVT
   TYPE: !!str METROPOLIS
-  MAXITER: !!int 200
+  MAXITER: !!int {maxiter}
   T_INIT: !!float 500.0
   T_SCHEME: !!str constant
   T_SCHEME_PARAM: !!float 0.0
@@ -353,9 +353,22 @@ MODEL_CONFIG:
 """)
 
 
-def run_api_tests(tmp_base: str = '/dev/shm') -> List[str]:
-    r"""Run Trainer + Predictor tests. Returns error messages."""
+def run_api_tests(tmp_base: str = '/dev/shm', config: dict | None = None) -> List[str]:
+    r"""Run Trainer + Predictor tests and return error messages.
+
+    Args:
+        tmp_base: Temporary output directory used by generated API inputs.
+        config: Optional iteration configuration from the central YAML file.
+
+    Return:
+        A list of error messages; an empty list means all API checks passed.
+    """
     errors = []
+    config = config or {}
+    train_epochs = config.get('train_epochs', 3)
+    opt_maxiter = config.get('opt_maxiter', 100)
+    md_max_step = config.get('md_max_step', 200)
+    mc_maxiter = config.get('mc_maxiter', 200)
     outcar_dir = os.path.join(tmp_base, 'api_test_outcars')
     train_inp = os.path.join(tmp_base, 'api_test_train.inp')
     predict_inp = os.path.join(tmp_base, 'api_test_predict.inp')
@@ -432,7 +445,7 @@ def run_api_tests(tmp_base: str = '/dev/shm') -> List[str]:
             ]),
         ]:
             for opt_name, opt_cls, opt_cfg in opt_list:
-                _write_train_inp(train_inp, batch_size=4, device=device, epochs=3,
+                _write_train_inp(train_inp, batch_size=4, device=device, epochs=train_epochs,
                                  output_dir=log_dir, data_path='')
                 with open(train_inp, 'r+') as f:
                     inpdata = f.read()
@@ -473,7 +486,10 @@ def run_api_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         from _toy_models import GNNLJDirectionalEAM
         opt_data = {'data': data_list[:12]}  # opt only needs 'data', no labels
-        _write_opt_inp(opt_inp, batch_size=4, device=device, output_dir=opt_log_dir, chk_dir=log_dir)
+        _write_opt_inp(
+            opt_inp, batch_size=4, device=device, output_dir=opt_log_dir,
+            chk_dir=log_dir, maxiter=opt_maxiter,
+        )
         optimizer = StructureOptimization(opt_inp)
         optimizer.set_dataset(opt_data)
         optimizer.set_dataloader(PyGDataLoader)
@@ -485,7 +501,10 @@ def run_api_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         from _toy_models import GNNLJDirectionalEAM
         md_data = {'data': data_list[:12]}
-        _write_md_inp(md_inp, batch_size=4, device=device, output_dir=md_log_dir, chk_dir=log_dir)
+        _write_md_inp(
+            md_inp, batch_size=4, device=device, output_dir=md_log_dir,
+            chk_dir=log_dir, max_step=md_max_step,
+        )
         runner = MolecularDynamics(md_inp)
         runner.set_dataset(md_data)
         runner.set_dataloader(PyGDataLoader)
@@ -497,7 +516,10 @@ def run_api_tests(tmp_base: str = '/dev/shm') -> List[str]:
         # ----------------------------------------------------------------
         from _toy_models import GNNLJDirectionalEAM
         mc_data = {'data': data_list[:12]}
-        _write_mc_inp(mc_inp, batch_size=4, device=device, output_dir=mc_log_dir, chk_dir=log_dir)
+        _write_mc_inp(
+            mc_inp, batch_size=4, device=device, output_dir=mc_log_dir,
+            chk_dir=log_dir, maxiter=mc_maxiter,
+        )
         runner_mc = MonteCarlo(mc_inp)
         runner_mc.set_dataset(mc_data)
         runner_mc.set_dataloader(PyGDataLoader)
