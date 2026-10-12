@@ -3,12 +3,13 @@
 #  Version: 0.9a
 #  File: fast_test.py
 #  Environment: Python 3.12
+from __future__ import annotations
+
 import time
 import unittest
 import os
 import glob
 import sys
-from contextlib import nullcontext
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # add BUCToolkit root to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -33,6 +34,75 @@ from _test_config import get_test_section, load_test_config
 INPUT_PATH = './inputs4test/'
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+
+class EmptyProfiler:
+    """A traditional no-op context used by the non-profile test suite."""
+
+    def __enter__(self):
+        """Enter the empty profiling section.
+
+        Return:
+            This empty profiler.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Leave the empty profiling section.
+
+        Return:
+            ``False`` so test exceptions propagate normally.
+        """
+        return False
+
+
+PROFILE_KEYS = (
+    'test_MD.MD_STATIC_CPU', 'test_MD.MD_STATIC_GPU', 'test_MD.MD_NVE_GPU',
+    'test_MD.MD_CSVR_CPU', 'test_MD.MD_CSVR_GPU', 'test_MD.MD_LANG_CPU',
+    'test_MD.MD_LANG_GPU', 'test_MD.MD_NOSE_CPU', 'test_MD.MD_NOSE_GPU',
+    'test_CMD.CMD_NVE_CPU', 'test_CMD.CMD_NVE_GPU', 'test_CMD.CMD_CSVR_CPU',
+    'test_CMD.CMD_CSVR_GPU', 'test_CMD.CMD_LANG_CPU', 'test_CMD.CMD_LANG_GPU',
+    'test_CMD.CMD_NOSE_CPU', 'test_CMD.CMD_NOSE_GPU',
+    'test_MC.MC_GAUSS_NVT_CPU', 'test_MC.MC_CAUCHY_NVT_CPU',
+    'test_MC.MC_UNIFORM_NVT_CPU', 'test_MC.MC_GAUSS_NVT_GPU',
+    'test_MC.MC_GAUSS_ANNEAL_GPU',
+    'test_OPT.OPT_CG_MT_CPU', 'test_OPT.OPT_CG_MT_GPU',
+    'test_OPT.OPT_CG_BK_CPU', 'test_OPT.OPT_CG_BK_GPU',
+    'test_OPT.OPT_BFGS_MT_CPU', 'test_OPT.OPT_BFGS_MT_GPU',
+    'test_OPT.OPT_BFGS_BK_CPU', 'test_OPT.OPT_BFGS_BK_GPU',
+    'test_OPT.OPT_FIRE_CPU', 'test_OPT.OPT_FIRE_GPU',
+    'test_TS.TS_DIMER_CPU', 'test_TS.TS_DIMER_GPU',
+    'test_TS.TS_KRYLOVNEWTON_CPU', 'test_TS.TS_KRYLOVNEWTON_GPU',
+    'test_TS.TS_KRYLOVDYNAMICS_CPU', 'test_TS.TS_KRYLOVDYNAMICS_GPU',
+    'test_parallel.opt_cpu_cg_mt.01', 'test_parallel.opt_cpu_cg_mt.17',
+    'test_parallel.opt_cpu_cg_mt.33', 'test_parallel.opt_cpu_cg_mt.49',
+    'test_parallel.opt_gpu_cg_mt.01', 'test_parallel.opt_gpu_cg_mt.17',
+    'test_parallel.opt_gpu_cg_mt.33', 'test_parallel.opt_gpu_cg_mt.49',
+    'test_parallel.opt_cpu_fire.01', 'test_parallel.opt_cpu_fire.17',
+    'test_parallel.opt_cpu_fire.33', 'test_parallel.opt_cpu_fire.49',
+    'test_parallel.opt_gpu_fire.01', 'test_parallel.opt_gpu_fire.17',
+    'test_parallel.opt_gpu_fire.33', 'test_parallel.opt_gpu_fire.49',
+    'test_parallel.mc_cpu_nvt.01', 'test_parallel.mc_cpu_nvt.17',
+    'test_parallel.mc_cpu_nvt.33', 'test_parallel.mc_cpu_nvt.49',
+    'test_parallel.mc_gpu_nvt.01', 'test_parallel.mc_gpu_nvt.17',
+    'test_parallel.mc_gpu_nvt.33', 'test_parallel.mc_gpu_nvt.49',
+    'test_parallel.md_cpu_nve.01', 'test_parallel.md_cpu_nve.17',
+    'test_parallel.md_cpu_nve.33', 'test_parallel.md_cpu_nve.49',
+    'test_parallel.md_gpu_nve.01', 'test_parallel.md_gpu_nve.17',
+    'test_parallel.md_gpu_nve.33', 'test_parallel.md_gpu_nve.49',
+    'test_parallel.md_cpu_csvr_nvt.01', 'test_parallel.md_cpu_csvr_nvt.17',
+    'test_parallel.md_cpu_csvr_nvt.33', 'test_parallel.md_cpu_csvr_nvt.49',
+    'test_parallel.md_gpu_csvr_nvt.01', 'test_parallel.md_gpu_csvr_nvt.17',
+    'test_parallel.md_gpu_csvr_nvt.33', 'test_parallel.md_gpu_csvr_nvt.49',
+    'test_parallel.md_cpu_lang_nvt.01', 'test_parallel.md_cpu_lang_nvt.17',
+    'test_parallel.md_cpu_lang_nvt.33', 'test_parallel.md_cpu_lang_nvt.49',
+    'test_parallel.md_gpu_lang_nvt.01', 'test_parallel.md_gpu_lang_nvt.17',
+    'test_parallel.md_gpu_lang_nvt.33', 'test_parallel.md_gpu_lang_nvt.49',
+    'test_parallel.md_cpu_nose_nvt.01', 'test_parallel.md_cpu_nose_nvt.17',
+    'test_parallel.md_cpu_nose_nvt.33', 'test_parallel.md_cpu_nose_nvt.49',
+    'test_parallel.md_gpu_nose_nvt.01', 'test_parallel.md_gpu_nose_nvt.17',
+    'test_parallel.md_gpu_nose_nvt.33', 'test_parallel.md_gpu_nose_nvt.49',
+)
+
 class FastTest(unittest.TestCase):
 
     TEST_MODE = 'fast'
@@ -44,6 +114,23 @@ class FastTest(unittest.TestCase):
             None.
         """
         self.test_config = load_test_config(self.TEST_MODE)
+        self.profilers_dict = {key: EmptyProfiler() for key in PROFILE_KEYS}
+        for method in ('EnergyDiff', 'GradDiff', 'Autograd'):
+            for device in ('cpu', 'cuda:0'):
+                for dtype in (th.float32, th.float64):
+                    self.profilers_dict[f'test_VIB.{method}.{device}.{dtype}'] = EmptyProfiler()
+        for n_atom in (7, 8):
+            self.profilers_dict[f'test_VIB.different_shapes.{n_atom}'] = EmptyProfiler()
+        parallel_names = (
+            'opt_cpu_cg_mt', 'opt_gpu_cg_mt', 'opt_cpu_fire', 'opt_gpu_fire',
+            'mc_cpu_nvt', 'mc_gpu_nvt', 'md_cpu_nve', 'md_gpu_nve',
+            'md_cpu_csvr_nvt', 'md_gpu_csvr_nvt', 'md_cpu_lang_nvt',
+            'md_gpu_lang_nvt', 'md_cpu_nose_nvt', 'md_gpu_nose_nvt',
+        )
+        for name in parallel_names:
+            for batch_number in range(1, 64, 4):
+                self.profilers_dict[f'test_parallel.{name}.{batch_number:02d}'] = EmptyProfiler()
+        self.set_profiler()
         # data
         ATOMS = [8, 5, 10]
         data = build_cubic_lattice_batch(ATOMS, 1.3, 0.05)
@@ -85,6 +172,20 @@ class FastTest(unittest.TestCase):
                 )
         print(f"NOTE: Some test logs and chk file will be saved to path '{self.out_pt}logs' and '{self.out_pt}results'")
 
+    def set_profiler(self, profiler: th.profiler.profile | None = None, **profiler_kwargs) -> None:
+        """Set the profiler context used by the next static test section.
+
+        Args:
+            profiler: Existing profiler context, or ``None`` for no-op mode.
+            **profiler_kwargs: Accepted for profile-suite construction.
+
+        Return:
+            None.
+        """
+        if profiler is None and profiler_kwargs:
+            profiler = th.profiler.profile(**profiler_kwargs)
+        self._profiler = profiler if profiler is not None else EmptyProfiler()
+
     def _config(self, test_name: str) -> dict:
         """Return one test method's YAML configuration section.
 
@@ -95,18 +196,6 @@ class FastTest(unittest.TestCase):
             Configuration mapping for the requested test.
         """
         return get_test_section(self.test_config, test_name)
-
-    def _profile_section(self, name: str | None):
-        """Return the profiling context for one calculation section.
-
-        Args:
-            name: Section label, or ``None`` when the section is not sampled.
-
-        Return:
-            A context manager.  The fast suite uses a no-op context; the
-            profile suite overrides this method with the Torch profiler.
-        """
-        return nullcontext()
 
     def test_Train(self):
         """
@@ -212,9 +301,8 @@ class FastTest(unittest.TestCase):
             print("*"*89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*"*89 + '\n')
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
-            with self._profile_section(
-                f'test_MD.MD.{len(_data.to_data_list()):02d}samp'
-            ):
+            self.set_profiler(self.profilers_dict[f'test_MD.{RUNNER_NAME[i]}'])
+            with self._profiler:
                 runner.run(
                     model_test.Energy,
                     _data.pos,
@@ -402,9 +490,8 @@ class FastTest(unittest.TestCase):
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             t_st = time.perf_counter()
-            with self._profile_section(
-                f'test_CMD.CMD.{len(data_list):02d}samp'
-            ):
+            self.set_profiler(self.profilers_dict[f'test_CMD.{RUNNER_NAME[i]}'])
+            with self._profiler:
                 runner.run(
                     model_test.Energy,
                     _pos,           # X: (B, N, 3) — regular batch
@@ -537,9 +624,8 @@ class FastTest(unittest.TestCase):
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
-            with self._profile_section(
-                f'test_MC.MC.{len(_data.to_data_list()):02d}samp'
-            ):
+            self.set_profiler(self.profilers_dict[f'test_MC.{RUNNER_NAME[i]}'])
+            with self._profiler:
                 runner.run(
                     model_test.Energy,
                     _data.pos,
@@ -760,9 +846,8 @@ class FastTest(unittest.TestCase):
             # set dump metadata
             _atm_per_struct = [[26] * (8**3), [13] * (5**3), [46] * (10**3)]
             runner.set_system_info(atomic_numbers=_atm_per_struct)
-            with self._profile_section(
-                f'test_OPT.OPT.{len(_data.to_data_list()):02d}samp'
-            ):
+            self.set_profiler(self.profilers_dict[f'test_OPT.{RUNNER_NAME[i]}'])
+            with self._profiler:
                 y, x_min, g = runner.run(
                     model_test.Energy,
                     _data.pos,
@@ -895,6 +980,7 @@ class FastTest(unittest.TestCase):
         for dtp in ('cpu', 'cuda:0'):
             X0 = X0.to(dtp)
             data = data.to(dtp)
+            device_name = 'GPU' if dtp.startswith('cuda') else 'CPU'
             # Dimer
             dimer = Dimer(
                 TS_E_THRESHOLD, TS_F_THRESHOLD, -0.1, TS_X_THRESHOLD,
@@ -903,7 +989,8 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); dimer.set_batch_updater(updater)
             t_st = time.perf_counter()
-            with self._profile_section(f'test_TS.TS.{len(bi):02d}samp'):
+            self.set_profiler(self.profilers_dict[f'test_TS.TS_DIMER_{device_name}'])
+            with self._profiler:
                 y_d, X_d = dimer.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
                                    grad_func_args=(data,), batch_indices=bi,
                                    is_grad_func_contain_y=False, require_grad=False)
@@ -926,7 +1013,8 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); kn.set_batch_updater(updater)
             t_st = time.perf_counter()
-            with self._profile_section(f'test_TS.TS.{len(bi):02d}samp'):
+            self.set_profiler(self.profilers_dict[f'test_TS.TS_KRYLOVNEWTON_{device_name}'])
+            with self._profiler:
                 y_kn, X_kn = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
                                     grad_func_args=(data,), batch_indices=bi,
                                     is_grad_func_contain_y=False, require_grad=False)
@@ -949,7 +1037,8 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); kd.set_batch_updater(updater)
             t_st = time.perf_counter()
-            with self._profile_section(f'test_TS.TS.{len(bi):02d}samp'):
+            self.set_profiler(self.profilers_dict[f'test_TS.TS_KRYLOVDYNAMICS_{device_name}'])
+            with self._profiler:
                 y_kd, X_kd = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
                                     grad_func_args=(data,), batch_indices=bi,
                                     is_grad_func_contain_y=False, require_grad=False, extra_krylov_dim=1)
@@ -1049,9 +1138,9 @@ class FastTest(unittest.TestCase):
                             dump_hessian=True,
                         )
                         try:
-                            with self._profile_section(
-                                f'test_VIB.VIB.{1:02d}samp'
-                            ):
+                            profile_key = f'test_VIB.{method}.{device}.{dtype}'
+                            self.set_profiler(self.profilers_dict[profile_key])
+                            with self._profiler:
                                 frequencies, normal_mode = calculator.normal_mode(
                                     energy,
                                     coordinates.clone(),
@@ -1109,9 +1198,8 @@ class FastTest(unittest.TestCase):
         try:
             for n_atom in (7, 8):
                 coordinates = th.zeros(n_atom, 3)
-                with self._profile_section(
-                    f'test_VIB.VIB.{n_atom:02d}samp'
-                ):
+                self.set_profiler(self.profilers_dict[f'test_VIB.different_shapes.{n_atom}'])
+                with self._profiler:
                     calculator.normal_mode(
                         lambda X: X.square().sum(dim=(-2, -1)),
                         coordinates,
@@ -1321,9 +1409,7 @@ class FastTest(unittest.TestCase):
         for name, runner in runners.items():
             print(f"TASK: {name} started... ")
             # main loop
-            for batch_iteration, i in enumerate(
-                range(1, len(SMALL_BATCHES) + 1, 4)
-            ):
+            for i in range(1, len(SMALL_BATCHES)+1, 4):
                 # handle inp data
                 ATOMS = SMALL_BATCHES[:i]
                 data = build_cubic_lattice_batch(ATOMS, 3., 1.)
@@ -1337,17 +1423,14 @@ class FastTest(unittest.TestCase):
                 # running
                 _data = data.to(runner.device).clone()
                 t_st = time.perf_counter()
-                profile_name = (
-                    f'test_parallel.OPT.{i:02d}samp'
-                    if batch_iteration % 4 == 0 else None
-                )
                 if name.startswith('opt_'):
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
                     updater = PygBatchUpdater()
                     updater.initialize()
                     runner.set_batch_updater(updater, updater)
                     runner: FIRE
-                    with self._profile_section(profile_name):
+                    self.set_profiler(self.profilers_dict[f'test_parallel.{name}.{i:02d}'])
+                    with self._profiler:
                         y, x_min, g = runner.run(
                             model_test.Energy,
                             _data.pos,
@@ -1367,11 +1450,8 @@ class FastTest(unittest.TestCase):
                 elif name.startswith('md_'):
                     runner: NVT
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
-                    profile_name = (
-                        f'test_parallel.MD.{i:02d}samp'
-                        if batch_iteration % 4 == 0 else None
-                    )
-                    with self._profile_section(profile_name):
+                    self.set_profiler(self.profilers_dict[f'test_parallel.{name}.{i:02d}'])
+                    with self._profiler:
                         runner.run(
                             model_test.Energy,
                             _data.pos,
@@ -1393,11 +1473,8 @@ class FastTest(unittest.TestCase):
                 elif name.startswith('mc_'):
                     runner: MMC
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
-                    profile_name = (
-                        f'test_parallel.MC.{i:02d}samp'
-                        if batch_iteration % 4 == 0 else None
-                    )
-                    with self._profile_section(profile_name):
+                    self.set_profiler(self.profilers_dict[f'test_parallel.{name}.{i:02d}'])
+                    with self._profiler:
                         runner.run(
                             model_test.Energy,
                             _data.pos,
@@ -1433,11 +1510,7 @@ class FastTest(unittest.TestCase):
         tmp = self.out_pt
         try:
             from test_apis import run_api_tests
-            errors = run_api_tests(
-                tmp,
-                config=self._config('test_APIS'),
-                profile_section=self._profile_section,
-            )
+            errors = run_api_tests(tmp, config=self._config('test_APIS'))
             if errors:
                 self.fail('\n'.join(errors))
         finally:
