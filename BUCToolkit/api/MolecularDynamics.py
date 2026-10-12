@@ -94,14 +94,14 @@ class MolecularDynamics(_BaseAPI):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
+        if (self.START == 'resume') or (self.START == 1) or (self.START == 2) or (self.START == 'param_only'):
             _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
             hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
         else:
             _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
             hyperparam = self._current_model_hyperparameters()
         _model = self._instantiate_model(model, hyperparam)
-        if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
+        if (self.START == 'resume') or (self.START == 1) or (self.START == 2) or (self.START == 'param_only'):
             if self.param is None:
                 _model.load_state_dict(_chk_model_param, strict=self.STRICT_LOAD)
             else:

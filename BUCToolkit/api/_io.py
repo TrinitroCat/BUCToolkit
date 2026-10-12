@@ -304,7 +304,7 @@ class _CONFIGS(object):
             self.logger.info(' FROM_SCRATCH <<')
         elif (self.START == 1) or (self.START == 'resume'):
             self.logger.info(' RESUME <<')
-        elif (self.START == 2) or (self.START == 'load_param'):
+        elif (self.START == 2) or (self.START == 'param_only'):
             self.logger.info(' LOAD_PARAMETER <<')
         self.logger.info(f' COMMENTS: {self.COMMENTS}')
         self.logger.info(f' I/O INFORMATION:')
@@ -314,7 +314,7 @@ class _CONFIGS(object):
         else:
             output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
             self.logger.info(f'\tLOG WILL OUTPUT TO {output_file}')  # type: ignore
-        if (self.START == 2) or (self.START == 'load_param'):
+        if (self.START == 2) or (self.START == 'param_only'):
             self.logger.info(f'\tMODEL PARAMETERS LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
         elif (self.START == 1) or (self.START == 'resume'):
             self.logger.info(f'\tMODEL CHECKPOINT FILE LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
