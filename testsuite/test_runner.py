@@ -33,7 +33,7 @@ def build_test_suite(mode: str) -> unittest.TestSuite:
 
         test_class = FastTest
     elif mode == "profile":
-        from profile_test import ProfileTest
+        from test_profile import ProfileTest
 
         test_class = ProfileTest
     else:

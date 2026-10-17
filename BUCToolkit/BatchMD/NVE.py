@@ -43,7 +43,7 @@ class NVE(_BaseMD):
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
             verbose: int = 0,
-            is_compile: bool = False,
+            is_compile: Literal['full', 'partial', 'no'] | bool = False,
             compile_kwargs: dict | None = None,
     ):
         super().__init__(

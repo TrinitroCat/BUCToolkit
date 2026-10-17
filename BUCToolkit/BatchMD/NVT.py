@@ -49,7 +49,7 @@ class NVT(_BaseMD):
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
             verbose: int = 2,
-            is_compile: bool = False,
+            is_compile: Literal['full', 'partial', 'no'] | bool = False,
             compile_kwargs: dict | None = None,
     ) -> None:
         """
@@ -134,7 +134,12 @@ class NVT(_BaseMD):
             self._chi2_dist = th.distributions.chi2.Chi2(
                 df=th.clamp(self.free_degree.float() - 1.0, min=1.0)
             )
-            return self.__CSVR_cpu if self.device.type != 'cuda' else self.__CSVR_cuda
+            # handle the compilation
+            if False and self.is_compile_partial and (not self.is_compile):  # I found that compilation cannot accelerate.
+                self._compiled_csvr_update_V = th.compile(self._csvr_update_V, **self.compile_kwargs)
+                return self.__CSVR_comp
+            else:
+                return self.__CSVR_cpu if self.device.type != 'cuda' else self.__CSVR_cuda
         else:
             raise NotImplementedError("Unknown Thermostat Type.")
 
@@ -176,41 +181,9 @@ class NVT(_BaseMD):
         self._graph_A = None
         self._graph_B = None
 
-    def _build_csver_graphs(self, s, masses, atom_masks, batch_indices):
-        """Build CUDAGraphs A and B for CSVR thermostat using real simulation tensors."""
-        if self.device.type != 'cuda':
-            return
-        self._buf_F = th.empty_like(s.X)
-        half_dt = 0.5 * self.time_step * 9.64853329045427e-3
-        # --- Graph A: V += 0.5*dt*F/m, X += dt*V ---
-        self._graph_A = th.cuda.CUDAGraph()
-        with th.cuda.graph(self._graph_A):
-            s.V.addcdiv_(self._buf_F, masses, value=half_dt)
-            s.X.add_(s.V, alpha=self.time_step)
-        # --- Graph B: F*mask, V += 0.5*dt*F/m, Ek_T, CSVR thermostat ---
-        Nf = self.free_degree
-        self._graph_B = th.cuda.CUDAGraph()
-        with th.cuda.graph(self._graph_B):
-            self._buf_F.mul_(atom_masks)
-            s.V.addcdiv_(self._buf_F, masses, value=half_dt)
-            self.Ek, _ = self._reduce_Ek_T(batch_indices, masses, s.V)
-            if batch_indices is not None:
-                K = th.clamp(self.Ek, min=self.epsK)
-                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
-                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, self._buf_R) ** 2
-                alpha2.addcmul_(f, self._buf_S).clamp_min_(self.epsK)
-                alpha = th.sqrt(alpha2).reshape(1, -1, 1)
-                s.V *= alpha.index_select(1, self.batch_scatter)
-            else:
-                K = th.clamp(self.Ek, min=self.epsK)
-                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
-                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
-                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, self._buf_R) ** 2
-                alpha2.addcmul_(f, self._buf_S).clamp_min_(self.epsK)
-                alpha = th.sqrt(alpha2).reshape(-1, 1, 1)
-                s.V *= alpha
-
+    # =========================================================================
+    #                   Langevin THERMOSTAT
+    # =========================================================================
     def __Langevin(
             self,
             s,
@@ -260,6 +233,10 @@ class NVT(_BaseMD):
             s.Energy = Energy
             s.Force = Forces
 
+    # =========================================================================
+    #                   Naive VR THERMOSTAT
+    # =========================================================================
+
     def __VR(
             self,
             s,
@@ -304,6 +281,45 @@ class NVT(_BaseMD):
             s.Energy = Energy
             s.Force = Forces
 
+    # =========================================================================
+    #                   CSVR THERMOSTAT
+    # =========================================================================
+
+    def _build_csver_graphs(self, s, masses, atom_masks, batch_indices):
+        """Build CUDAGraphs A and B for CSVR thermostat using real simulation tensors."""
+        if self.device.type != 'cuda':
+            return
+        self._buf_F = th.empty_like(s.X)
+        half_dt = 0.5 * self.time_step * 9.64853329045427e-3
+        # --- Graph A: V += 0.5*dt*F/m, X += dt*V ---
+        self._graph_A = th.cuda.CUDAGraph()
+        with th.cuda.graph(self._graph_A):
+            s.V.addcdiv_(self._buf_F, masses, value=half_dt)
+            s.X.add_(s.V, alpha=self.time_step)
+        # --- Graph B: F*mask, V += 0.5*dt*F/m, Ek_T, CSVR thermostat ---
+        Nf = self.free_degree
+        self._graph_B = th.cuda.CUDAGraph()
+        with th.cuda.graph(self._graph_B):
+            self._buf_F.mul_(atom_masks)
+            s.V.addcdiv_(self._buf_F, masses, value=half_dt)
+            self.Ek, _ = self._reduce_Ek_T(self.batch_tensor, masses, s.V)
+            if batch_indices is not None:
+                K = th.clamp(self.Ek, min=self.epsK)
+                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, self._buf_R) ** 2
+                alpha2.addcmul_(f, self._buf_S).clamp_min_(self.epsK)
+                alpha = th.sqrt(alpha2).reshape(1, -1, 1)
+                s.V *= alpha.index_select(1, self.batch_scatter)
+            else:
+                K = th.clamp(self.Ek, min=self.epsK)
+                f = self.one_sub_c * self.EK_TARGET / (Nf * K)
+                sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+                alpha2 = th.addcmul(self.sqrt_c, sqrt_f, self._buf_R) ** 2
+                alpha2.addcmul_(f, self._buf_S).clamp_min_(self.epsK)
+                alpha = th.sqrt(alpha2).reshape(-1, 1, 1)
+                s.V *= alpha
+
     def __CSVR_cpu(
             self,
             s,
@@ -327,7 +343,7 @@ class NVT(_BaseMD):
             if self.Ek_T_graph is not None:
                 self.Ek_T_graph.replay()
             else:
-                self.Ek, _ = self._reduce_Ek_T(batch_indices, masses, s.V)
+                self.Ek, _ = self._reduce_Ek_T(self.batch_tensor, masses, s.V)
             Nf = self.free_degree
             if batch_indices is not None:
                 K = th.clamp(self.Ek, min=self.epsK)
@@ -351,6 +367,86 @@ class NVT(_BaseMD):
                 s.V *= alpha
             s.Energy = Energy
             s.Force = Forces
+
+
+    def __CSVR_comp(
+            self,
+            s,
+            func, grad_func_,
+            func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+            masses, atom_masks, is_grad_func_contain_y, batch_indices
+    ) -> None:
+        """ Compilation version of CSVR """
+        half_dt = self.half_time_step_const
+        time_step = self.time_step
+        with th.no_grad():
+            s.V.addcdiv_(s.Force, masses, value=half_dt)
+            s.X.add_(s.V, alpha=time_step)
+            Energy, Forces = self._calc_EF(
+                s.X, func, func_args, func_kwargs,
+                grad_func_, grad_func_args, grad_func_kwargs,
+                self.require_grad, is_grad_func_contain_y
+            )
+            self._compiled_csvr_update_V(
+                s.V,
+                Forces,
+                masses,
+                atom_masks,
+                batch_indices,
+                half_dt
+            )
+            s.Energy = Energy
+            s.Force = Forces
+
+    def _csvr_update_V(
+            self,
+            V,
+            Forces,
+            masses,
+            atom_masks,
+            batch_indices,
+            half_dt
+    ):
+        """
+        Implicitly update Velocity V by CSVR
+        Args:
+            V:
+            Forces:
+            masses:
+            atom_masks:
+            batch_indices:
+            half_dt:
+
+        Returns:
+
+        """
+        Forces.mul_(atom_masks)
+        V.addcdiv_(Forces, masses, value=half_dt)
+        if self.Ek_T_graph is not None:
+            self.Ek_T_graph.replay()
+        else:
+            self.Ek, _ = self._reduce_Ek_T(self.batch_tensor, masses, V)
+        Nf = self.free_degree
+        if batch_indices is not None:
+            K = th.clamp(self.Ek, min=self.epsK)
+            f = self.one_sub_c * self.EK_TARGET / (Nf * K)
+            sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+            R = th.randn_like(K)
+            S = self._chi2_dist.sample()
+            alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
+            alpha2.addcmul_(f, S).clamp_min_(self.epsK)
+            alpha = th.sqrt(alpha2).reshape(1, -1, 1)
+            V *= alpha.index_select(1, self.batch_scatter)
+        else:
+            K = th.clamp(self.Ek, min=self.epsK)
+            f = self.one_sub_c * self.EK_TARGET / (Nf * K)
+            sqrt_f = th.sqrt(th.clamp(f, min=0.0))
+            R = th.randn_like(K)
+            S = self._chi2_dist.sample()
+            alpha2 = th.addcmul(self.sqrt_c, sqrt_f, R) ** 2
+            alpha2.addcmul_(f, S).clamp_min_(self.epsK)
+            alpha = th.sqrt(alpha2).reshape(-1, 1, 1)
+            V *= alpha
 
     def __CSVR_cuda(
             self,
@@ -398,6 +494,9 @@ class NVT(_BaseMD):
         s.Energy = Energy
         s.Force = Forces
 
+    # =========================================================================
+    #                   Nose-Hoover THERMOSTAT
+    # =========================================================================
     def __NoseHoover(
             self,
             s,
@@ -480,6 +579,10 @@ class NVT(_BaseMD):
                 )
             s.Energy = Energy
             s.Force = Forces
+
+    # =========================================================================
+    #                   END THERMOSTATS
+    # =========================================================================
 
     def _updateXV(
             self,

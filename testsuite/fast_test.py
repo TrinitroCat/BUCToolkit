@@ -3,8 +3,6 @@
 #  Version: 0.9a
 #  File: fast_test.py
 #  Environment: Python 3.12
-from __future__ import annotations
-
 import time
 import unittest
 import os
@@ -34,75 +32,6 @@ from _test_config import get_test_section, load_test_config
 INPUT_PATH = './inputs4test/'
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-
-class EmptyProfiler:
-    """A traditional no-op context used by the non-profile test suite."""
-
-    def __enter__(self):
-        """Enter the empty profiling section.
-
-        Return:
-            This empty profiler.
-        """
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        """Leave the empty profiling section.
-
-        Return:
-            ``False`` so test exceptions propagate normally.
-        """
-        return False
-
-
-PROFILE_KEYS = (
-    'test_MD.MD_STATIC_CPU', 'test_MD.MD_STATIC_GPU', 'test_MD.MD_NVE_GPU',
-    'test_MD.MD_CSVR_CPU', 'test_MD.MD_CSVR_GPU', 'test_MD.MD_LANG_CPU',
-    'test_MD.MD_LANG_GPU', 'test_MD.MD_NOSE_CPU', 'test_MD.MD_NOSE_GPU',
-    'test_CMD.CMD_NVE_CPU', 'test_CMD.CMD_NVE_GPU', 'test_CMD.CMD_CSVR_CPU',
-    'test_CMD.CMD_CSVR_GPU', 'test_CMD.CMD_LANG_CPU', 'test_CMD.CMD_LANG_GPU',
-    'test_CMD.CMD_NOSE_CPU', 'test_CMD.CMD_NOSE_GPU',
-    'test_MC.MC_GAUSS_NVT_CPU', 'test_MC.MC_CAUCHY_NVT_CPU',
-    'test_MC.MC_UNIFORM_NVT_CPU', 'test_MC.MC_GAUSS_NVT_GPU',
-    'test_MC.MC_GAUSS_ANNEAL_GPU',
-    'test_OPT.OPT_CG_MT_CPU', 'test_OPT.OPT_CG_MT_GPU',
-    'test_OPT.OPT_CG_BK_CPU', 'test_OPT.OPT_CG_BK_GPU',
-    'test_OPT.OPT_BFGS_MT_CPU', 'test_OPT.OPT_BFGS_MT_GPU',
-    'test_OPT.OPT_BFGS_BK_CPU', 'test_OPT.OPT_BFGS_BK_GPU',
-    'test_OPT.OPT_FIRE_CPU', 'test_OPT.OPT_FIRE_GPU',
-    'test_TS.TS_DIMER_CPU', 'test_TS.TS_DIMER_GPU',
-    'test_TS.TS_KRYLOVNEWTON_CPU', 'test_TS.TS_KRYLOVNEWTON_GPU',
-    'test_TS.TS_KRYLOVDYNAMICS_CPU', 'test_TS.TS_KRYLOVDYNAMICS_GPU',
-    'test_parallel.opt_cpu_cg_mt.01', 'test_parallel.opt_cpu_cg_mt.17',
-    'test_parallel.opt_cpu_cg_mt.33', 'test_parallel.opt_cpu_cg_mt.49',
-    'test_parallel.opt_gpu_cg_mt.01', 'test_parallel.opt_gpu_cg_mt.17',
-    'test_parallel.opt_gpu_cg_mt.33', 'test_parallel.opt_gpu_cg_mt.49',
-    'test_parallel.opt_cpu_fire.01', 'test_parallel.opt_cpu_fire.17',
-    'test_parallel.opt_cpu_fire.33', 'test_parallel.opt_cpu_fire.49',
-    'test_parallel.opt_gpu_fire.01', 'test_parallel.opt_gpu_fire.17',
-    'test_parallel.opt_gpu_fire.33', 'test_parallel.opt_gpu_fire.49',
-    'test_parallel.mc_cpu_nvt.01', 'test_parallel.mc_cpu_nvt.17',
-    'test_parallel.mc_cpu_nvt.33', 'test_parallel.mc_cpu_nvt.49',
-    'test_parallel.mc_gpu_nvt.01', 'test_parallel.mc_gpu_nvt.17',
-    'test_parallel.mc_gpu_nvt.33', 'test_parallel.mc_gpu_nvt.49',
-    'test_parallel.md_cpu_nve.01', 'test_parallel.md_cpu_nve.17',
-    'test_parallel.md_cpu_nve.33', 'test_parallel.md_cpu_nve.49',
-    'test_parallel.md_gpu_nve.01', 'test_parallel.md_gpu_nve.17',
-    'test_parallel.md_gpu_nve.33', 'test_parallel.md_gpu_nve.49',
-    'test_parallel.md_cpu_csvr_nvt.01', 'test_parallel.md_cpu_csvr_nvt.17',
-    'test_parallel.md_cpu_csvr_nvt.33', 'test_parallel.md_cpu_csvr_nvt.49',
-    'test_parallel.md_gpu_csvr_nvt.01', 'test_parallel.md_gpu_csvr_nvt.17',
-    'test_parallel.md_gpu_csvr_nvt.33', 'test_parallel.md_gpu_csvr_nvt.49',
-    'test_parallel.md_cpu_lang_nvt.01', 'test_parallel.md_cpu_lang_nvt.17',
-    'test_parallel.md_cpu_lang_nvt.33', 'test_parallel.md_cpu_lang_nvt.49',
-    'test_parallel.md_gpu_lang_nvt.01', 'test_parallel.md_gpu_lang_nvt.17',
-    'test_parallel.md_gpu_lang_nvt.33', 'test_parallel.md_gpu_lang_nvt.49',
-    'test_parallel.md_cpu_nose_nvt.01', 'test_parallel.md_cpu_nose_nvt.17',
-    'test_parallel.md_cpu_nose_nvt.33', 'test_parallel.md_cpu_nose_nvt.49',
-    'test_parallel.md_gpu_nose_nvt.01', 'test_parallel.md_gpu_nose_nvt.17',
-    'test_parallel.md_gpu_nose_nvt.33', 'test_parallel.md_gpu_nose_nvt.49',
-)
-
 class FastTest(unittest.TestCase):
 
     TEST_MODE = 'fast'
@@ -114,23 +43,6 @@ class FastTest(unittest.TestCase):
             None.
         """
         self.test_config = load_test_config(self.TEST_MODE)
-        self.profilers_dict = {key: EmptyProfiler() for key in PROFILE_KEYS}
-        for method in ('EnergyDiff', 'GradDiff', 'Autograd'):
-            for device in ('cpu', 'cuda:0'):
-                for dtype in (th.float32, th.float64):
-                    self.profilers_dict[f'test_VIB.{method}.{device}.{dtype}'] = EmptyProfiler()
-        for n_atom in (7, 8):
-            self.profilers_dict[f'test_VIB.different_shapes.{n_atom}'] = EmptyProfiler()
-        parallel_names = (
-            'opt_cpu_cg_mt', 'opt_gpu_cg_mt', 'opt_cpu_fire', 'opt_gpu_fire',
-            'mc_cpu_nvt', 'mc_gpu_nvt', 'md_cpu_nve', 'md_gpu_nve',
-            'md_cpu_csvr_nvt', 'md_gpu_csvr_nvt', 'md_cpu_lang_nvt',
-            'md_gpu_lang_nvt', 'md_cpu_nose_nvt', 'md_gpu_nose_nvt',
-        )
-        for name in parallel_names:
-            for batch_number in range(1, 64, 4):
-                self.profilers_dict[f'test_parallel.{name}.{batch_number:02d}'] = EmptyProfiler()
-        self.set_profiler()
         # data
         ATOMS = [8, 5, 10]
         data = build_cubic_lattice_batch(ATOMS, 1.3, 0.05)
@@ -171,20 +83,6 @@ class FastTest(unittest.TestCase):
                     'Please clear such files to continue tests.'
                 )
         print(f"NOTE: Some test logs and chk file will be saved to path '{self.out_pt}logs' and '{self.out_pt}results'")
-
-    def set_profiler(self, profiler: th.profiler.profile | None = None, **profiler_kwargs) -> None:
-        """Set the profiler context used by the next static test section.
-
-        Args:
-            profiler: Existing profiler context, or ``None`` for no-op mode.
-            **profiler_kwargs: Accepted for profile-suite construction.
-
-        Return:
-            None.
-        """
-        if profiler is None and profiler_kwargs:
-            profiler = th.profiler.profile(**profiler_kwargs)
-        self._profiler = profiler if profiler is not None else EmptyProfiler()
 
     def _config(self, test_name: str) -> dict:
         """Return one test method's YAML configuration section.
@@ -301,24 +199,22 @@ class FastTest(unittest.TestCase):
             print("*"*89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*"*89 + '\n')
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
-            self.set_profiler(self.profilers_dict[f'test_MD.{RUNNER_NAME[i]}'])
-            with self._profiler:
-                runner.run(
-                    model_test.Energy,
-                    _data.pos,
-                    elem_list,
-                    None,
-                    None,
-                    model_test.Grad,
-                    (_data, ),
-                    None,
-                    (_data, ),
-                    None,
-                    False,
-                    self.REQUIRE_GRAD,
-                    [len(_.pos) for _ in _data.to_data_list()],
-                    move_to_center_freq=-1
-                )
+            runner.run(
+                model_test.Energy,
+                _data.pos,
+                elem_list,
+                None,
+                None,
+                model_test.Grad,
+                (_data, ),
+                None,
+                (_data, ),
+                None,
+                False,
+                self.REQUIRE_GRAD,
+                [len(_.pos) for _ in _data.to_data_list()],
+                move_to_center_freq=-1
+            )
             th.cuda.synchronize()
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
             fbs = read_md_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
@@ -490,21 +386,19 @@ class FastTest(unittest.TestCase):
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             t_st = time.perf_counter()
-            self.set_profiler(self.profilers_dict[f'test_CMD.{RUNNER_NAME[i]}'])
-            with self._profiler:
-                runner.run(
-                    model_test.Energy,
-                    _pos,           # X: (B, N, 3) — regular batch
-                    elem_list,
-                    None, None,
-                    model_test.Grad,
-                    (_graph,),      # graph with pos0, batch
-                    None,
-                    (_graph,), None,
-                    False, False,   # is_grad_contain_y, require_grad
-                    None,           # batch_indices=None → regular batch
-                    move_to_center_freq=-1
-                )
+            runner.run(
+                model_test.Energy,
+                _pos,           # X: (B, N, 3) — regular batch
+                elem_list,
+                None, None,
+                model_test.Grad,
+                (_graph,),      # graph with pos0, batch
+                None,
+                (_graph,), None,
+                False, False,   # is_grad_contain_y, require_grad
+                None,           # batch_indices=None → regular batch
+                move_to_center_freq=-1
+            )
             if runner.device.type == 'cuda':
                 th.cuda.synchronize()
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
@@ -624,19 +518,17 @@ class FastTest(unittest.TestCase):
             print("*" * 89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*" * 89 + '\n')
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
-            self.set_profiler(self.profilers_dict[f'test_MC.{RUNNER_NAME[i]}'])
-            with self._profiler:
-                runner.run(
-                    model_test.Energy,
-                    _data.pos,
-                    elem_list,
-                    None,
-                    (_data,),
-                    None,
-                    [len(_.pos) for _ in _data.to_data_list()],
-                    fixed_atom_tensor=None,
-                    move_to_center_freq=-1
-                )
+            runner.run(
+                model_test.Energy,
+                _data.pos,
+                elem_list,
+                None,
+                (_data,),
+                None,
+                [len(_.pos) for _ in _data.to_data_list()],
+                fixed_atom_tensor=None,
+                move_to_center_freq=-1
+            )
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
             # validation
             fbs = read_mc_traj(f"{self.out_pt}results/{RUNNER_NAME[i]}")
@@ -846,22 +738,20 @@ class FastTest(unittest.TestCase):
             # set dump metadata
             _atm_per_struct = [[26] * (8**3), [13] * (5**3), [46] * (10**3)]
             runner.set_system_info(atomic_numbers=_atm_per_struct)
-            self.set_profiler(self.profilers_dict[f'test_OPT.{RUNNER_NAME[i]}'])
-            with self._profiler:
-                y, x_min, g = runner.run(
-                    model_test.Energy,
-                    _data.pos,
-                    model_test.Grad,
-                    (_data,),
-                    None,
-                    (_data, ),
-                    None,
-                    False,
-                    self.REQUIRE_GRAD,
-                    True,
-                    None,
-                    [len(_.pos) for _ in _data.to_data_list()],
-                )
+            y, x_min, g = runner.run(
+                model_test.Energy,
+                _data.pos,
+                model_test.Grad,
+                (_data,),
+                None,
+                (_data, ),
+                None,
+                False,
+                self.REQUIRE_GRAD,
+                True,
+                None,
+                [len(_.pos) for _ in _data.to_data_list()],
+            )
             print(f"{RUNNER_NAME[i]} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s\n")
             # validation
             ene1, ene2, ene3 = y[0], y[1], y[2]
@@ -980,7 +870,6 @@ class FastTest(unittest.TestCase):
         for dtp in ('cpu', 'cuda:0'):
             X0 = X0.to(dtp)
             data = data.to(dtp)
-            device_name = 'GPU' if dtp.startswith('cuda') else 'CPU'
             # Dimer
             dimer = Dimer(
                 TS_E_THRESHOLD, TS_F_THRESHOLD, -0.1, TS_X_THRESHOLD,
@@ -989,11 +878,9 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); dimer.set_batch_updater(updater)
             t_st = time.perf_counter()
-            self.set_profiler(self.profilers_dict[f'test_TS.TS_DIMER_{device_name}'])
-            with self._profiler:
-                y_d, X_d = dimer.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
-                                   grad_func_args=(data,), batch_indices=bi,
-                                   is_grad_func_contain_y=False, require_grad=False)
+            y_d, X_d = dimer.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                               grad_func_args=(data,), batch_indices=bi,
+                               is_grad_func_contain_y=False, require_grad=False)
             th.cuda.synchronize()
             print(
                 f'  [{dtp}] Dimer:          E={float(y_d.abs().max()):.6e}, |X|={float(X_d.abs().max()):.6e}, '
@@ -1013,11 +900,9 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); kn.set_batch_updater(updater)
             t_st = time.perf_counter()
-            self.set_profiler(self.profilers_dict[f'test_TS.TS_KRYLOVNEWTON_{device_name}'])
-            with self._profiler:
-                y_kn, X_kn = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
-                                    grad_func_args=(data,), batch_indices=bi,
-                                    is_grad_func_contain_y=False, require_grad=False)
+            y_kn, X_kn = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                                grad_func_args=(data,), batch_indices=bi,
+                                is_grad_func_contain_y=False, require_grad=False)
             th.cuda.synchronize()
             print(
                 f'  [{dtp}] KrylovNewton:   E={float(y_kn.abs().max()):.6e}, |X|={float(X_kn.abs().max()):.6e}, '
@@ -1037,11 +922,9 @@ class FastTest(unittest.TestCase):
             )
             updater.initialize(); kd.set_batch_updater(updater)
             t_st = time.perf_counter()
-            self.set_profiler(self.profilers_dict[f'test_TS.TS_KRYLOVDYNAMICS_{device_name}'])
-            with self._profiler:
-                y_kd, X_kd = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
-                                    grad_func_args=(data,), batch_indices=bi,
-                                    is_grad_func_contain_y=False, require_grad=False, extra_krylov_dim=1)
+            y_kd, X_kd = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+                                grad_func_args=(data,), batch_indices=bi,
+                                is_grad_func_contain_y=False, require_grad=False, extra_krylov_dim=1)
             th.cuda.synchronize()
             print(
                 f'  [{dtp}] KrylovDynamics: E={float(y_kd.abs().max()):.6e}, |X|={float(X_kd.abs().max()):.6e}, '
@@ -1138,16 +1021,13 @@ class FastTest(unittest.TestCase):
                             dump_hessian=True,
                         )
                         try:
-                            profile_key = f'test_VIB.{method}.{device}.{dtype}'
-                            self.set_profiler(self.profilers_dict[profile_key])
-                            with self._profiler:
-                                frequencies, normal_mode = calculator.normal_mode(
-                                    energy,
-                                    coordinates.clone(),
-                                    grad_func=gradient,
-                                    fixed_atom_tensor=free_atom_mask,
-                                    save_hessian=True,
-                                )
+                            frequencies, normal_mode = calculator.normal_mode(
+                                energy,
+                                coordinates.clone(),
+                                grad_func=gradient,
+                                fixed_atom_tensor=free_atom_mask,
+                                save_hessian=True,
+                            )
                         finally:
                             calculator.dumper.close()
 
@@ -1198,13 +1078,11 @@ class FastTest(unittest.TestCase):
         try:
             for n_atom in (7, 8):
                 coordinates = th.zeros(n_atom, 3)
-                self.set_profiler(self.profilers_dict[f'test_VIB.different_shapes.{n_atom}'])
-                with self._profiler:
-                    calculator.normal_mode(
-                        lambda X: X.square().sum(dim=(-2, -1)),
-                        coordinates,
-                        grad_func=lambda X: 2. * X,
-                    )
+                calculator.normal_mode(
+                    lambda X: X.square().sum(dim=(-2, -1)),
+                    coordinates,
+                    grad_func=lambda X: 2. * X,
+                )
         finally:
             calculator.dumper.close()
         dumped = read_freq(output_file)
@@ -1429,61 +1307,55 @@ class FastTest(unittest.TestCase):
                     updater.initialize()
                     runner.set_batch_updater(updater, updater)
                     runner: FIRE
-                    self.set_profiler(self.profilers_dict[f'test_parallel.{name}.{i:02d}'])
-                    with self._profiler:
-                        y, x_min, g = runner.run(
-                            model_test.Energy,
-                            _data.pos,
-                            model_test.Grad,
-                            (_data,),
-                            None,
-                            (_data,),
-                            None,
-                            False,
-                            self.REQUIRE_GRAD,
-                            True,
-                            None,
-                            [len(_.pos) for _ in _data.to_data_list()],
-                        )
+                    y, x_min, g = runner.run(
+                        model_test.Energy,
+                        _data.pos,
+                        model_test.Grad,
+                        (_data,),
+                        None,
+                        (_data,),
+                        None,
+                        False,
+                        self.REQUIRE_GRAD,
+                        True,
+                        None,
+                        [len(_.pos) for _ in _data.to_data_list()],
+                    )
                     th.cuda.synchronize()
 
                 elif name.startswith('md_'):
                     runner: NVT
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
-                    self.set_profiler(self.profilers_dict[f'test_parallel.{name}.{i:02d}'])
-                    with self._profiler:
-                        runner.run(
-                            model_test.Energy,
-                            _data.pos,
-                            elem_list,
-                            None,
-                            None,
-                            model_test.Grad,
-                            (_data,),
-                            None,
-                            (_data,),
-                            None,
-                            False,
-                            self.REQUIRE_GRAD,
-                            [len(_.pos) for _ in _data.to_data_list()],
-                            move_to_center_freq=-1
-                        )
+                    runner.run(
+                        model_test.Energy,
+                        _data.pos,
+                        elem_list,
+                        None,
+                        None,
+                        model_test.Grad,
+                        (_data,),
+                        None,
+                        (_data,),
+                        None,
+                        False,
+                        self.REQUIRE_GRAD,
+                        [len(_.pos) for _ in _data.to_data_list()],
+                        move_to_center_freq=-1
+                    )
                     th.cuda.synchronize()
 
                 elif name.startswith('mc_'):
                     runner: MMC
                     runner.reset_logger_handler(f"{self.out_pt}logs/{name}_paratest.log")
-                    self.set_profiler(self.profilers_dict[f'test_parallel.{name}.{i:02d}'])
-                    with self._profiler:
-                        runner.run(
-                            model_test.Energy,
-                            _data.pos,
-                            elem_list,
-                            None,
-                            func_args=(_data,),
-                            batch_indices=[len(_.pos) for _ in _data.to_data_list()],
-                            move_to_center_freq=-1
-                        )
+                    runner.run(
+                        model_test.Energy,
+                        _data.pos,
+                        elem_list,
+                        None,
+                        func_args=(_data,),
+                        batch_indices=[len(_.pos) for _ in _data.to_data_list()],
+                        move_to_center_freq=-1
+                    )
 
                 print(
                     f"BATCH SIZE: {i}, ATOMS: {sum(_ ** 3 for _ in ATOMS)}. "
