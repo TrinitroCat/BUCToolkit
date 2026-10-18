@@ -12,9 +12,10 @@ def velocity_verlet_1_kernel(
         F_ptr: tl.const,
         inv_M_ptr: tl.const,
         time_step: tl.constexpr,
-        size: int,
+        size: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
 ):
+    dtype = X_ptr.dtype.element_ty
     pid = tl.program_id(axis=0)
     start = pid * BLOCK_SIZE
     offsets = start + tl.arange(0, BLOCK_SIZE)
@@ -23,25 +24,26 @@ def velocity_verlet_1_kernel(
     F = tl.load(F_ptr + offsets, mask=mask, other=0.0)
     inv_M = tl.load(inv_M_ptr + offsets, mask=mask, other=0.0)
     # update velocity
-    F *= 0.5 * time_step * 9.64853329045427e-3
+    F = tl.mul(F, tl.full([], 0.5 * time_step * 9.64853329045427e-3, dtype))
     V = tl.fma(F, inv_M, V)
     tl.store(V_ptr + offsets, V, mask=mask)
     # update X
     X = tl.load(X_ptr + offsets, mask=mask, other=0.0)
-    X = tl.fma(V, time_step, X)
+    X = tl.fma(V, tl.full([], time_step, dtype), X)
     tl.store(X_ptr + offsets, X, mask=mask)
 
 
 @triton.jit
 def velocity_verlet_2_kernel(
         V_ptr,
-        F_ptr: tl.const,
+        F_ptr,
         mask_ptr: tl.const,
         inv_M_ptr: tl.const,
         time_step: tl.constexpr,
-        size: int,
+        size: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
 ):
+    dtype = V_ptr.dtype.element_ty
     pid = tl.program_id(axis=0)
     start = pid * BLOCK_SIZE
     offsets = start + tl.arange(0, BLOCK_SIZE)
@@ -50,9 +52,11 @@ def velocity_verlet_2_kernel(
     F = tl.load(F_ptr + offsets, mask=mask, other=0.0)
     inv_M = tl.load(inv_M_ptr + offsets, mask=mask, other=0.0)
     atom_mask = tl.load(mask_ptr + offsets, mask=mask, other=0.0)
-    # main update
+    # mask the forces and write the masked forces back into the state
     F = tl.mul(F, atom_mask)
-    F *= 0.5 * time_step * 9.64853329045427e-3
+    tl.store(F_ptr + offsets, F, mask=mask)
+    # main update
+    F = tl.mul(F, tl.full([], 0.5 * time_step * 9.64853329045427e-3, dtype))
     V = tl.fma(F, inv_M, V)
     tl.store(V_ptr + offsets, V, mask=mask)
 
@@ -88,4 +92,3 @@ def vv2(
         n_elem,
         BLOCK_SIZE=256
     )
-
