@@ -721,14 +721,14 @@ the method of updating function arguments for a mask.
             # Section: select unconverged samples
             if not self._hold_samples:
                 func_args_, func_kwargs_, grad_func_args_, grad_func_kwargs_ = self._update_batch(
-                    ~(converge_check & stop_mask),
+                    ~(converge_check | stop_mask),
                     func_args,
                     func_kwargs,
                     grad_func_args,
                     grad_func_kwargs
                 )
                 if batch_scatter_indices is not None:
-                    select_mask = ~(converge_check & stop_mask)
+                    select_mask = ~(converge_check | stop_mask)
                     select_mask_long = select_mask[batch_scatter_indices]
                     y0_ = y0[select_mask]
                     direct_grad0_ = direct_grad0[:, select_mask, :]
@@ -755,7 +755,7 @@ the method of updating function arguments for a mask.
                         dim=0
                     )
                 else:
-                    select_mask = ~(converge_check & stop_mask)
+                    select_mask = ~(converge_check | stop_mask)
                     select_mask_long = select_mask
                     y0_ = y0[select_mask]
                     direct_grad0_ = direct_grad0[select_mask, ...]
@@ -784,7 +784,7 @@ the method of updating function arguments for a mask.
                     grad_func_args,
                     grad_func_kwargs
                 )
-                select_mask = ~(converge_check & stop_mask)
+                select_mask = ~(converge_check | stop_mask)
                 select_mask_long = select_mask
                 y0_ = y0
                 direct_grad0_ = direct_grad0

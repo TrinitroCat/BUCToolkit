@@ -54,7 +54,7 @@ These following third-party libraries are used:
 - **PyTorch** (BSD-3-Clause License), Copyright © 2016-present Facebook Inc.
 
 These following third-party libraries are optional:
-- **DGL** (Apache-2.3 License). Only parts of DGL models are currently supported.
+- **DGL** (Apache-2.3 License). DGL support is deprecated and no longer available.
 - **torch-geometric** (MIT License). The basic `Data` and `Batch` object have been built-in.
 For its other advanced functions, the whole torch-geometric can be installed.
 - **[ASE (LGPL-v2.1 License)](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads)**. Some functions involving `ase.Atoms` object, format transformation for instance.
@@ -335,7 +335,63 @@ to specify the data path, data type, model file, and task type,
 users can directly launch tasks in a shell like:
 ```shell
 buctoolkit -i './input_file.inp'
+# or
+buctoolkit './input_file.inp'
 ```
+Paths inside YAML input files are resolved relative to the input file's
+directory. Command-line paths passed to `-i`, `-o`, or `--convert` remain
+relative to the directory where the command is invoked.
+
+The central source-checkout tests are available through the same CLI:
+
+```shell
+buctoolkit --test main     # strict scientific checks
+buctoolkit --test fast     # short smoke checks
+buctoolkit --test profile  # fast checks with torch profiler reports
+```
+
+Iteration counts and convergence tolerances are maintained in
+`testsuite/configs/main_test.yaml`; fast-mode overrides are in
+`testsuite/configs/fast_test.yaml`. Standalone compatibility and regression
+tests are kept under `testsuite/regression_test/` and are not selected by
+these commands.
+
+`OUTPUT_ROOT` defaults to `./output` (the legacy `OUTPUT_PATH` is used as
+the root when `OUTPUT_ROOT` is absent). A missing root is created; a non-empty
+existing root is moved to a timestamped `.bak...` directory. Logs default to
+`OUTPUT_ROOT/logs`, results to `OUTPUT_ROOT/results/result`, and training
+checkpoints to `OUTPUT_ROOT/chk`. Explicit `OUTPUT_PATH`,
+`PREDICTIONS_SAVE_FILE`, and `TRAIN.CHK_SAVE_PATH` values take precedence.
+
+#### Executable input rules
+
+The executable path keeps model loading and model adaptation separate:
+
+- `MODEL_TYPE: pyg` loads the class named by `MODEL_NAME` from `MODEL_FILE` and
+  uses the standard PyG wrapper.
+- `MODEL_TYPE: pyg_multi` uses the multiprocessing PyG wrapper. Its device and
+  worker settings belong in `MODEL_WRAPPER_CONFIG`; this mode is selected
+  explicitly and does not infer GPU settings from the model file.
+- `MODEL_TYPE: mace` constructs the built-in MACE model from `MODEL_CONFIG`.
+  MACE training uses the MACE data adapter and loader; other MACE tasks use
+  the ordinary structure conversion path before the MACE wrapper evaluates it.
+- `MODEL_TYPE: vasp` uses the external-process wrapper and
+  `MODEL_WRAPPER_CONFIG`; it does not require a Python model constructor.
+- `MODEL_TYPE: custom` loads `MODEL_WRAPPER_NAME` from `MODEL_WRAPPER_FILE`.
+  The custom wrapper must inherit `_BaseWrapper`. The model file remains
+  separate and is still selected by `MODEL_FILE` and `MODEL_NAME` when needed.
+
+`DATA_READER_KWARGS` is passed to the selected structure reader.
+`DATA_LOADER_KWARGS` is passed to the API `DataLoader`. Older input files that
+only contain `DATA_LOADER_KWARGS` remain readable: that mapping is also used
+for the reader and a deprecation warning is emitted. Paired tasks such as
+NEB and Blue-Moon CMD continue to use their task-specific paired loaders.
+
+The no-argument interactive CLI is a configuration editor and keyword lookup
+tool. `task` creates a reference input file with the same runtime defaults as
+the API; scientific model, data, and task values still need to be filled in by
+the user before `run`.
+
 An interactive command-line interface can be used as well by inputting no argument:
 ```
 user@host:/some/path$ buctoolkit
@@ -393,20 +449,20 @@ using BUCToolkit as an executable program, and those that start with "#" are nor
 
 # global configs
 ###TASK: !!str MD          # task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC', 'TRAIN', 'PREDICT'
-START: !!int 1          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
+START: !!int 0          # 0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights
 VERBOSE: !!int 1        # verbosity level for log output
-DEVICE: !!str 'cuda:0'  # the device on which the task would run
-BATCH_SIZE: !!int 16    # the batch size of input data during calculation
+DEVICE: !!str cpu       # the device on which the task would run
+BATCH_SIZE: !!int 1     # the batch size of input data during calculation
 
 # I/O configs
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
-OUTPUT_PATH: !!str your/log/output/path
+OUTPUT_ROOT: !!str ./output
 OUTPUT_POSTFIX: !!str your_logfile_suffix
-PREDICTIONS_SAVE_FILE: !!str your/model/predictions/save/path  # path of saving predictions
+# Optional overrides: OUTPUT_PATH, PREDICTIONS_SAVE_FILE, TRAIN.CHK_SAVE_PATH
 STRICT_LOAD: !!bool true  # whether to strictly load model parameter
 REDIRECT: !!bool true    # whether output training logs to `OUTPUT_PATH` or directly print on screen.
 SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output predictions to a dump file.
-###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD']. BS is the build-in structures format obtained by `Structures().save(...)`
+###DATA_TYPE: !!str BS  # Literal['POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC']. BS is the build-in structures format obtained by `Structures().save(...)`
 
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
@@ -414,7 +470,8 @@ SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output prediction
 ###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., Dimer
 ###VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
 ###VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
-###DATA_LOADER_KWARGS: {}      # other kwargs for data loader.
+###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader.
+###DATA_LOADER_KWARGS: {}      # keyword arguments for the API DataLoader.
 ###IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calculating.
 
 # training
@@ -466,7 +523,7 @@ TRAIN:
 # relaxation
 RELAXATION:
   ALGO: !!str 'FIRE'  # options: CG, BFGS, FIRE
-  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'PR'
+  ITER_SCHEME: !!str 'PR+'  # only for ALGO=CG, options: 'PR+', 'FR', 'SD'
   E_THRES: !!float 1.e4  # threshold of Energy difference
   F_THRES: !!float 0.05  # threshold of max Force
   MAXITER: !!int 300     # maximum iteration
@@ -493,9 +550,10 @@ TRANSITION_STATE:
 
 # vibration analyses (harmonic)
 VIBRATION:
-  METHOD: !!str 'Coord'  # Coord/Grad corresponding to finite difference and auto-grad scheme.
+  METHOD: !!str 'EnergyDiff'  # EnergyDiff / GradDiff / Autograd.
   BLOCK_SIZE: !!int 1    # block-size of tensor/vectorize parallelization
   DELTA: !!float 1e-2    # length for finite difference to calc. Hessian-vector prod.
+  SAVE_HESSIAN: !!bool false  # dump the Hessian with frequencies and normal modes
 
 # NEB transition state
 NEB:
@@ -522,9 +580,16 @@ MD:
   T_INIT: !!float 298.15  # Initial Temperature, Unit: K. For ENSEMBLE=NVE, T_INIT is only used to generate ramdom initial velocities by Boltzmann dist.
   OUTPUT_COORDS_PER_STEP: !!int 1  # To control the frequency of outputting atom coordinates. If verbose = 3, atom velocities would also be outputted.
   MOVE_TO_CENTER_FREQ: !!int 20   # how many steps that move atoms to the barycenter and zeroize the bulk velocities
+  
+  # Followings are Constrained MD only  <<<
+  CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH. For SLOW_GROWTH, if not set the constr_val function, it will be a trivial CMD.
+  N_IMAGES: !!int 3         # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies (use 1 for one trajectory)
+  CONSTR_THRESHOLD: !!float 1.e-5
+  REQUIRE_FIXMAN: !!str auto  # `auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually.
   # Optional: constraints
   CONSTRAINTS_FILE: !!str ./constraints.py  # function file path of constraints. This function should receive torch.Tensors and support auto-grad.
   CONSTRAINTS_FUNC: !!str func              # the specific function name in `CONSTRAINTS_FILE`
+  CONSTRAINTS_VAL_FUNC: null                # optional constr_val(t) or constr_val(t, c0), loaded from CONSTRAINTS_FILE; null keeps the initial-value default
   REQUIRE_GRAD: !!bool False  # see above
 
 # Monte Carlo
@@ -541,12 +606,16 @@ MC:
   MOVE_TO_CENTER_FREQ: !!int 20    # see `MD` section above
 
 # model configs
+MODEL_TYPE: !!str pyg  # pyg, pyg_multi, mace, vasp, or custom
 ###MODEL_FILE: !!str your/model/file/path/template_model.py  # function file path of torch models
 MODEL_NAME: !!str YourModel   # the specific name of the model in `MODEL_FILE`
 MODEL_CONFIG:   # model hyperparameters used for `MODEL_NAME.__init__(**MODEL_CONFIG)`
   hyperparameter1: xxx
   hyperparameter2: xxx
   # ...
+MODEL_WRAPPER_CONFIG: {}  # arguments passed to the selected model wrapper
+###MODEL_WRAPPER_FILE: null  # custom wrapper source file; only for MODEL_TYPE=custom
+###MODEL_WRAPPER_NAME: null  # custom wrapper name; only for MODEL_TYPE=custom
 
 ```
 
@@ -578,6 +647,18 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 ```
 This command will convert all files in `$input_path` with assumed format of `$input_type` into 
 `$output_path` in the format of `$output_type`.
+
+Output targets are never silently overwritten. A non-empty `OUTPUT_ROOT`, an
+existing `PREDICTIONS_SAVE_FILE`, or an output supplied with `-o` is moved to a
+timestamped `.bakYYYYMMDD_HHMMSS` path before the new output is created. A
+conversion destination is backed up as a whole directory with the same
+suffix. Backup name collisions in the same second receive `_1`, `_2`, and so
+on; files, directories, or symbolic links of the wrong kind are rejected.
+
+`CreateLoadableData` is available when assembling data for the existing API
+loaders from `BatchStructures` or ASE structures. It provides helpers for
+ordinary PyG, paired PyG, MACE, paired MACE, and external-process loader
+mappings; it does not introduce a new data protocol.
 
 For a finer control, the following Python script can be used:
 ```python
@@ -651,6 +732,42 @@ and `require_grad` controls the
 gradient context of PyTorch. When `require_grad = False`, computation of `func` and `grad_func` is under
 the context of `torch.no_grad` to reduce the memory cost. Otherwise, gradient will be turned on explicitly
 by `torch.enable_grad`.
+
+#### Function Protocol and Model Adapters
+
+The low-level algorithms depend on the `func` / `grad_func` protocol rather than a particular model class.
+High-level APIs and model adapters provide convenient paths to the same protocol, while users can call the
+low-level engines directly with their own functions:
+
+```text
+High-level APIs / CLI -> model and data setup -> model adapters --+
+                                                               |
+PyG, VASP, and multi-device models -> utils/model_wrappers ------+-> func / grad_func protocol
+                                                               |             |
+User-defined functions and external calculators ----------------+             v
+                                                     BatchOptim / BatchMD / BatchMC
+```
+
+Adapters under `BUCToolkit/utils/model_wrappers/` translate common model interfaces into coordinate-based
+energy and gradient calls. For example, a PyG adapter updates the graph coordinates, evaluates the model,
+and presents its energy and forces through the protocol expected by the low-level algorithms. The adapter
+layer provides convenience only; the numerical engines remain usable without a deep-learning model or a
+specific graph framework.
+
+For a recent VASP build with the official Python plugin support, use
+`VASP_PluginModel`. On its first call it writes `vasp_plugin.py` in the working directory,
+starts one long-lived VASP job through IPC, and keeps subsequent `Energy`/`Grad` requests
+under BUCToolkit's control. It returns the real energy and forces from the VASP `structure`
+plugin, does not parse OUTCAR, and does not create per-step calculation directories. Enable
+`PLUGINS/STRUCTURE = T` in INCAR and install VASP's Python plugin support first. Use the
+traditional `VASP_Model` for standard VASP installations without this plugin interface.
+
+A matching Python call signature alone is not the complete contract. Inputs and outputs must also use the
+expected tensor shapes, dtypes, devices, energy/gradient convention, and batch layout. In particular,
+regular and irregular batches must follow the layouts described in [Batch Parallelism Scheme](#batch-parallelism-scheme),
+and `grad_func` must return the mathematical gradient rather than the physical force unless an adapter
+performs the sign conversion. These requirements allow analytic functions, machine-learning potentials,
+and external electronic-structure calculators to share the same optimized algorithms.
 
 ### Highly Customizable Algorithms
 All methods/algorithms are object-oriented modularized. They have `_Base*` abstract base classes 
@@ -763,7 +880,8 @@ runner = bt.BatchMD.ConstrNVT(
   device=DEVICE,
   verbose=0
 )
-# `constr_val` can also be a Callable[[ScalarTensor], Tensor] to express the time-dependent constraints. 
+# `constr_val` can be `constr_val(t)` or `constr_val(t, c0)` for time-dependent
+# constraints; `c0` is `constr_func(X_init)` for the current initialization.
 
 runner.run(...)   # See the section `Using as a Python Package` above
 
@@ -806,4 +924,3 @@ For bug reports or feature requests, please use [GitHub Issues](https://github.c
 ## License
 
 The code of BUCToolkit is published and distributed under the **[MIT License](https://github.com/TrinitroCat/BUCToolkit/blob/main/LICENSE)**.
-

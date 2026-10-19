@@ -98,6 +98,16 @@ def flatten(x, flat_num: int=-1, ncore: int=1):
         warnings.warn('Windows OS does not support multi-process yet. `ncore` was automatically set to 1.', RuntimeWarning)
         ncore = 1
 
+    if ncore == 1:
+        if flat_num == -1:
+            return _flatten_until_1d(x)
+        if isinstance(flat_num, int) and flat_num > 0:
+            z = x
+            for _ in range(flat_num):
+                z = _flatten_1time(z)
+            return z
+        raise ValueError('`flat_num` must be an integer greater than 0, or == -1')
+
     n_chunk = len(x)//(ncore - 1) if ncore > 1 else len(x)
     if n_chunk == 0:
         n_chunk = len(x)

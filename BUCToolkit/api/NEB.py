@@ -16,13 +16,13 @@ from torch import nn
 
 from BUCToolkit.BatchOptim.TS.CI_NEB import CI_NEB
 from BUCToolkit.utils._CheckModules import check_module
-from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from ._io import _BaseAPI, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils.AtomSelector import atom_fix_selector
 from BUCToolkit.BatchStructures import Batch
 
 
-class ClimbingImageNudgedElasticBand(_CONFIGS):
+class ClimbingImageNudgedElasticBand(_BaseAPI):
     """
     Class of Climbing Image Nudged Elastic Band algorithm to search transition state.
     Users need to set the dataset and dataloader manually.
@@ -56,8 +56,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
 
         __algos = {'CI-NEB': CI_NEB}
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        self.data_type = data_type
+        self._set_data_type(data_type)
         self.reload_config(config_file)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
@@ -75,11 +74,14 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
         self.require_grad = self.NEB.get('REQUIRE_GRAD', False)
         # check modes
         self.N_IMAGES = self.NEB['N_IMAGES']
+        optimizer_configs = dict(self.NEB.get('OPTIMIZER_CONFIGS') or {})
+        if self.SAVE_PREDICTIONS:
+            optimizer_configs['output_file'] = self.PREDICTIONS_SAVE_FILE
         self.NEB_config = {
             'N_images': self.NEB['N_IMAGES'],
             'spring_const': float(self.NEB.get('SPRING_CONST', 1.)),
             'optimizer': self.NEB.get('OPTIMIZER', 'FIRE'),
-            'optimizer_configs': self.NEB.get('OPTIMIZER_CONFIGS', None),
+            'optimizer_configs': optimizer_configs,
             'steplength': self.NEB.get('STEPLENGTH', 0.2),
             'E_threshold': float(self.NEB.get('E_THRESHOLD', 1e-3)),
             'F_threshold': float(self.NEB.get('F_THRESHOLD', 0.05)),
@@ -96,14 +98,19 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        if self.START == 'resume' or self.START == 1:
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=False)
+                _model.load_state_dict(_chk_model_param, strict=False)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
+            epoch_now = _chk_train_state['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
                 'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
@@ -124,10 +131,11 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
         self.n_samp = len(self.TRAIN_DATA['dataIS'])  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
+        neb_ops = None
         try:
             # I/O
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'NEB', self.NEB_config, self.n_samp)
+                self.logout_task_information(_model, 'NEB', self.NEB_config, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
@@ -142,7 +150,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
                     self.pygBatch = Batch
 
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 def get_indx(data):
                     _indx = getattr(data, 'idx', None)
                     # To correctly manage the names after NEB opt. There names will be [[`idx`], [`idx`], ...] (repeat N_images times).
@@ -180,7 +188,7 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     return graph
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 raise NotImplementedError  # TODO <<<<
                 def get_batch_size(data):
                     return data.num_nodes('atom')
@@ -196,6 +204,13 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
 
             # Instantiate NEB ALGO class
             neb_ops = self.NEB_ALGO(**self.NEB_config)
+            if self.SAVE_PREDICTIONS:
+                neb_ops.Optimizer._HOLD_DUMPER = True
+                neb_ops.Optimizer.dumper.reset_args(
+                    self.PREDICTIONS_SAVE_FILE,
+                    mode='a',
+                    cache_size=4096,
+                )
             if ('dataIS' not in self.TRAIN_DATA) or ('dataFS' not in self.TRAIN_DATA):
                 raise ValueError('Invalid `TRAIN_DATA`, which requires keys of "dataIS" and "dataFS" but could not be found.')
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, **self._data_loader_configs)
@@ -204,7 +219,6 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                 if self.VERBOSE: self.logger.error(__err_msg)
                 raise ValueError(__err_msg)
             n_c = 1  # running batch now
-            n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             for dataIS, dataFS in val_set:
                 try:
                     # get basic information of IS.
@@ -283,6 +297,16 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     if fixed_atom_tensor.ndim != 2:
                         raise ValueError(f"Expected `fixed_atom_tensor.ndim` to be 2, but got {fixed_atom_tensor.ndim}.")
                     dataIS = rebatched_graph(dataIS, self.N_IMAGES)
+                    image_batch_indices = get_batch_indx(dataIS)
+                    image_atomic_numbers = get_atomic_number(dataIS).reshape(-1)
+                    atomic_number_rows = [
+                        numbers.tolist()
+                        for numbers in th.split(image_atomic_numbers, image_batch_indices)
+                    ]
+                    neb_ops.Optimizer.set_system_info(
+                        get_cell_vec(dataIS),
+                        atomic_number_rows,
+                    )
 
                     # run
                     _energy, _X, out_grad = neb_ops.run(
@@ -299,31 +323,11 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
                     _energy.detach_()
                     _X.detach_()
                     out_grad.detach_()
-                    idx = get_indx(dataIS)
-                    batch_indx = get_batch_indx(dataIS)
-                    idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
-                    n_s += len(batch_indx)
-                    self.dumper.collect(
-                        batch_indx,
-                        idx,
-                        get_atomic_number(dataIS).squeeze(0),
-                        get_cell_vec(dataIS),
-                        _X.flatten(0, 1),
-                        fixed_atom_tensor.repeat(self.N_IMAGES + 2, 1),
-                        _energy,
-                        - out_grad.flatten(0, 1),
-                    )
 
                     # Print info
                     if self.VERBOSE > 0:
                         self.logger.info(f'Batch {n_c} done.')
                     n_c += 1
-                    if self.SAVE_PREDICTIONS:
-                        t_save = time.perf_counter()
-                        with _LoggingEnd(self.log_handler):
-                            if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
-                        self.dumper.flush()
-                        if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
 
                 except Exception as e:
                     self.logger.warning(f'WARNING: An error occurred in {n_c}th batch. Error: {e}.')
@@ -335,13 +339,14 @@ class ClimbingImageNudgedElasticBand(_CONFIGS):
             if self.VERBOSE: self.logger.info(f'NEB Search Done. Total Time: {time.perf_counter() - time_tol:<.4f}')
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
-            pass
+            if neb_ops is not None:
+                neb_ops.Optimizer.dumper.close()

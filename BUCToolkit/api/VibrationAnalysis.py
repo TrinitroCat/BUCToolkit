@@ -17,7 +17,7 @@ import torch as th
 from torch import nn
 
 from BUCToolkit.BatchOptim.frequency import Frequency
-from BUCToolkit.api._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_regularBatch_pyg, _Model_Wrapper_dgl
+from BUCToolkit.api._io import _BaseAPI, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, MASS, N_MASS
 
@@ -25,7 +25,7 @@ REVISED_FLOAT_ARRAY_FORMAT = FLOAT_ARRAY_FORMAT  # reduce the line_width to exhi
 REVISED_FLOAT_ARRAY_FORMAT['max_line_width'] = 64
 
 
-class VibrationAnalysis(_CONFIGS):
+class VibrationAnalysis(_BaseAPI):
     """
     The class of normal mode frequencies calculation by finite difference algo.
     Due to the huge computation cost, it would run sequentially instead of batched.
@@ -38,7 +38,8 @@ class VibrationAnalysis(_CONFIGS):
     Input file parameters:
         BLOCK_SIZE: int, the batch size of points (i.e., one structure image of finite difference) for parallel computing at one time. Default: 1.
         DELTA: float, the step length of finite difference. Default: 1e-2.
-        SAVE_HESSIAN: bool, whether to save calculated Hessian matrix. Default: False.
+        SAVE_HESSIAN: bool, whether to dump the calculated Hessian matrix with
+            frequencies and normal modes. Default: False.
 
     """
 
@@ -50,8 +51,7 @@ class VibrationAnalysis(_CONFIGS):
         super().__init__(config_file)
 
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        self.data_type = data_type
+        self._set_data_type(data_type)
         self.reload_config(config_file)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
@@ -59,7 +59,7 @@ class VibrationAnalysis(_CONFIGS):
         self._data_loader = None
 
         self.Vib_config = {
-            'method': self.VIBRATION.get('METHOD', 'Coord'),
+            'method': self.VIBRATION.get('METHOD', 'EnergyDiff'),
             'block_size': int(self.VIBRATION.get('BLOCK_SIZE', 1)),
             'delta': float(self.VIBRATION.get('DELTA', 1e-2)),
         }
@@ -73,14 +73,19 @@ class VibrationAnalysis(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1 or self.START == 2:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=False)
+                _model.load_state_dict(_chk_model_param, strict=False)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
+            epoch_now = _chk_train_state['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
                 'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
@@ -102,16 +107,17 @@ class VibrationAnalysis(_CONFIGS):
         self.n_batch = math.ceil(self.n_samp // self.BATCH_SIZE)  # total batch number per epoch
 
         # I/O
+        vib_calculator = None
         try:
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'VIB', self.Vib_config, self.n_samp)
+                self.logout_task_information(_model, 'VIB', self.Vib_config, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_regularBatch_pyg(_model)  # note: Use regularBatch version of _model wrapper
+                model_wrap = self._build_model_wrapper(_model, regular_batch=True, hyperparam=hyperparam)
 
                 def get_batch_size(data):
                     return len(data)
@@ -133,7 +139,7 @@ class VibrationAnalysis(_CONFIGS):
                     return model_wrap.pygBatch.from_data_list([single_graph, ]*batch_size)
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 raise NotImplementedError  # TODO <<<< complete dgl format
 
                 def get_batch_size(data):
@@ -152,14 +158,17 @@ class VibrationAnalysis(_CONFIGS):
                 def get_fixed_mask(data):
                     return data.nodes['atom'].data.get('fix', None)
 
-            vib_calculator = Frequency(**self.Vib_config)
+            vib_calculator = Frequency(
+                **self.Vib_config,
+                output_file=(
+                    self.PREDICTIONS_SAVE_FILE
+                    if self.SAVE_PREDICTIONS else None
+                ),
+                dump_hessian=self.is_save_Hessian,
+            )
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
-            # To record the minimized X, Force, and Energies.
-            freq_dict = dict()
-            normal_mode_dict = dict()
-            hessian_dict = dict()
             if (self.VERBOSE < 1) and (not self.SAVE_PREDICTIONS):
                 warnings.warn('WARNING: Neither`verbose` nor `self.SAVE_PREDICTIONS` was turn on.'
                               ' Hence NOTHING WILL BE OUTPUT. I HOPE YOU KNOW WHAT YOU ARE DOING!')
@@ -245,11 +254,6 @@ class VibrationAnalysis(_CONFIGS):
                             np.array2string(vib_hessian.numpy(force=True), **FLOAT_ARRAY_FORMAT).replace("[", " ").replace("]", " ")
                             }\n')
                         self.logger.info('-' * 100)
-                    if self.SAVE_PREDICTIONS:
-                        freq_dict[idx] = eig_freq
-                        normal_mode_dict[idx] = normal_mode
-                        if self.is_save_Hessian:
-                            hessian_dict[idx] = vib_hessian
                     n_c += 1
 
                 except Exception as e:
@@ -260,24 +264,15 @@ class VibrationAnalysis(_CONFIGS):
                     n_c += 1
 
             if self.VERBOSE: self.logger.info(f'VIBRATION CALCULATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
-            if self.SAVE_PREDICTIONS:
-                t_save = time.perf_counter()
-                with _LoggingEnd(self.log_handler):
-                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS...')
-                info_dict = {'Frequencies': freq_dict, 'Forces': normal_mode_dict,}
-                if self.is_save_Hessian:
-                    info_dict['Hessian'] = vib_hessian
-                th.save(info_dict, self.PREDICTIONS_SAVE_FILE)
-                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
-
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
-            pass
+            if vib_calculator is not None:
+                vib_calculator.dumper.close()

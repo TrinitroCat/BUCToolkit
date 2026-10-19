@@ -1,5 +1,5 @@
 """ Input / Output Module """
-import gc
+
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
 #  Version: 0.9a
@@ -14,10 +14,11 @@ import time
 import traceback
 import warnings
 from typing import Optional, Dict, Callable, Any, Literal, Sequence, List
+import gc
+import copy
 
 import numpy as np
 import torch as th
-import yaml
 from torch import nn
 
 from BUCToolkit.utils._CheckModules import check_module
@@ -27,6 +28,47 @@ from BUCToolkit.utils._Element_info import ATOMIC_NUMBER, ATOMIC_SYMBOL
 from BUCToolkit.utils.function_utils import _BaseWrapper, compare_tensors
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper
 from BUCToolkit.BatchStructures import Batch
+from BUCToolkit.cli._config import (
+    raise_output_backup_warning,
+    backup_output,
+    load_input_config,
+)
+from BUCToolkit.utils.model_wrappers.pyg_model_wrappers import (
+    Model_Wrapper_pyg,
+    Model_Wrapper_pyg_only_X,
+    Model_Wrapper_regularBatch_pyg,
+)
+from BUCToolkit.utils.model_wrappers.dgl_model_wrappers import Model_Wrapper_dgl
+
+# Compatibility aliases for older API imports. Implementations live in
+# ``utils.model_wrappers`` so the CLI and API use one adapter definition.
+_Model_Wrapper_pyg = Model_Wrapper_pyg
+_Model_Wrapper_pyg_only_X = Model_Wrapper_pyg_only_X
+_Model_Wrapper_regularBatch_pyg = Model_Wrapper_regularBatch_pyg
+_Model_Wrapper_dgl = Model_Wrapper_dgl
+
+
+# The default values of args, that are managed uniformly
+CONFIG_DEFAULTS = {
+    'TASK': 'PREDICT',
+    'START': 0,
+    'VERBOSE': 1,
+    'DEVICE': 'cpu',
+    'BATCH_SIZE': 1,
+    'OUTPUT_ROOT': './output',
+    'OUTPUT_POSTFIX': 'Untitled',
+    'STRICT_LOAD': True,
+    'REDIRECT': True,
+    'SAVE_PREDICTIONS': True,
+    'DATA_TYPE': 'BS',
+    'DATA_NAME_SELECTOR': '.*$',
+    'DATA_READER_KWARGS': {},
+    'DATA_LOADER_KWARGS': {},
+    'VAL_SPLIT_RATIO': 0.1,
+    'IS_SHUFFLE': False,
+    'MODEL_TYPE': 'pyg',
+    'MODEL_WRAPPER_CONFIG': {},
+}
 
 
 class _LoggingEnd:
@@ -55,6 +97,8 @@ class _CONFIGS(object):
     A base class of loading configs.
     """
 
+    _CURRENT_MODEL_TYPES = frozenset({'pyg', 'pyg_multi', 'mace', 'vasp', 'custom'})
+
     def __init__(self, config_file: str) -> None:
         self.config_file = config_file
         self.logger = None
@@ -63,8 +107,12 @@ class _CONFIGS(object):
         self.param = None
         self._has_load_data = False
         self._data_loader = None
+        self._pending_output_warnings = []
         self.reload_config(config_file)
         self.reset_logger()
+        for message in self._pending_output_warnings:
+            self.logger.warning(message)
+        self._pending_output_warnings.clear()
 
     def set_device(self, device: str | th.device) -> None:
         """ reset the device that model would train on """
@@ -74,8 +122,26 @@ class _CONFIGS(object):
         """
         Set the new configs (hyperparameters) of model.
         """
-        if model_config is None: model_config = dict()
+        self._MODEL_CONFIG_FROM_CHECKPOINT = model_config is None
         self.MODEL_CONFIG = model_config
+
+    def set_output(self, output_path: str, prediction_path: str | None = None) -> None:
+        """Set task output locations and rebuild the standard BUCToolkit logger.
+
+        Args:
+            output_path: Directory receiving task logs.
+            prediction_path: Optional binary dumper path. If omitted, the
+                current prediction path is retained.
+
+        Returns:
+            None.
+        """
+        self.OUTPUT_PATH = os.path.abspath(output_path)
+        self.REDIRECT = True
+        if prediction_path is not None:
+            self.SAVE_PREDICTIONS = True
+            self._PREDICTIONS_SAVE_FILE = os.path.abspath(prediction_path)
+        self.reset_logger()
 
     def set_model_param(self, model_state_dict: Dict, is_strict: bool = True, is_assign: bool = False) -> None:
         """
@@ -174,7 +240,9 @@ class _CONFIGS(object):
             _model: nn.Module,
             mode: str,
             algo_config: Dict[str, Any] | None,
-            n_samp: int | None
+            n_samp: int | None,
+            checkpoint_hyperparam: Dict[str, Any] | None = None,
+            model_hyperparam: Dict[str, Any] | None = None,
     ) -> None:
         """
         Logout task head information.
@@ -183,13 +251,16 @@ class _CONFIGS(object):
             mode: task mode keyword.
             algo_config: Dict[str, Any], kwargs/configs of this task.
             n_samp: int, number of samples loaded in.
+            checkpoint_hyperparam: Optional checkpoint metadata for display.
+            model_hyperparam: Effective model hyperparameters used for this task.
 
         Returns: None
 
         """
         if algo_config is None: algo_config = dict()
         __time = time.strftime("%Y%m%d_%H:%M:%S")
-        para_count = sum(p.numel() for p in _model.parameters())
+        parameters = getattr(_model, 'parameters', None)
+        para_count = sum(p.numel() for p in parameters()) if callable(parameters) else 0
         self.logger.info('\n' + generate_display_art())
         self.logger.info('\n' + '*' * 89 + f'\n TIME: {__time}')
         # parse mode
@@ -211,10 +282,17 @@ class _CONFIGS(object):
             algo_info = f"{self.MD["ENSEMBLE"]} Ensemble"
         elif mode == 'VIB':
             self.logger.info(' TASK: Vibrational Analysis (Harmonic) <<')
-            algo_info = "Finite Difference" if self.VIBRATION.get('METHOD', 'Coord') == "Coord" else "Automatic Differentiation"
+            vibration_method = self.VIBRATION.get('METHOD', 'EnergyDiff')
+            algo_info = {
+                'EnergyDiff': 'Energy Finite Difference',
+                'GradDiff': 'Gradient Finite Difference',
+                'Autograd': 'Automatic Differentiation',
+                'Coord': 'Energy Finite Difference',
+                'Grad': 'Automatic Differentiation',
+            }.get(vibration_method, vibration_method)
         elif mode == 'MC':
             self.logger.info(' TASK: Monte Carlo <<')
-            algo_info = f"{self.MC["ENSEMBLE"]} Ensemble"
+            algo_info = self.MC["TYPE"]
         elif mode == 'TRAIN':
             self.logger.info(' TASK: TRAINING & VALIDATION <<')
         elif mode == 'PREDICT':
@@ -226,7 +304,7 @@ class _CONFIGS(object):
             self.logger.info(' FROM_SCRATCH <<')
         elif (self.START == 1) or (self.START == 'resume'):
             self.logger.info(' RESUME <<')
-        elif (self.START == 2) or (self.START == 'load_param'):
+        elif (self.START == 2) or (self.START == 'param_only'):
             self.logger.info(' LOAD_PARAMETER <<')
         self.logger.info(f' COMMENTS: {self.COMMENTS}')
         self.logger.info(f' I/O INFORMATION:')
@@ -236,7 +314,7 @@ class _CONFIGS(object):
         else:
             output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
             self.logger.info(f'\tLOG WILL OUTPUT TO {output_file}')  # type: ignore
-        if (self.START == 2) or (self.START == 'load_param'):
+        if (self.START == 2) or (self.START == 'param_only'):
             self.logger.info(f'\tMODEL PARAMETERS LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
         elif (self.START == 1) or (self.START == 'resume'):
             self.logger.info(f'\tMODEL CHECKPOINT FILE LOAD FROM: {self.LOAD_CHK_FILE_PATH}')
@@ -245,12 +323,22 @@ class _CONFIGS(object):
         self.logger.info(f' MODEL INFORMATION:')
         self.logger.info(f'\tTOTAL PARAMETERS: {para_count}')
         if mode == 'TRAIN':
-            para_count_train = sum(p.numel() for p in _model.parameters() if p.requires_grad)
+            parameters = getattr(_model, 'parameters', None)
+            para_count_train = sum(p.numel() for p in parameters() if p.requires_grad) if callable(parameters) else 0
             self.logger.info(f'\tTOTAL TRAINABLE PARAMETERS: {para_count_train}')
         if self.VERBOSE > 1:
             self.logger.info(f'\tHYPER-PARAMETERS:')
-            for hp, hpv in self.MODEL_CONFIG.items():
+            model_config = self.MODEL_CONFIG if model_hyperparam is None else model_hyperparam['MODEL_CONFIG']
+            if model_config is None:
+                model_config = dict()
+            for hp, hpv in model_config.items():
                 self.logger.info(f'\t\t{hp}: {hpv}')
+            if isinstance(checkpoint_hyperparam, dict):
+                checkpoint_train = checkpoint_hyperparam.get('TRAIN')
+                if isinstance(checkpoint_train, dict):
+                    self.logger.info('\tCHECKPOINT TRAINING HYPER-PARAMETERS (metadata only):')
+                    for hp, hpv in checkpoint_train.items():
+                        self.logger.info(f'\t\t{hp}: {hpv}')
 
         self.logger.info(f' TASK WILL RUN ON {self.DEVICE}')
         if mode == 'TRAIN':
@@ -387,6 +475,10 @@ class _CONFIGS(object):
             output_file = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
             # check whether path exists
             if not os.path.isdir(self.OUTPUT_PATH): os.makedirs(self.OUTPUT_PATH)
+            if os.path.lexists(output_file):
+                backup_path = backup_output(output_file, 'file')
+                message = raise_output_backup_warning(output_file, backup_path)
+                self.logger.warning(message)
             # set log handler
             self.log_handler = logging.FileHandler(output_file, 'w', delay=True)
             self.log_handler.setLevel(logging.INFO)
@@ -398,59 +490,114 @@ class _CONFIGS(object):
         if not has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
 
     def reload_config(self, config_file_path: str| None = None) -> None:
-        """
-        Reload the yaml configs file.
+        """Reload and validate API configuration from a YAML input file.
+
+        Known path fields are resolved relative to the input file by the same
+        helper used by the command-line entry point.
+
+        Args:
+            config_file_path: Input path to load. ``None`` reuses
+                ``self.config_file``.
+
+        Returns:
+            None.
+
+        Raises:
+            FileNotFoundError: If the selected input file does not exist.
+            TypeError: If a typed configuration field has an invalid type.
+            ValueError: If the YAML document or a configuration value is
+                invalid.
         """
         # load config file
         config_file_path = self.config_file if config_file_path is None else config_file_path
-        with open(config_file_path, 'r', encoding='utf-8') as f:
-            config: Dict[str, Any] = yaml.safe_load(f)
-        self.config = config
+        self.config = load_input_config(config_file_path)
+        md_config = self.config.get('MD')
+        if isinstance(md_config, dict):
+            thermostat_config = md_config.get('THERMOSTAT_CONFIG')
+            if isinstance(thermostat_config, dict):
+                md_config['THERMOSTAT_CONFIG'] = {
+                    str(key).lower(): value for key, value in thermostat_config.items()
+                }
 
         # global information
-        self.START = self.config.get('START', 0)
+        self.START = self.config.get('START', CONFIG_DEFAULTS['START'])
         if self.START != 'from_scratch' and self.START != 0:
             self.LOAD_CHK_FILE_PATH: str = self.config['LOAD_CHK_FILE_PATH']
             if not isinstance(self.LOAD_CHK_FILE_PATH, str): raise TypeError('LOAD_CHK_FILE_PATH must be a str.')
             self.STRICT_LOAD: bool = self.config.get('STRICT_LOAD', True)
             if not isinstance(self.STRICT_LOAD, bool): raise TypeError(f'STRICT_LOAD must be a boolean, but got {type(self.STRICT_LOAD)}')
         self.COMMENTS: str = self.config.get('COMMENTS', 'None.')
-        self.VERBOSE: int = int(self.config.get('VERBOSE', 1))
-        self.DEVICE: str|th.device = self.config.get('DEVICE', 'cpu')
-        self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', 1)
+        self.VERBOSE: int = int(self.config.get('VERBOSE', CONFIG_DEFAULTS['VERBOSE']))
+        self.DEVICE: str|th.device = self.config.get('DEVICE', CONFIG_DEFAULTS['DEVICE'])
+        self.BATCH_SIZE: int = self.config.get('BATCH_SIZE', CONFIG_DEFAULTS['BATCH_SIZE'])
 
         # model info
         self.MODEL_NAME: str = self.config.get('MODEL_NAME', 'Untitled')
         if not isinstance(self.MODEL_NAME, str): raise TypeError('MODEL_NAME must be a str.')
-        self.MODEL_CONFIG = self.config.get('MODEL_CONFIG', dict())
-        if not isinstance(self.MODEL_CONFIG, Dict): raise ValueError('MODEL_CONFIG must be a dictionary.')
+        model_config = self.config.get('MODEL_CONFIG')
+        self._MODEL_CONFIG_FROM_CHECKPOINT = model_config is None
+        self.MODEL_CONFIG = model_config
+        if self.MODEL_CONFIG is not None and not isinstance(self.MODEL_CONFIG, Dict):
+            raise ValueError('MODEL_CONFIG must be a dictionary or null.')
+        self.MODEL_TYPE = str(self.config.get('MODEL_TYPE', CONFIG_DEFAULTS['MODEL_TYPE'])).lower()
+        if self.MODEL_TYPE not in self._CURRENT_MODEL_TYPES:
+            raise ValueError(
+                f"`MODEL_TYPE` must be one of {self._CURRENT_MODEL_TYPES}, "
+                f"but got {self.MODEL_TYPE}."
+            )
+        self.MODEL_WRAPPER_CONFIG = self.config.get('MODEL_WRAPPER_CONFIG')
+        if self.MODEL_WRAPPER_CONFIG is None:
+            self.MODEL_WRAPPER_CONFIG = dict()
+        if not isinstance(self.MODEL_WRAPPER_CONFIG, Dict):
+            raise TypeError('`MODEL_WRAPPER_CONFIG` must be a dictionary.')
+        self.MODEL_WRAPPER_FILE = self.config.get('MODEL_WRAPPER_FILE', None)
+        self.MODEL_WRAPPER_NAME = self.config.get('MODEL_WRAPPER_NAME', None)
+        if self.MODEL_WRAPPER_FILE is not None and not isinstance(self.MODEL_WRAPPER_FILE, str):
+            raise TypeError('`MODEL_WRAPPER_FILE` must be a string or null.')
+        if self.MODEL_WRAPPER_NAME is not None and not isinstance(self.MODEL_WRAPPER_NAME, str):
+            raise TypeError('`MODEL_WRAPPER_NAME` must be a string or null.')
+        if self.MODEL_TYPE != 'custom' and (self.MODEL_WRAPPER_FILE is not None or self.MODEL_WRAPPER_NAME is not None):
+            warnings.warn(
+                '`MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME` are only used with '
+                '`MODEL_TYPE=custom`.',
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         # output info
         self.REDIRECT = self.config.get('REDIRECT', True)
-        self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', False)
+        self.SAVE_PREDICTIONS = self.config.get('SAVE_PREDICTIONS', True)
         if not isinstance(self.SAVE_PREDICTIONS, bool):
-            raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but occurred {type(self.SAVE_PREDICTIONS)}.')
-        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE', './_Predictions')
+            raise TypeError(f'SAVE_PREDICTIONS must be a boolean, but got {type(self.SAVE_PREDICTIONS)}.')
+        self._PREDICTIONS_SAVE_FILE = self.config.get('PREDICTIONS_SAVE_FILE')
+        if self._PREDICTIONS_SAVE_FILE is None:
+            self._PREDICTIONS_SAVE_FILE = os.path.join(
+                self.config['OUTPUT_ROOT'], 'results', 'result'
+            )
         if self.SAVE_PREDICTIONS:
-            while os.path.exists(self._PREDICTIONS_SAVE_FILE):  # avoid overwrite existent data. Automatically rename.
-                warnings.warn(
-                    f'`PREDICTIONS_SAVE_FILE`: "{self._PREDICTIONS_SAVE_FILE}" already exists. '
-                    f'It will be renamed as "{self._PREDICTIONS_SAVE_FILE}_1".',
-                    RuntimeWarning
+            if not isinstance(self._PREDICTIONS_SAVE_FILE, str):
+                raise TypeError(
+                    f'`PREDICTIONS_SAVE_FILE` must be a string when `SAVE_PREDICTIONS` is true, '
+                    f'but got {type(self._PREDICTIONS_SAVE_FILE)}.'
                 )
-                self._PREDICTIONS_SAVE_FILE += '_1'
+            if os.path.lexists(self._PREDICTIONS_SAVE_FILE):
+                old_path = self._PREDICTIONS_SAVE_FILE
+                backup_path = backup_output(old_path, 'file')
+                message = raise_output_backup_warning(old_path, backup_path)
+                if self.logger is None:
+                    self._pending_output_warnings.append(message)
+                else:
+                    self.logger.warning(message)
         else:
             self._PREDICTIONS_SAVE_FILE = None
-        if self.SAVE_PREDICTIONS and (not isinstance(self.PREDICTIONS_SAVE_FILE, str)):
-            raise TypeError(f'PREDICTIONS_SAVE_PATH must be a str, but occurred {type(self.PREDICTIONS_SAVE_FILE)}.')
         if self.SAVE_PREDICTIONS:
-            self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
-        else:
-            self.dumper = DumpStructures(None, )
+            os.makedirs(os.path.dirname(self.PREDICTIONS_SAVE_FILE) or '.', exist_ok=True)
         if not isinstance(self.REDIRECT, bool): raise TypeError('REDIRECT must be a boolean.')
         if self.REDIRECT:
-            self.OUTPUT_PATH = self.config.get('OUTPUT_PATH', './')
-            self.OUTPUT_POSTFIX = self.config.get('OUTPUT_POSTFIX', 'Untitled')
+            self.OUTPUT_PATH = self.config.get('OUTPUT_PATH')
+            if self.OUTPUT_PATH is None:
+                self.OUTPUT_PATH = os.path.join(self.config['OUTPUT_ROOT'], 'logs')
+            self.OUTPUT_POSTFIX = self.config.get('OUTPUT_POSTFIX', CONFIG_DEFAULTS['OUTPUT_POSTFIX'])
 
         # debug mode
         self.DEBUG_MODE = self.config.get('DEBUG_MODE', False)
@@ -484,264 +631,293 @@ class _CONFIGS(object):
     def PREDICTIONS_SAVE_FILE(self):
         return self._PREDICTIONS_SAVE_FILE
 
-    @PREDICTIONS_SAVE_FILE.setter
-    def PREDICTIONS_SAVE_FILE(self, value):
-        if not self.SAVE_PREDICTIONS:
-            self.logger.warning(
-                f'WARNING: You are setting a new predictions save file, while `SAVE_PREDICTIONS` is still False.\n'
-                f'Hence, NOTHING WILL HAPPEN. BYE!'
+
+class _BaseAPI(_CONFIGS):
+    """Shared model and data-protocol support for numerical APIs.
+
+    The task classes retain their algorithms, while this base class owns the
+    model lifecycle and the distinction between graph and direct function
+    wrappers. DGL remains in the source tree for reference but is no longer an
+    accepted execution backend.
+    """
+
+    @staticmethod
+    def _validate_data_type(data_type: str) -> str:
+        """Validate the supported graph data representation.
+
+        Args:
+            data_type: Graph container name supplied by a task API.
+
+        Returns:
+            The normalized lower-case data type.
+
+        Raises:
+            TypeError: If ``data_type`` is not a string.
+            NotImplementedError: If the deprecated DGL representation is used.
+            ValueError: If the data type is unknown.
+        """
+        if not isinstance(data_type, str):
+            raise TypeError(f'`data_type` must be a string, but got {type(data_type)}.')
+        normalized = data_type.lower()
+        if normalized == 'dgl':
+            raise NotImplementedError(
+                'DGL support is deprecated and no longer available; use data_type="pyg".'
             )
-            return
-        self._PREDICTIONS_SAVE_FILE = value
-        self.dumper = DumpStructures(self.PREDICTIONS_SAVE_FILE)
+        if normalized != 'pyg':
+            raise ValueError(f'Unsupported `data_type` {data_type!r}; expected "pyg".')
+        return normalized
 
+    def _load_chk(self, path: str | None = None):
+        """Load a checkpoint once and split metadata, model parameters, and training state."""
+        load_path = self.LOAD_CHK_FILE_PATH if path is None else path
+        chk_data = th.load(load_path, weights_only=True)
+        if not isinstance(chk_data, dict):
+            raise TypeError(f'Checkpoint must contain a dictionary, but got {type(chk_data)}.')
+        if 'model_state_dict' not in chk_data:
+            raise KeyError(f'Checkpoint `{load_path}` does not contain `model_state_dict`.')
+        chk_hyperparam = chk_data.get('buctoolkit_hyperparameters', None)
+        chk_model_param = chk_data['model_state_dict']
+        chk_train_state = {
+            key: chk_data.get(key)
+            for key in ('epoch', 'val_loss', 'optimizer_state_dict', 'lr_scheduler_state_dict')
+        }
+        return chk_hyperparam, chk_model_param, chk_train_state
 
-class _Model_Wrapper_pyg(_BaseWrapper):
+    @staticmethod
+    def _merge_model_hyperparameters(input_config: Dict[str, Any], chk_config: Dict[str, Any], path: str = ''):
+        merged = copy.deepcopy(input_config)
+        conflicts = []
+        union_notes = []
+        for key, chk_value in chk_config.items():
+            key_path = f'{path}.{key}' if path else str(key)
+            if key not in input_config:
+                merged[key] = copy.deepcopy(chk_value)
+                union_notes.append(f'{key_path}: checkpoint-only, using checkpoint={chk_value!r}')
+            elif isinstance(input_config[key], dict) and isinstance(chk_value, dict):
+                merged[key], nested_conflicts, nested_notes = _BaseAPI._merge_model_hyperparameters(
+                    input_config[key], chk_value, key_path
+                )
+                conflicts.extend(nested_conflicts)
+                union_notes.extend(nested_notes)
+            elif input_config[key] != chk_value:
+                merged[key] = copy.deepcopy(chk_value)
+                conflicts.append(f'{key_path}: input={input_config[key]!r}, checkpoint={chk_value!r}')
+        for key, input_value in input_config.items():
+            if key not in chk_config:
+                key_path = f'{path}.{key}' if path else str(key)
+                union_notes.append(f'{key_path}: input-only, using input={input_value!r}')
+        return merged, conflicts, union_notes
 
-    __slots__ = ('_model', 'forces', 'X', )
+    def _checkpoint_hyperparameters(self, chk_hyperparam):
+        """Merge checkpoint MODEL metadata with input MODEL configuration.
 
-    def __init__(self, model, pos_attr_name='pos',) -> None:
+        ``MODEL_CONFIG: null`` (or an omitted field) means that the model
+        configuration is supplied by the checkpoint when available.  An
+        explicitly provided mapping continues to use the normal recursive
+        conflict-resolution strategy.
         """
-        A format transformer for converting Tensor X into PygData.pos
-        Wrap the model(graph, ...) into f(X)
+        input_hyperparam = self._current_model_hyperparameters()
+        if chk_hyperparam is None:
+            self.logger.info('Checkpoint hyperparameters were not found; input MODEL configuration will be used.')
+            return input_hyperparam
+        if not isinstance(chk_hyperparam, dict):
+            self.logger.warning('Checkpoint hyperparameters have an invalid format; input MODEL configuration will be used.')
+            return input_hyperparam
+        chk_model = chk_hyperparam.get('MODEL', {})
+        if not isinstance(chk_model, dict):
+            self.logger.warning('Checkpoint MODEL hyperparameters have an invalid format; input MODEL configuration will be used.')
+            return input_hyperparam
+        chk_model_for_merge = chk_model
+        if self._MODEL_CONFIG_FROM_CHECKPOINT:
+            checkpoint_model_config = chk_model.get('MODEL_CONFIG')
+            if isinstance(checkpoint_model_config, dict):
+                input_hyperparam['MODEL_CONFIG'] = copy.deepcopy(checkpoint_model_config)
+            else:
+                chk_model_for_merge = {
+                    key: value for key, value in chk_model.items()
+                    if key != 'MODEL_CONFIG'
+                }
+                if checkpoint_model_config is not None:
+                    self.logger.warning(
+                        'Checkpoint MODEL_CONFIG has an invalid format; input MODEL configuration will be used.'
+                    )
+        merged, conflicts, union_notes = self._merge_model_hyperparameters(input_hyperparam, chk_model_for_merge)
+        if conflicts:
+            self.logger.warning(
+                'Checkpoint MODEL hyperparameters differ from input; checkpoint values will be used:\n'
+                + '\n'.join(f'  {conflict}' for conflict in conflicts)
+            )
+        if union_notes and self.VERBOSE > 1:
+            self.logger.info(
+                'Checkpoint MODEL hyperparameters were merged by union:\n'
+                + '\n'.join(f'  {note}' for note in union_notes)
+            )
+        return merged
+
+    def _current_model_hyperparameters(self) -> Dict[str, Any]:
+        return {
+            'MODEL_TYPE': self.MODEL_TYPE,
+            'MODEL_CONFIG': self.MODEL_CONFIG,
+            'MODEL_WRAPPER_CONFIG': self.MODEL_WRAPPER_CONFIG,
+        }
+
+    def _instantiate_model(self, model: Any, hyperparam: Dict[str, Any] | None = None) -> Any:
+        """Instantiate the configured model or the built-in VASP wrapper.
 
         Args:
-            model: An instantiate nn.Module
+            model: Uninstantiated model class used by graph/custom modes.
 
-        Methods:
-            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
-
+        Returns:
+            An instantiated base model. For VASP this is already a wrapper.
         """
-        super().__init__(model)
-        self.pos_attr_name = pos_attr_name
-        #if check_module('torch_geometric') is None:
-        #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
-        pass
-
-    def Energy(self, X, graph: Batch):
-        self.X = X
-        if hasattr(graph, 'pos'):
-            graph.pos = self.X.reshape(-1,3).contiguous()
-        if hasattr(graph, 'positions'):
-            graph.positions = self.X.reshape(-1,3).contiguous()
-        y = self._model(graph)
-        energy = y['energy']
-        self.forces = y['forces']
-        return energy
-
-    def Grad(self, X, graph: Batch):
-        origin_shape = X.shape
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.X = X
-            if hasattr(graph, 'pos'):
-                graph.pos = self.X.reshape(-1, 3).contiguous()
-            if hasattr(graph, 'positions'):
-                graph.positions = self.X.reshape(-1, 3).contiguous()
-            return - ((self._model(graph))['forces']).reshape(origin_shape)
-        else:
-            force = self.forces
-            self.forces = None
-            return - force.reshape(origin_shape).contiguous()
-
-
-class _Model_Wrapper_pyg_only_X(_BaseWrapper):
-    def __init__(self, model , graph: Batch) -> None:
-        """
-        A format transformer for converting Tensor X into PygData.pos
-        Wrap the model(graph, ...) into f(X)
-
-        Args:
-            model: An instantiate nn.Module
-
-        Methods:
-            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
-        """
-        super().__init__(model)
-        self.graph = graph
-        #if check_module('torch_geometric') is None:
-        #    ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
-        pass
-
-    def Energy(self, X,):
-        self.X = X
-        self.graph.pos = self.X.squeeze(0).reshape(-1,3)
-        y = self._model(self.graph )
-        energy = y['energy']
-        energy = th.sum(energy).unsqueeze(0)
-        return energy
-
-    def Grad(self, X):
-        origin_shape = X.shape
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.X = X
-            self.graph.pos = self.X.reshape(-1, 3)
-            return - ((self._model(self.graph))['forces']).reshape(origin_shape)
-        else:
-            force = self.forces
-            self.forces = None
-            return - force.reshape(origin_shape).contiguous()
-
-
-class _Model_Wrapper_dgl(_BaseWrapper):
-    def __init__(self, model) -> None:
-        """
-        A format transformer for converting Tensor X into DGLGraph.ndata['pos'] i.e., wrapping the model(graph, ...) into f(X)
-        The output DGLGraph has format as follows:
-        dgl.heterograph(
-            {
-                ('atom', 'bond', 'atom'): ([], []),
-                ('cell', 'disp', 'cell'): ([], [])
-            },
-            num_nodes_dict={
-                'atom': n_atom,
-                'cell': 1
+        if hyperparam is None:
+            hyperparam = {
+                'MODEL_TYPE': self.MODEL_TYPE,
+                'MODEL_CONFIG': self.MODEL_CONFIG,
+                'MODEL_WRAPPER_CONFIG': self.MODEL_WRAPPER_CONFIG,
             }
-        )
-        data.nodes['atom'].data['pos']: (n_atom, 3), Atom positions in Cartesian coordinates.
-        data.nodes['atom'].data['Z']: (n_atom, ), Atomic numbers.
-        data.nodes['cell'].data['cell']: (1, 3, 3), Cell vectors.
+        model_type = hyperparam['MODEL_TYPE']
+        model_config = hyperparam['MODEL_CONFIG']
+        model_wrapper_config = hyperparam['MODEL_WRAPPER_CONFIG']
+        if model_config is None:
+            model_config = dict()
+        if model_type == 'vasp':
+            from BUCToolkit.utils.model_wrappers import VASP_PluginModel
+            return VASP_PluginModel(**model_wrapper_config)
+        if model_type == 'mace':
+            from BUCToolkit.utils.model_wrappers import MACEWrapper
+            return MACEWrapper(**model_config)
+        return model(**model_config)
+
+    def _build_model_wrapper(
+            self,
+            model: Any,
+            regular_batch: bool = False,
+            hyperparam: Dict[str, Any] | None = None,
+    ) -> _BaseWrapper:
+        """Create the configured function wrapper around an instantiated model.
 
         Args:
-            model: An instantiate nn.Module subclass
+            model: Instantiated base model, or the VASP wrapper itself.
+            regular_batch: Select the vibration-analysis PyG batch adapter.
 
-        Methods:
-            Energy: input Tensor `X` and DGLGraph `graph`, it will update data.nodes['atom'].data['pos'] into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and DGLGraph `graph`, it will update data.nodes['atom'].data['pos'] into X and return model(graph)['forces'].
+        Returns:
+            A wrapper exposing the standard ``Energy`` and ``Grad`` protocol.
 
+        Raises:
+            ValueError: If a configured custom wrapper import is incomplete.
         """
-        super().__init__(model)
-        if check_module('dgl') is None:
-            ImportError('The method is unavailable because the `dgl` cannot be imported.')
-        pass
+        if hyperparam is None:
+            hyperparam = {
+                'MODEL_TYPE': self.MODEL_TYPE,
+                'MODEL_WRAPPER_CONFIG': self.MODEL_WRAPPER_CONFIG,
+            }
+        model_type = hyperparam['MODEL_TYPE']
+        model_wrapper_config = hyperparam['MODEL_WRAPPER_CONFIG']
+        if model_type == 'vasp':
+            # External calculators require a fresh process for each loader
+            # batch.  The dedicated loader invokes this callback at its batch
+            # boundary without adding cleanup code to every task API.
+            from BUCToolkit.api.DataLoaders import ExtProcDataLoader, PyGDataLoader
+            if self._data_loader is PyGDataLoader:
+                self._data_loader = ExtProcDataLoader
+            if self._data_loader is not ExtProcDataLoader:
+                raise ValueError(
+                    'VASP models require `ExtProcDataLoader` so each external '
+                    'process is released before the next structure.'
+                )
+            self._data_loader_configs = {
+                **self._data_loader_configs,
+                'signal_function': model.close,
+            }
+            return model
+        if model_type == 'custom':
+            if self.MODEL_WRAPPER_FILE is None and self.MODEL_WRAPPER_NAME is None:
+                if isinstance(model, _BaseWrapper):
+                    return model
+                raise ValueError(
+                    '`MODEL_TYPE=custom` requires both `MODEL_WRAPPER_FILE` and '
+                    '`MODEL_WRAPPER_NAME`, unless the supplied model already '
+                    'implements `_BaseWrapper`.'
+                )
+            if self.MODEL_WRAPPER_FILE is None or self.MODEL_WRAPPER_NAME is None:
+                raise ValueError(
+                    '`MODEL_WRAPPER_FILE` and `MODEL_WRAPPER_NAME` must be '
+                    'provided together for a file-based custom wrapper.'
+                )
+            from BUCToolkit.cli.main import load_model
+            wrapper_class = load_model(self.MODEL_WRAPPER_FILE, self.MODEL_WRAPPER_NAME)
+            wrapper = wrapper_class(model, **model_wrapper_config)
+            if not isinstance(wrapper, _BaseWrapper):
+                raise TypeError(
+                    'A custom model wrapper must inherit from `_BaseWrapper`, '
+                    f'but got {type(wrapper)}.'
+                )
+            return wrapper
+        if model_type == 'mace':
+            from BUCToolkit.utils.model_wrappers import MACEModelWrapper
+            return MACEModelWrapper(model)
+        if model_type == 'pyg_multi':
+            from BUCToolkit.utils.model_wrappers import Model_Wrapper_pyg_MultiDevice
+            return Model_Wrapper_pyg_MultiDevice(model, **model_wrapper_config)
+        if regular_batch:
+            return Model_Wrapper_regularBatch_pyg(model, **model_wrapper_config)
+        return Model_Wrapper_pyg(model, **model_wrapper_config)
 
-    def Energy(self, X, graph, return_format: Literal['sum', 'origin'] = 'origin'):
-        self.X = X
-        graph.nodes['atom'].data['pos'] = self.X.squeeze(0)
-        y = self._model(graph)
-        energy = y['energy']
-        self.forces = y['forces']
-        if return_format == 'sum':
-            energy = th.sum(energy).unsqueeze(0)
-        return energy
-
-    def Grad(self, X, graph):
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.X = X
-            graph.nodes['atom'].data['pos'] = self.X.squeeze(0)
-            return - ((self._model(graph))['forces']).unsqueeze(0)
-        else:
-            force = self.forces
-            self.forces = None
-            return - force.unsqueeze(0)
-
-
-class _Model_Wrapper_regularBatch_pyg(_BaseWrapper):
-    def __init__(self, model) -> None:
-        """
-        A format transformer for converting Tensor X into PygData.pos
-        Wrap the model(graph, ...) into f(X), but here the batch size of graph is only 1, and the batch size (1st dimension) of X is many.
-        This wrapper would expand batch of graph into the same as X.
-
-        Args:
-            model: An instantiate nn.Module
-
-        Methods:
-            Energy: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['energy'].
-            Grad: input Tensor `X` and PygData `graph`, it will update graph.pos into X and return model(graph)['forces'].
-
-        """
-        super().__init__(model)
-        _pyg = check_module('torch_geometric.data')
-        if _pyg is not None:
-            import torch_geometric.data as _pyg
-            self.pygBatch = _pyg.Batch
-        else:
-            #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
-            self.pygBatch = Batch
-
-    def Energy(self, X: th.Tensor, graph: Batch):
-        self.X = X.flatten(0, 1)  # convert X: (n_batch, n_atom, n_dim) into X': (n_batch * n_atom, 3)
-        batch_size = X.size(0)
-        if graph.batch_size == 1:
-            graph = self.pygBatch.from_data_list([graph] * batch_size, exclude_keys=['batch', 'ptr'])
-        graph.pos = self.X
-        y = self._model(graph)  # (n_batch, )
-        energy = y['energy']
-        self.forces = y['forces']
-        return energy
-
-    def Grad(self, X, graph: Batch):
-        if (self.X is None) or (not compare_tensors(X, self.X)):
-            self.forces = None
-        if self.forces is None:
-            self.Energy(X, graph)
-
-        force: th.Tensor = self.forces
-        self.forces = None
-        return - force.unsqueeze(0)
+    def _set_data_type(self, data_type: str) -> None:
+        """Store a validated graph data type on a task instance."""
+        self.data_type = self._validate_data_type(data_type)
 
 
 class ExpMovingAverage:
-    """
-    Applying exponential moving average for training models.
-    """
-    def __init__(self, model:nn.Module, decay:float=0.999):
-        """
+    """Apply an exponential moving average to model parameters."""
 
-        Args:
-            model: The torch model of nn.Module
-            decay: The decay coefficient.
-        """
+    def __init__(self, model: nn.Module, decay: float = 0.999):
         self.model = model
         self.decay = decay
-        self.shadow: Dict[str, th.Tensor] = dict()
-        self.backup = dict()
-        # initialize
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.detach().clone()
+        self.shadow: Dict[str, th.Tensor] = {}
+        self.backup: Dict[str, th.Tensor] = {}
 
+        with th.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name] = param.detach().clone()
+
+    @th.no_grad()
     def step(self):
-        """
-        Applying ema 1 time.
-        """
+        """Update EMA after an optimizer step."""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 assert name in self.shadow
-                self.shadow[name].mul_(self.decay).add_(param.data.detach(), alpha=1-self.decay)
+                self.shadow[name].lerp_(param.detach(), 1.0 - self.decay)
 
+    @th.no_grad()
     def apply(self):
-        """
-        Applying ema shadow parameters to the trained model, and the original parameters of trained model will be stored in `self.backup`.
-        """
+        """Replace model parameters with EMA parameters for evaluation."""
+        if self.backup:
+            raise RuntimeError("EMA parameters have already been applied.")
+
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 assert name in self.shadow
-                self.backup[name] = param.data.detach().clone()
+                self.backup[name] = param.detach().clone()
                 param.copy_(self.shadow[name])
 
+    @th.no_grad()
     def restore(self):
-        """
-        Restore backup of original parameters of model from `self.backup` to continue training.
-        """
+        """Restore the model parameters saved by apply()."""
+        if not self.backup:
+            return
+
         try:
-            if len(self.backup) != 0:
-                for name, param in self.model.named_parameters():
-                    if param.requires_grad:
-                        assert name in self.backup, f'Parameter {name} is not in backup!'
-                        param.copy_(self.backup[name])
-            else:
-                pass
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    if name not in self.backup:
+                        warnings.warn(f"Parameter {name} is not in backup!")
+                        continue
+                    param.copy_(self.backup[name])
         finally:
-            self.backup = dict()
+            self.backup.clear()
 
 
 class DumpStructures:
@@ -871,7 +1047,13 @@ class DumpStructures:
             energies,
             forces,
         )
-        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.start_from_arrays(
+            1, batch_indices, idx, cells, elements, pos, fixations, energies, forces,
+            names=(
+                'batch_indices', 'structure_ids', 'cell_vec', 'atomic_numbers',
+                'X', 'fixed_mask', 'Energy', 'Force',
+            ),
+        )
         self.dumper.step(
             batch_indices, idx, cells, elements, pos, fixations, energies, forces
         )
@@ -898,7 +1080,13 @@ class DumpStructures:
             energies,
             forces,
         )
-        self.dumper.start_from_arrays(1, batch_indices, idx, cells, elements, pos, fixations, energies, forces)
+        self.dumper.start_from_arrays(
+            1, batch_indices, idx, cells, elements, pos, fixations, energies, forces,
+            names=(
+                'batch_indices', 'structure_ids', 'cell_vec', 'atomic_numbers',
+                'X', 'fixed_mask', 'Energy', 'Force',
+            ),
+        )
         self.dumper.step(
             batch_indices, idx, cells, elements, pos, fixations, energies, forces
         )
@@ -977,11 +1165,7 @@ class PygBatchUpdater:
 
     def __init__(self):
         self.__check_old = None
-        _pyg = check_module('torch_geometric.data.batch')
-        if _pyg is None:
-            self.pygData = Batch
-        else:
-            self.pygData = _pyg.Batch
+        self.pygData = Batch
 
     def initialize(self):
         self.__check_old = None

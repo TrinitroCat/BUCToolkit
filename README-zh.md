@@ -51,7 +51,7 @@ Python 函数（返回能量及其梯度，即力的相反数）。
 - **PyTorch**（BSD-3-Clause 许可证），版权所有 © 2016-present Facebook Inc。
 
 以下第三方库为可选项：
-- **DGL**（Apache-2.3 许可证）。目前仅支持部分 DGL 模型。
+- **DGL**（Apache-2.3 许可证）。DGL 支持已弃用，当前不再提供。
 - **torch-geometric**（MIT 许可证）。目前程序已经内置了基本的 `Data` 和 `Batch` 对象。
 如需其他高级功能，可完整安装 torch-geometric。
 - **[ASE](https://gitlab.com/ase/ase/-/tree/master?ref_type=heads)**（LGPL-v2.1 许可证）。用于涉及 `ase.Atoms` 对象的函数，例如格式转换。
@@ -324,7 +324,56 @@ BUCToolkit 也可以直接作为普通可执行程序使用。通过在输入文
 
 ```shell
 buctoolkit -i './input_file.inp'
+# 或
+buctoolkit './input_file.inp'
 ```
+
+YAML 输入文件中的路径统一相对于输入文件所在目录解析；命令行参数 `-i`、
+`-o` 和 `--convert` 中的路径仍相对于命令执行时的当前目录解析。
+
+中心测试也集成在同一个 CLI 中（需要在源码目录运行）：
+
+```shell
+buctoolkit --test main     # 长时间测试, 严格科学正确性检查, 通过Virial定理检查MD/MC的统计力学性质
+buctoolkit --test fast     # 短步数 smoke 检查, 只检查代码通过性
+buctoolkit --test profile  # fast 测试并生成 torch profiler 报告
+```
+
+迭代步数和收敛限统一维护在
+`testsuite/configs/main_test.yaml`，fast 模式的覆盖值在
+`testsuite/configs/fast_test.yaml`。独立的兼容性、压力和回归测试位于
+`testsuite/regression_test/`，不会被上述中心命令自动选中。
+
+`OUTPUT_ROOT` 默认是 `./output`；若未提供，则兼容地将旧
+`OUTPUT_PATH` 视为根目录。根目录不存在时会创建；非空的已有目录会移至
+带时间戳的 `.bak...` 备份目录。日志默认写入 `OUTPUT_ROOT/logs`，结果默认写入
+`OUTPUT_ROOT/results/result`，训练检查点默认写入
+`OUTPUT_ROOT/chk`。显式的 `OUTPUT_PATH`、`PREDICTIONS_SAVE_FILE` 和
+`TRAIN.CHK_SAVE_PATH` 始终优先。
+
+#### 可执行输入规则
+
+可执行模式保持模型加载和模型适配分离：
+
+- `MODEL_TYPE: pyg` 从 `MODEL_FILE` 导入 `MODEL_NAME` 指定的模型类，并使用普通 PyG wrapper。
+- `MODEL_TYPE: pyg_multi` 使用多进程 PyG wrapper。设备和 worker 参数写在
+  `MODEL_WRAPPER_CONFIG` 中；该模式必须显式选择，不会从模型文件推断 GPU 设置。
+- `MODEL_TYPE: mace` 根据 `MODEL_CONFIG` 构造内置 MACE 模型。MACE 训练使用
+  MACE 数据适配器和 loader；其他 MACE 任务仍先按普通结构路径转换数据，再由 MACE wrapper 计算。
+- `MODEL_TYPE: vasp` 使用外部进程 wrapper，由 `MODEL_WRAPPER_CONFIG` 配置，
+  不要求 Python 模型构造器。
+- `MODEL_TYPE: custom` 从 `MODEL_WRAPPER_FILE` 导入 `MODEL_WRAPPER_NAME`。
+  自定义 wrapper 必须继承 `_BaseWrapper`。模型文件仍与 wrapper 分离，必要时继续由
+  `MODEL_FILE` 和 `MODEL_NAME` 指定。
+
+`DATA_READER_KWARGS` 传给结构读取器，`DATA_LOADER_KWARGS` 传给 API
+`DataLoader`。只有旧输入文件包含 `DATA_LOADER_KWARGS` 而没有
+`DATA_READER_KWARGS` 时，为保持兼容会同时将该映射传给读取器，并发出弃用警告。
+NEB、Blue-Moon CMD 等成对任务仍使用任务专用的 paired loader。
+
+不带参数启动的交互式 CLI 是配置编辑器和关键词查询工具。`task` 创建的输入文件
+使用与 API 相同的运行时默认值；科学模型、数据和任务参数仍需用户根据实际研究任务填写，
+然后再执行 `run`。
 
 如果不带任何参数运行，则进入交互式命令行界面：
 
@@ -380,20 +429,20 @@ run       : 在 CLI 中启动一个任务。
 
 # 全局配置
 ###TASK: !!str MD          # 任务名称。可选：'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC', 'TRAIN', 'PREDICT'
-START: !!int 1          # 0: 从头开始；1: 从 LOAD_CHK_FILE_PATH 加载检查点继续；2: 仅加载模型参数/权值
+START: !!int 0          # 0: 从头开始；1: 从 LOAD_CHK_FILE_PATH 加载检查点继续；2: 仅加载模型参数/权值
 VERBOSE: !!int 1        # 日志输出的详细程度
-DEVICE: !!str 'cuda:0'  # 任务运行的设备
-BATCH_SIZE: !!int 16    # 计算时输入数据的批大小
+DEVICE: !!str cpu       # 任务运行的设备
+BATCH_SIZE: !!int 1     # 计算时输入数据的批大小
 
 # I/O 配置
 LOAD_CHK_FILE_PATH: !!str your/model/checkpoint/file/path
-OUTPUT_PATH: !!str your/log/output/path
+OUTPUT_ROOT: !!str ./output
 OUTPUT_POSTFIX: !!str your_logfile_suffix
-PREDICTIONS_SAVE_FILE: !!str your/model/predictions/save/path  # 保存预测结果的文件路径
+# 可选覆盖项：OUTPUT_PATH、PREDICTIONS_SAVE_FILE、TRAIN.CHK_SAVE_PATH
 STRICT_LOAD: !!bool true  # 是否严格加载模型参数
 REDIRECT: !!bool true    # 是否将训练日志重定向到 OUTPUT_PATH，还是直接打印到屏幕
 SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出到转储文件
-###DATA_TYPE: !!str BS  # 可选值：'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD'。BS 是 Structures().save(...) 保存的内置结构格式
+###DATA_TYPE: !!str BS  # 可选值：'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC'。BS 是 Structures().save(...) 保存的内置结构格式
 
 ###DATA_PATH: !!str /your/data/path # 用于计算的数据路径；如果是训练，将被视为训练集
 ###DATA_NAME_SELECTOR: !!str ".*$"  # 用于选择数据名称的正则表达式，仅加载匹配的名称
@@ -401,7 +450,8 @@ SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出�
 ###DISPDATA_PATH: !!str your/displacement/data/path  # 用于需要初始方向猜测的计算，如 Dimer
 ###VAL_SET_PATH: !!str your/validation/set/path  # 训练时需要的验证集路径
 ###VAL_SPLIT_RATIO: !!float 0.1  # 验证集占总数据集的比例；若指定了 VAL_SET_PATH，此参数被忽略
-###DATA_LOADER_KWARGS: {}      # 数据加载器的其他关键字参数
+###DATA_READER_KWARGS: {}      # 结构读取器的关键字参数
+###DATA_LOADER_KWARGS: {}      # API DataLoader 的关键字参数
 ###IS_SHUFFLE: !!bool false    # 计算前是否随机打乱数据集
 
 # 训练配置
@@ -447,7 +497,7 @@ TRAIN:
 # 结构弛豫（优化）
 RELAXATION:
   ALGO: !!str 'FIRE'  # 算法选项：CG, BFGS, FIRE
-  ITER_SCHEME: !!str 'PR+'  # 仅当 ALGO=CG 时有效，选项：'PR+', 'FR', 'PR'
+  ITER_SCHEME: !!str 'PR+'  # 仅当 ALGO=CG 时有效，选项：'PR+', 'FR', 'SD'
   E_THRES: !!float 1.e4  # 能量差阈值
   F_THRES: !!float 0.05  # 最大力阈值
   MAXITER: !!int 300     # 最大迭代次数
@@ -474,9 +524,10 @@ TRANSITION_STATE:
 
 # 振动分析（简谐近似）
 VIBRATION:
-  METHOD: !!str 'Coord'  # Coord / Grad，对应有限差分和自动梯度两种方案
+  METHOD: !!str 'EnergyDiff'  # EnergyDiff / GradDiff / Autograd
   BLOCK_SIZE: !!int 1    # 张量/向量并行化的块大小
   DELTA: !!float 1e-2    # 有限差分计算 Hessian‑向量积的步长
+  SAVE_HESSIAN: !!bool false  # 随频率和简正模式一同保存 Hessian
 
 # NEB 过渡态
 NEB:
@@ -503,9 +554,15 @@ MD:
   T_INIT: !!float 298.15  # 初始温度（K）。对于 NVE 系综，仅用于按玻尔兹曼分布生成随机初始速度
   OUTPUT_COORDS_PER_STEP: !!int 1  # 控制输出原子坐标的频率。若 verbose=3，还会输出原子速度
   MOVE_TO_CENTER_FREQ: !!int 20   # 每多少步将原子平移到质心并将整体速度置零
+  # 以下设置仅对 Constrained MD 生效  <<<
+  CONSTR_MD_SCHEME: !!str BLUE_MOON  # 仅 CMD：BLUE_MOON 或 SLOW_GROWTH. 对SLOW_GROWTH, 若不设置约束值函数, 则为普通约束MD.
+  N_IMAGES: !!int 3         # BLUE_MOON 插值镜像数；SLOW_GROWTH 为并行副本数（单条轨迹设为 1）
+  CONSTR_THRESHOLD: !!float 1.e-5  # 约束收敛限, 单位与具体约束的广义坐标相同.
+  REQUIRE_FIXMAN: !!str auto  # `auto` 意为 `BLUE_MOON` 设为 True, `SLOW_GROWTH` 设为False. 可手动设置 True/False.
   # 可选：约束
   CONSTRAINTS_FILE: !!str ./constraints.py  # 约束函数的文件路径，函数应接收 torch.Tensor 并支持自动梯度
   CONSTRAINTS_FUNC: !!str func              # CONSTRAINTS_FILE 中具体的函数名称
+  CONSTRAINTS_VAL_FUNC: null                # 可选的时间约束目标 constr_val(t) 或 constr_val(t, c0)，从 CONSTRAINTS_FILE 加载；null 默认固定为初始构型的约束函数值
   REQUIRE_GRAD: !!bool False  # 同上
 
 # 蒙特卡洛
@@ -522,12 +579,16 @@ MC:
   MOVE_TO_CENTER_FREQ: !!int 20    # 同 MD 中说明
 
 # 模型配置
+MODEL_TYPE: !!str pyg  # pyg、pyg_multi、mace、vasp 或 custom
 ###MODEL_FILE: !!str your/model/file/path/template_model.py  # torch 模型文件路径
 MODEL_NAME: !!str YourModel   # MODEL_FILE 中具体的模型类名
 MODEL_CONFIG:   # 模型超参数，将传递给 `YourModel.__init__(**MODEL_CONFIG)`
   hyperparameter1: xxx
   hyperparameter2: xxx
   # ...
+MODEL_WRAPPER_CONFIG: {}  # 传给所选模型 wrapper 的参数
+###MODEL_WRAPPER_FILE: null  # 自定义 wrapper 文件；仅用于 MODEL_TYPE=custom
+###MODEL_WRAPPER_NAME: null  # 自定义 wrapper 名称；仅用于 MODEL_TYPE=custom
 ```
 
 ### 后处理
@@ -558,6 +619,15 @@ buctoolkit -c `$input_type` `$input_path` `$output_type` `$output_path`
 ```
 
 该命令会将 `$input_path` 下所有假定格式为 `$input_type` 的文件转换为 `$output_path` 中格式为 `$output_type` 的文件。
+
+输出目标不会被静默覆盖。非空的 `OUTPUT_ROOT`、已有的
+`PREDICTIONS_SAVE_FILE` 或 `-o` 指定的输出文件，都会先移动到带时间戳的
+`.bakYYYYMMDD_HHMMSS` 路径，再创建新输出。转换目标会以相同后缀整体备份。
+同一秒内发生重名时依次追加 `_1`、`_2`。类型不符的文件、目录或符号链接会被拒绝。
+
+从 `BatchStructures` 或 ASE 结构为现有 API loader 组装输入时，可以使用
+`CreateLoadableData`。它提供普通 PyG、成对 PyG、MACE、成对 MACE 以及外部进程
+loader 所需映射的便捷方法，但不引入新的数据协议。
 
 如需更精细的控制，可使用以下 Python 脚本：
 
@@ -628,6 +698,37 @@ function(
 最后，`require_grad` 控制 PyTorch 的梯度上下文。当 `require_grad = False` 时，
 `func` 和 `grad_func` 的计算在 `torch.no_grad` 上下文下进行，以降低内存开销；
 否则，将显式通过 `torch.enable_grad` 开启梯度计算上下文。
+
+#### 函数协议与模型适配器
+
+底层算法依赖 `func` / `grad_func` 协议，而不依赖某一种特定的模型类。
+高级 API 和模型适配器提供了接入同一协议的便捷路径，用户也可以使用自定义函数直接调用底层引擎：
+
+```text
+高级 API / CLI -> 模型与数据设置 -> 模型适配器 --------+
+                                                   |
+PyG、VASP 及多设备模型 -> utils/model_wrappers ------+-> func / grad_func 协议
+                                                   |             |
+用户自定义函数与外部计算程序 --------------------------+             v
+                                         BatchOptim / BatchMD / BatchMC
+```
+
+`BUCToolkit/utils/model_wrappers/` 中的适配器将常见模型接口转换为基于坐标的能量和梯度调用。
+例如，PyG 适配器负责更新图对象中的坐标、执行模型，并通过底层算法所需的协议提供能量和力。
+适配层只负责提供便利；数值引擎本身不依赖深度学习模型或某一种特定的图框架，因而仍可独立使用。
+
+对于支持官方 Python plugin 的新版 VASP，可以使用 `VASP_PluginModel`。
+它在首次调用时于工作目录生成 `vasp_plugin.py`，通过 IPC 启动一个长期存活的 VASP
+作业，并由 BUCToolkit 主进程继续驱动后续 `Energy`/`Grad` 请求。该 wrapper 直接返回
+VASP `structure` plugin 提供的真实能量和力，不读取 OUTCAR，也不会创建逐步计算子目录。
+使用前应在 INCAR 中启用 `PLUGINS/STRUCTURE = T`，并确保 VASP 的 Python plugin
+支持已安装；传统 VASP 或不支持该 plugin 的环境仍使用 `VASP_Model`。
+
+仅具有相同的 Python 调用签名并不代表满足完整协议。输入与输出还必须符合约定的张量形状、
+数据类型、设备、能量/梯度语义和批次布局。特别是，规则与不规则批次必须遵循
+[批量并行方案](#批量并行方案)中描述的布局；除非适配器完成了符号转换，否则 `grad_func`
+应返回数学意义上的梯度，而不是物理意义上的力。由此，解析函数、机器学习势函数和外部电子结构
+计算程序可以复用同一组经过优化的底层算法。
 
 ### 高度可定制的算法
 
@@ -731,7 +832,8 @@ runner = bt.BatchMD.ConstrNVT(
   device=DEVICE,
   verbose=0
 )
-# `constr_val` 也可以设为 Callable[[ScalarTensor], Tensor]，以表示时变约束。
+# `constr_val` 可以是 `constr_val(t)` 或 `constr_val(t, c0)` 以表示时变约束；
+# `c0` 是本次初始化中 `constr_func(X_init)` 的结果。
 
 runner.run(...)   # 见 `作为 Python 包使用` 一节
 

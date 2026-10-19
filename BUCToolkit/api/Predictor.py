@@ -17,12 +17,12 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.api._io import _CONFIGS, _LoggingEnd
+from BUCToolkit.api._io import _BaseAPI, _LoggingEnd
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
 from BUCToolkit.BatchStructures.StructuresIO import structures_io_dumper, ArrayDumper
 
 
-class Predictor(_CONFIGS):
+class Predictor(_BaseAPI):
     """
     A Base Predictor class.
     Users need to set the dataset and dataloader manually.
@@ -40,7 +40,7 @@ class Predictor(_CONFIGS):
 
         self.config_file = config_file
         self.reload_config(config_file)
-        self.data_type = data_type
+        self._set_data_type(data_type)
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
@@ -69,12 +69,17 @@ class Predictor(_CONFIGS):
             copy_stream = _[1]
             copy_stream.synchronize()
             data = _[2]
-            data = [data[_k].numpy() for _k in sorted(data) if isinstance(data[_k], th.Tensor)]
+            tensor_names = [
+                name for name in sorted(data)
+                if isinstance(data[name], th.Tensor)
+            ]
+            arrays = [data[name].numpy() for name in tensor_names]
             dumper.start_from_arrays(
                 1,
-                *data,
+                *arrays,
+                names=tensor_names,
             )
-            dumper.step(*data)
+            dumper.step(*arrays)
 
     def _async_print(self, q: Queue):
         """
@@ -102,7 +107,7 @@ class Predictor(_CONFIGS):
         Parameters:
             model: the input model which is uninstantiated nn.Module class.
             test_model: bool, if True, consumed time per batch and max memory per batch would be returned.
-            warm_up: bool, if True, model will idle on some pseudo-samples for warming up.
+            warm_up: bool, if True, model will idle on some pseudo-samples for warming up. It requires the cuda availability.
 
         Returns:
             None, if `SAVE_PREDICTIONS` in config_file is true.
@@ -114,15 +119,28 @@ class Predictor(_CONFIGS):
             path=self.PREDICTIONS_SAVE_FILE if self.SAVE_PREDICTIONS else None,
             mode='x',
         )
+        if warm_up and (not th.cuda.is_available()):
+            self.logger.warning(f"Cuda is not available, so `warm_up` will be turned off.")
+            warnings.warn("Cuda is not available, so `warm_up` will be turned off.")
+            warm_up = False
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1 or self.START == 2:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
+        if not isinstance(model_wrap._model, nn.Module):
+            raise TypeError('Predictor requires a wrapper around torch.nn.Module.')
+        _model = model_wrap._model
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'])
+                _model.load_state_dict(_chk_model_param)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
+            epoch_now = _chk_train_state['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             warnings.warn('The model was not read trained parameters from checkpoint file. \nI HOPE YOU KNOW WHAT YOU ARE DOING!', RuntimeWarning)
             epoch_now = 0
@@ -144,7 +162,7 @@ class Predictor(_CONFIGS):
         try:
             # I/O
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'PREDICT', None, self.n_samp)
+                self.logout_task_information(_model, 'PREDICT', None, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
@@ -293,5 +311,3 @@ class EmptyContextManager:
 
     def wait_stream(self, *args, **kwargs):
         pass
-
-

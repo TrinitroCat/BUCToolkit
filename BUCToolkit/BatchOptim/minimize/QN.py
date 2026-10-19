@@ -203,7 +203,7 @@ class QN(_BaseOpt):
             H_inv_now_ = H_inv_now.flatten(-2, -1).flatten(-3, -2)  # (1, sumN*D, sumN*D)
             big_batch_scatter = th.repeat_interleave(batch_scatter_indices, self.n_dim)  # for flatten tensors
             # A diagonal approximation of Powell damping.
-            diag_invH = th.diagonal(H_inv_now_, dim1=-2, dim2=-1).reciprocal_().reshape(1, -1, self.n_dim)  # (1, sumN, D)
+            diag_invH = th.diagonal(H_inv_now_, dim1=-2, dim2=-1).reciprocal().reshape(1, -1, self.n_dim)  # (1, sumN, D)
             ss = th.sum(index_inner_product(displace, diag_invH * displace, 1, batch_scatter_indices), dim=-1, keepdim=True)  # (1, B, 1)
             sy = th.sum(index_inner_product(displace, g_go, 1, batch_scatter_indices), dim=-1, keepdim=True)
             non_pos_deter_mask = (sy < 0.2 * ss)  # (1, B, 1)
@@ -227,7 +227,7 @@ class QN(_BaseOpt):
             H_inv_now = self.H_inv[select_mask]  # simply: (N_unconverged, n_atom, n_dim, n_atom, n_dim)
             Ident_now = self.Ident[select_mask]
             H_inv_now_ = H_inv_now.flatten(-2, -1).flatten(-3, -2)  # (B, A*D, A*D)
-            diag_invH = th.diagonal(H_inv_now_, dim1=-2, dim2=-1).reciprocal_().reshape(-1, self.n_atom, self.n_dim)  # (B, A*D)
+            diag_invH = th.diagonal(H_inv_now_, dim1=-2, dim2=-1).reciprocal().reshape(-1, self.n_atom, self.n_dim)  # (B, A*D)
             ss = th.sum(displace * diag_invH * displace, dim=(-2, -1), keepdim=True)  # (B, 1, 1)
             sy = th.sum(displace * g_go, dim=(-2, -1), keepdim=True)
             non_pos_deter_mask = (sy < 0.2 * ss)  # (B, 1, 1)

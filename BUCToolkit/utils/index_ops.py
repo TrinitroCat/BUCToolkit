@@ -130,12 +130,13 @@ def indices_pairwise_dist(
     """
     Compute pairwise distance between two tensors on only the same indices in Qx and Qy.
     Args:
-        X: input tensor 1.
-        Y: input tensor 2.
-        Qx: Tensor[int64], indices tensor of X.
-        Qy: Tensor[int64], indices tensor of Y.
+        X: (N, M), input tensor 1, the 1st dim is the batch dim indexed by Qx, and the 2nd dim is the coordinates.
+        Y: (N, M), input tensor 2.
+        Qx: Tensor[int64], indices tensor of X in format of [0, 0, ..., 0, 1, 1, ..., N-1].
+        Qy: Tensor[int64], indices tensor of Y in the same format of Qx.
         thres: if not None, only distance greater/less (depends on `relation`) than `thres` will be output. Otherwise, all dist will be output.
-        metric: distance calculation method. It receives metric(xr, yc, row_s, col_s, Qe_s, **metric_kwargs)
+        metric: distance calculation method. It receives metric(xr, yc, row_s, col_s, Qe_s, **metric_kwargs). if `metric` is 'periodic',
+            `metric_kwargs` should input {'R': cell_vectors}, that cell_vectors has shape of (B, M, M).
         metric_kwargs: the keyword arguments passed to `metric` if `metric` is Callable.
         relation: check `thres` greater (gt) or less (lt) than `thres`.
         exclude_diag: whether to exclude diagonals.
@@ -200,14 +201,14 @@ def indices_pairwise_dist(
     total_pairs = int(pairs_per_img.sum().item())
 
     pair_ptr = th.cumsum(pairs_per_img, 0) - pairs_per_img  # [B]
-    pair_off_ex = th.repeat_interleave(pair_ptr, pairs_per_img)  # [∑ nx_i*ny_i]
-    ny_ex = th.repeat_interleave(ny, pairs_per_img)  # [∑ nx_i*ny_i]
+    pair_off_ex = th.repeat_interleave(pair_ptr, pairs_per_img)  # [\sum nx_i*ny_i]
+    ny_ex = th.repeat_interleave(ny, pairs_per_img)  # [\sum nx_i*ny_i]
     k = th.arange(total_pairs, device=device) - pair_off_ex
 
-    i_loc = th.div(k, ny_ex, rounding_mode="floor")  # [∑ nx_i*ny_i]
+    i_loc = th.div(k, ny_ex, rounding_mode="floor")  # [\sum nx_i*ny_i]
     j_loc = (k % ny_ex)
 
-    xs_ex = th.repeat_interleave(ptr_x, pairs_per_img)  # [∑ nx_i*ny_i]
+    xs_ex = th.repeat_interleave(ptr_x, pairs_per_img)  # [\sum nx_i*ny_i]
     ys_ex = th.repeat_interleave(ptr_y, pairs_per_img)
 
     row_s = xs_ex + i_loc  # indices of Xs
@@ -332,9 +333,11 @@ def standardize_cell(cell: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
     Args:
         cell: Tensor[B, 3, 3], batch of cell vectors.
 
-    Returns:
+    Returns: L, Q;
         L: Tensor[B, 3, 3], standardized cell vector matrix with lower triangular forms.
-        Q: Tensor[B, 3, 3], the corresponding rotation transform
+
+        Q: Tensor[B, 3, 3], the corresponding rotation transform.
+
         They satisfy that `cell == L @ Q`. Hence the corresponding rotation of atom coordinates is `pos_std = pos @ Q.mT`
 
     """

@@ -17,7 +17,7 @@ from torch import nn
 from BUCToolkit import BatchOptim
 from BUCToolkit.BatchOptim.minimize import CG, QN, FIRE
 from BUCToolkit.BatchOptim.TS.Dimer import Dimer
-from BUCToolkit.api._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl, PygBatchUpdater
+from BUCToolkit.api._io import _BaseAPI, _Model_Wrapper_dgl, PygBatchUpdater
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER
 from BUCToolkit.utils._CheckModules import check_module
@@ -25,7 +25,7 @@ from BUCToolkit.utils.ElemListReduce import elem_list_reduce
 from BUCToolkit.utils.setup_loggers import has_any_handler
 
 
-class StructureOptimization(_CONFIGS):
+class StructureOptimization(_BaseAPI):
     """
     The class of structure optimization for relaxation and transition state (only for single-point TS search, e.g. DIMER).
     Users need to set the dataset and dataloader manually.
@@ -39,7 +39,7 @@ class StructureOptimization(_CONFIGS):
         RELAXATION:
           ALGO: Literal[CG, BFGS, FIRE], the optimization algo.
           REQUIRE_GRAD: bool, if True, autograd will be turned on for func(X, *func_args, **func_kwargs). Default: False.
-          ITER_SCHEME: Literal['PR+', 'FR', 'PR', 'WYL'], only use for ALGO=CG, the iteration scheme of CG. Default: PR+.
+          ITER_SCHEME: Literal['PR+', 'FR', 'PR', ], only use for ALGO=CG, the iteration scheme of CG. Default: PR+.
           E_THRES: float, threshold of Energy difference (eV). Default: 1e-4.
           F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
           MAXITER: int, the maximum iteration numbers. Default: 300.
@@ -94,13 +94,11 @@ class StructureOptimization(_CONFIGS):
 
         self.dX = None
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
+        self._set_data_type(data_type)
         #if data_type == 'pyg':
         #    self.pygData = check_module('torch_geometric.data.batch')
         #else:
         #    self.pygData = None
-        self.data_type = data_type
-
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
@@ -184,6 +182,8 @@ class StructureOptimization(_CONFIGS):
         if (self.RELAXATION is None) and (self.TRANSITION_STATE is None):
             self.logger.error('** ERROR: Both `RELAXATION` and `TRANSITION_STATE` were NOT set. NO TASK HERE, BYE!!! **')
             raise RuntimeError('** ERROR: Both `RELAXATION` and `TRANSITION_STATE` were NOT set. NO TASK HERE, BYE!!! **')
+        if self.SAVE_PREDICTIONS:
+            self.Stru_Opt_config['output_file'] = self.PREDICTIONS_SAVE_FILE
 
     def set_dimer_init_direction(self, directions: th.Tensor):
         """
@@ -203,11 +203,16 @@ class StructureOptimization(_CONFIGS):
         # check logger
         if not has_any_handler(self.logger): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
         if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        if (self.START == 'resume') or (self.START == 1) or (self.START == 2):
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=self.STRICT_LOAD)
+                _model.load_state_dict(_chk_model_param, strict=self.STRICT_LOAD)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
         elif self.START == 'from_scratch' or self.START == 0:
@@ -237,17 +242,18 @@ class StructureOptimization(_CONFIGS):
         self.n_samp = len(self.TRAIN_DATA['data'])  # sample number
         self.n_batch = math.ceil(self.n_samp / self.BATCH_SIZE)  # total batch number per epoch
 
+        optimizer = None
         # I/O
         try:
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, mode, self.Stru_Opt_config, self.n_samp)
+                self.logout_task_information(_model, mode, self.Stru_Opt_config, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
             # MAIN LOOP
             # define the model wrapper & batch size getter & cell vector getter for different data type
             if self.data_type == 'pyg':
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
 
                 def get_batch_size(data):
                     return len(data)
@@ -282,7 +288,7 @@ class StructureOptimization(_CONFIGS):
                 update_batch_rot = PygBatchUpdater()
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
 
                 def get_batch_size(data):
                     return data.num_nodes('atom')
@@ -321,6 +327,13 @@ class StructureOptimization(_CONFIGS):
                 raise NotImplementedError
 
             optimizer = self.Stru_Opt(**self.Stru_Opt_config)
+            if self.SAVE_PREDICTIONS:
+                optimizer._HOLD_DUMPER = True
+                optimizer.dumper.reset_args(
+                    self.PREDICTIONS_SAVE_FILE,
+                    mode='a',
+                    cache_size=4096,
+                )
             val_set: Any = self._data_loader(self.TRAIN_DATA, self.BATCH_SIZE, self.DEVICE, is_train=False, **self._data_loader_configs)
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
@@ -371,6 +384,11 @@ class StructureOptimization(_CONFIGS):
                     idx = idx if idx is not None else [f'Untitled{_}' for _ in range(n_s, n_s + len(batch_indx))]
                     n_s += len(batch_indx)
                     element_tensor = get_atomic_number(val_data)
+                    atomic_number_rows = [
+                        numbers.tolist()
+                        for numbers in th.split(element_tensor.reshape(-1), batch_indx)
+                    ]
+                    optimizer.set_system_info(CELL, atomic_number_rows)
                     if self.VERBOSE > 0:
                         self.logger.info('*' * 89)
                         self.logger.info(f'Running Batch {n_c}.')
@@ -419,17 +437,6 @@ class StructureOptimization(_CONFIGS):
                         fin_ener = fin_ener.detach()#.squeeze(0)
                         fin_x = fin_x.detach().squeeze(0)
                         fin_grad = fin_grad.detach().squeeze(0)
-                        # Postprocessing & save TODO: reformat it in future to apply to all functions.
-                        self.dumper.collect(
-                            batch_indx,
-                            idx,
-                            get_atomic_number(val_data).squeeze(0),
-                            CELL,
-                            fin_x,
-                            fixed_mask[0],
-                            fin_ener,
-                            - fin_grad,
-                        )
 
                     # Print info
                     if self.VERBOSE > 0:
@@ -444,24 +451,19 @@ class StructureOptimization(_CONFIGS):
                     n_c += 1
 
             if self.VERBOSE: self.logger.info(f'RELAXATION DONE. Total Time: {time.perf_counter() - time_tol:<.4f}')
-            if self.SAVE_PREDICTIONS:
-                t_save = time.perf_counter()
-                with _LoggingEnd(self.log_handler):
-                    if self.VERBOSE: self.logger.info(f'SAVING RESULTS TO {self.PREDICTIONS_SAVE_FILE} ...')
-                self.dumper.flush()
-                if self.VERBOSE: self.logger.info(f'Done. Saving Time: {time.perf_counter() - t_save:<.4f}')
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
-            self.dumper.close()
+            if optimizer is not None:
+                optimizer.dumper.close()
 
     def relax(self, model):
         """

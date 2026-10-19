@@ -1,0 +1,71 @@
+# Default values mirror the historical constants in main_test.py.
+test_Train: {}
+test_Pred: {}
+test_MD:
+  steps:
+    static: 100
+    nve: 10000
+    nvt: 50000
+  convergence:
+    static_atol: 1.0e-5
+    nve_energy_atol: 1.0e-2
+    nvt_rtol: 0.1
+test_CMD:
+  steps:
+    integrator: 10000
+    manifold: 5000
+  convergence:
+    constraint_threshold: 1.0e-5
+    constraint_factor: 50
+    nve_energy_atol: 1.0e-2
+    nvt_rtol: 0.1
+    manifold_kinetic_rtol: 0.05
+    manifold_force_rtol: 0.06
+    manifold_identity_rtol: 1.0e-5
+    manifold_identity_atol: 1.0e-6
+test_MC:
+  steps: 100000
+  convergence:
+    energy_rtol: 0.1
+    anneal_position_delta: 1.0e-2
+test_OPT:
+  maxiter: 300
+  cpu_qn_maxiter: 1
+  optimizer:
+    energy_threshold: 1.0e-5
+    force_threshold: 1.0e-2
+  convergence:
+    energy_delta: 1.0e-4
+    force_delta: 5.0e-4
+    position_delta: 1.0e-4
+    dump_energy_delta: 1.0e-6
+    last_energy_delta: 1.0e-4
+test_TS:
+  maxiter: 500
+  optimizer:
+    energy_threshold: 5.0e-5
+    force_threshold: 1.0e-2
+    position_threshold: 5.0e-2
+  convergence:
+    energy_abs: 5.0e-2
+    position_abs: 5.0e-2
+test_parallel:
+  maxiter: 1000
+  convergence:
+    energy_threshold: 1.0e-5
+    force_threshold: 1.0e-2
+  steps:
+    md: 10000
+    mc: 10000
+    warmup: 100
+test_APIS:
+  train_epochs: 3
+  opt_maxiter: 100
+  md_max_step: 200
+  mc_maxiter: 200
+test_VIB:
+  block_size: 17
+  finite_difference_delta: 1.0e-2
+  float32_tolerance: 5.0e-3
+  float64_tolerance: 1.0e-8
+test_IO: {}

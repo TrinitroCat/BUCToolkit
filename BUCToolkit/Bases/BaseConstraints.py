@@ -3,6 +3,7 @@
 #  Version: 1.0b
 #  File: BaseConstraints.py
 #  Environment: Python 3.12
+import inspect
 import os
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
@@ -14,7 +15,6 @@ from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARR
 from BUCToolkit.utils._Element_info import DTYPE
 from BUCToolkit.utils.grad_functions import bhvp
 from BUCToolkit.Bases.BaseMotion import BaseIO
-from torch._dynamo import export as dynamo_export
 
 FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
 FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
@@ -41,14 +41,16 @@ class BaseConstr(BaseIO):
         constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k.
             It takes one or more arguments, one of which must be a Tensor, and returns one Tensor with shape (k, ).
             `None` for constant function that always return [0., ]. It should support auto-gradient ops. see example below.
-        constr_val: Callable[th.Tensor[1], th.Tensor] | th.Tensor, the constraint value of `constr_func`,
+        constr_val: Callable[..., th.Tensor] | th.Tensor, the constraint value of `constr_func`,
             i.e., constraints are `constr_func(X) = constr_val`.
-            By defining it as a callable constr_val = constr_val(t) where `t` is a scalar Tensor,
-            it can be set to the time-dependent constraints.
+            A time-dependent callback may be `constr_val(t)` or
+            `constr_val(t, c0)`, where `t` is a scalar Tensor and `c0` is the
+            value of `constr_func(X_init)` computed at initialization.
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
         require_fixman: bool, whether to calculate fixman
         device: str|torch.device, device that program rum on.
-        verbose: int, control the detailed degree of output information.
+        verbose: print level. 0 is silent, 1 permits scalar diagnostics only,
+            and 2 or greater also permits array diagnostics.
             0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
 
     Examples for constrains:
@@ -77,7 +79,7 @@ class BaseConstr(BaseIO):
     def __init__(
             self,
             constr_func: Callable | None = None,
-            constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
+            constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
             require_fixman: bool = False,
             device: str | th.device = 'cpu',
@@ -91,6 +93,9 @@ class BaseConstr(BaseIO):
         self.time_now = th.scalar_tensor(0., device=device)
         self.is_const_constr = False
         self.constr_val_func_raw = None
+        self._constr_val_func = None
+        self._constr_val_uses_c0 = False
+        self._constr_val_c0 = None
         self.time_step = 1.
         self.require_fixman = require_fixman
 
@@ -101,7 +106,7 @@ class BaseConstr(BaseIO):
         elif callable(constr_val):
             self.is_const_constr = False
             self.constr_val_func_raw = constr_val
-            self.constr_val_now = constr_val(self.time_now)
+            self.constr_val_now = None
         elif constr_val is None:
             self.is_const_constr = True
             self.constr_val_func_raw = None
@@ -119,6 +124,7 @@ class BaseConstr(BaseIO):
         self.sqrtM = None  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = None  # M^-1/2
         self.max_proj_iter = 10
+        self.retraction_stagnation_factor = 0.05
         self.constr_thres = constr_threshold
         self.X_cache = None  # constr force, i.e., the mu of Lagrange multipler
         self._compiled_jac = None  # pre-compiled Jacobian for replay
@@ -128,6 +134,10 @@ class BaseConstr(BaseIO):
         super().__init__()
         self.init_logger('Main.Constraints')
         self.verbose = int(verbose)
+        # Bind the concrete retraction implementation once. Future solver
+        # variants can replace this binding during initialization without
+        # adding a dispatch branch to every projection call.
+        self._retraction_map_solver = self._retraction_newton
 
     def initialize(
             self,
@@ -145,15 +155,94 @@ class BaseConstr(BaseIO):
             require_grad: bool = False,
             batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
             fixed_atom_tensor: Optional[th.Tensor] = None,
-            is_fix_mass_center: bool = False
+            is_fix_mass_center: bool = False,
+            compile_jacobian: bool = True,
     ):
+        """Initialize masses, targets, and the tangent-space basis.
+
+        This method owns all state required by constraint projection. Proxy
+        users such as constrained MD and constrained FIRE should call it rather
+        than reproducing the setup or invoking ``_build_compiled_jacobian``
+        directly.
+
+        Args:
+            func: Parent algorithm objective. Accepted for compatibility with
+                the common motion-initialization hook; constraints do not use it.
+            X: Initial coordinates with shape
+                ``(n_batch, n_atom, n_dim)``.
+            Element_list: Atomic symbols or numbers supplied by the parent
+                algorithm. Constraint initialization does not use them.
+            masses: Per-coordinate masses broadcast to the shape of ``X``. If
+                ``None``, unit masses are used.
+            V_init: Initial velocities accepted by the common initialization
+                hook. Constraint initialization does not use them.
+            grad_func: Parent objective-gradient callable. Not used here.
+            func_args: Positional objective arguments. Not used here.
+            func_kwargs: Keyword objective arguments. Not used here.
+            grad_func_args: Positional gradient arguments. Not used here.
+            grad_func_kwargs: Keyword gradient arguments. Not used here.
+            is_grad_func_contain_y: Parent gradient-call convention. Not used
+                by constraint initialization.
+            require_grad: Parent objective autograd flag. Not used here.
+            batch_indices: Irregular-batch atom counts. Not used here because
+                ``constr_func`` is vectorized over the leading dimension of X.
+            fixed_atom_tensor: Parent selective-dynamics mask. Not used here.
+            is_fix_mass_center: Parent center-of-mass setting. Not used here.
+            compile_jacobian: Whether to compile the batched constraint
+                Jacobian. Compilation is enabled by default on both CPU and
+                CUDA. Unsupported constraint graphs automatically fall back to
+                the eager implementation.
+
+        Returns:
+            None. The method updates mass factors, the current constraint
+            target, Jacobian/QR state, compilation state, and projection cache.
+
+        Raises:
+            TypeError: If ``compile_jacobian`` is not ``bool``.
+                Also raised when a time-dependent ``constr_val`` callback has
+                no inspectable signature accepting ``(t)`` or ``(t, c0)``.
+            RuntimeError: If ``constr_val`` and ``constr_func(X)`` have
+                different shapes.
+            ValueError: If the batched constraint residual is not two-dimensional.
+        """
+        if not isinstance(compile_jacobian, bool):
+            raise TypeError(
+                f'`compile_jacobian` must be bool, but got {type(compile_jacobian)}.'
+            )
         if masses is None: masses = th.ones_like(X)
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
         _y_check = th.vmap(self.constr_func)(X)
         if self._lazy_calc_constr_val:
             self.constr_val_now = _y_check
-        if self.verbose:
+        elif not self.is_const_constr:
+            # Keep the initial target as a detached, immutable run reference;
+            # later time updates must not retain the coordinate autograd graph.
+            self._constr_val_c0 = _y_check.detach().clone()
+            try:
+                constr_val_signature = inspect.signature(self.constr_val_func_raw)
+            except (TypeError, ValueError) as error:
+                raise TypeError(
+                    '`constr_val` must have an inspectable signature accepting '
+                    '(t) or (t, c0).'
+                ) from error
+
+            try:
+                constr_val_signature.bind(self.time_now, self._constr_val_c0)
+            except TypeError:
+                try:
+                    constr_val_signature.bind(self.time_now)
+                except TypeError as unary_error:
+                    raise TypeError(
+                        '`constr_val` must accept either (t) or (t, c0).'
+                    ) from unary_error
+                self._constr_val_uses_c0 = False
+                self._constr_val_func = self.constr_val_func_raw
+            else:
+                self._constr_val_uses_c0 = True
+                self._constr_val_func = lambda t: self.constr_val_func_raw(t, self._constr_val_c0)
+            self._update_constr(self.time_now)
+        if self.verbose > 0:
             self.logger.info(
                 f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
             )
@@ -162,13 +251,16 @@ class BaseConstr(BaseIO):
             raise RuntimeError(
                 f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
             )
+        # A previous initialization may have compiled a different run shape or
+        # constraint callable.  Perform validation through the eager path, then
+        # build a fresh graph for the current inputs below.
+        self._compiled_jac = None
         jac, y = self._jacobian(X)
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
-        self._build_compiled_jacobian(X)
+        if compile_jacobian:
+            self._build_compiled_jacobian(X)
         self._do_qr(jac)
-        # calc. constr. intensity
-        n_batch, n_constr, _ = self.R.shape
         self.X_cache = th.empty_like(X)
 
     def _constr_func_wrapped(self, X, constr_val_now):
@@ -205,50 +297,108 @@ class BaseConstr(BaseIO):
         if self.is_const_constr:
             return None
         else:
-            y = self.constr_val_func_raw(t)
+            y = self._constr_val_func(t)
             if isinstance(y, (Tuple, List)):
                 y = th.vstack(y).mT
             else:
-                y = y.reshape(-1, 1)
+                y = y.view(self._constr_val_c0.shape)
 
             return y, y
 
-    def _update_constr(self):
-        """
-        Update constraint function value.
-        Returns:
+    def _update_constr(self, t: th.Tensor | float):
+        """Update a time-dependent constraint at an explicit evaluation time.
 
+        This method does not mutate ``self.time_now``. Integrators therefore
+        remain responsible for advancing the committed simulation clock and
+        may evaluate constraint stages such as ``time_now + time_step`` or a
+        half-step without changing the parent motion-loop state.
+
+        Args:
+            t: Scalar time at which ``constr_val_func_raw`` and its derivative
+                are evaluated. Python numeric values are converted to the same
+                device and dtype as ``self.time_now``.
+
+        Returns:
+            None. For a time-dependent constraint, ``self.constr_val_now`` and
+            ``self.d_constr`` are replaced by the value and time derivative at
+            ``t``. Constant constraints are unchanged.
+
+        Raises:
+            ValueError: If ``t`` is not scalar.
         """
         if not self.is_const_constr:
-            self.d_constr, self.constr_val_now = th.func.jacrev(self._constr_val_wrapped, has_aux=True)(self.time_now)  #  d s_k(r)/dt
+            t = th.as_tensor(
+                t,
+                device=self.time_now.device,
+                dtype=self.time_now.dtype,
+            )
+            if t.numel() != 1:
+                raise ValueError(f'Constraint evaluation time must be scalar, but got shape {t.shape}.')
+            t = t.reshape(())
+            self.d_constr, self.constr_val_now = th.func.jacrev(
+                self._constr_val_wrapped,
+                has_aux=True,
+            )(t)  # d constr_val(t) / dt
 
     def _build_compiled_jacobian(self, X_sample: th.Tensor):
         """
-        Pre-compile the Jacobian computation by:
-            1) dynamo_export the constraint function to a static ATen graph (once)
-            2) wrap with vmap(jacrev(has_aux)) for batched Jacobian
-            3) torch.compile the result → replay for all subsequent steps
+        Pre-compile the batched constraint Jacobian for a fixed run shape.
 
-        Falls back to eager mode if export/compile fails.
+        Each structure and its corresponding constraint target are mapped as a
+        pair.  The resulting function returns the same tensors as the eager
+        ``vmap(jacrev(...))`` path: a Jacobian with shape
+        ``(n_batch, n_constr, n_atom, n_dim)`` and residual values with shape
+        ``(n_batch, n_constr)``.  Molecular-dynamics runs keep these dimensions
+        fixed, which permits a static full-graph compilation and avoids graph
+        breaks inside every projection iteration.
+
+        Falls back to eager mode if compilation fails.
+
+        Args:
+            X_sample: Representative coordinates with shape
+                ``(n_batch, n_atom, n_dim)``.  Its shape, device, and dtype are
+                used to compile and warm up the Jacobian graph.
+
+        Returns:
+            None.  On success, ``self._compiled_jac`` stores the compiled
+            callable.  On failure it is reset to ``None`` so ``_jacobian`` uses
+            the eager implementation.
         """
+        self._compiled_jac = None
         try:
-            with th.no_grad():
-                sample = X_sample[0:1].detach()  # single batch item
-                exported = dynamo_export(self.constr_func)(sample.squeeze(0))
-                traced_fn = exported.graph_module
-
             def _wrapped(X_single, constr_val):
-                y = traced_fn(X_single) - constr_val
+                y = self.constr_func(X_single) - constr_val
+                y = th.atleast_1d(y)
                 return y, y
 
             jac_fn = th.func.vmap(
                 th.func.jacrev(_wrapped, argnums=0, has_aux=True),
-                in_dims=(0, None)
+                # Pair X[i] with constr_val_now[i].  Broadcasting the complete
+                # target tensor here would introduce a second batch dimension.
+                in_dims=(0, 0)
             )
-            self._compiled_jac = th.compile(jac_fn, fullgraph=False, dynamic=True)
+            compiled_jac = th.compile(jac_fn, fullgraph=True, dynamic=False)
 
-            # Warmup to trigger actual compilation
-            _ = self._compiled_jac(X_sample, self.constr_val_now)
+            # Warm up now so compilation latency and unsupported operations are
+            # handled before entering the MD loop.  Shape validation prevents a
+            # malformed compiled graph from silently replacing the eager path.
+            # Match the gradient mode used by _project2. Without this, a normal
+            # non-Fixman MD run warms the graph with gradients enabled and then
+            # recompiles it on first use inside the no_grad main loop.
+            with th.set_grad_enabled(self.require_fixman):
+                jac, y = compiled_jac(X_sample, self.constr_val_now)
+            expected_jac_shape = (
+                X_sample.shape[0], self.constr_val_now.shape[-1],
+                *X_sample.shape[1:]
+            )
+            expected_y_shape = self.constr_val_now.shape
+            if jac.shape != expected_jac_shape or y.shape != expected_y_shape:
+                raise RuntimeError(
+                    'Compiled constraint Jacobian returned invalid shapes: '
+                    f'expected {expected_jac_shape} and {expected_y_shape}, '
+                    f'but got {jac.shape} and {y.shape}.'
+                )
+            self._compiled_jac = compiled_jac
 
             if self.verbose:
                 self.logger.info('Constraint Jacobian compiled successfully.')
@@ -259,14 +409,22 @@ class BaseConstr(BaseIO):
 
     def _jacobian(self, X: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """
-        Compute the Jacobian of all constrains.
-        Args:
-            X:
+        Compute the Jacobian for the current constraint target.
 
-        Returns: Jacobian (n_batch, n_constr, n_atoms, n_dim), and the constraint values.
+        ``constr_val_now`` and ``d_constr`` must already correspond to the
+        current simulation time. Projection entry points refresh that state
+        before calling this method, which avoids differentiating a
+        time-dependent target in every nonlinear projection subiteration.
+
+        Args:
+            X: Coordinates with shape ``(n_batch, n_atom, n_dim)``.
+
+        Returns:
+            The Jacobian with shape
+            ``(n_batch, n_constr, n_atom, n_dim)`` and residual values with
+            shape ``(n_batch, n_constr)``.
 
         """
-        self._update_constr()
         if self._compiled_jac is not None:
             jac, y = self._compiled_jac(X, self.constr_val_now)
         else:
@@ -307,7 +465,9 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = V.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
-        # check consistency
+        # Check consistency. For time-dependent constraints, callers must have
+        # explicitly selected the target stage through ``_update_constr(t)`` or
+        # a preceding ``_project2`` call.
         if X is not None:
             jac, y = self._jacobian(X)
             self._do_qr(jac)
@@ -340,7 +500,8 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = V.shape
         sqrtM = self.sqrtM  # M^1/2, (n_batch, n_atoms, n_dim)
         negsqrtM = self.negsqrtM  # M^-1/2
-        # check consistency
+        # The normal-space basis depends on the coordinate Jacobian, not on the
+        # target value. Do not alter the caller-selected constraint time here.
         if X is not None:
             jac, y = self._jacobian(X)
             self._do_qr(jac)
@@ -353,12 +514,236 @@ class BaseConstr(BaseIO):
 
         return Px
 
+    @staticmethod
+    def _retraction_newton(
+            X: th.Tensor,
+            X_work: th.Tensor,
+            sqrtM_Q: th.Tensor,
+            R: th.Tensor,
+            aux_multiplier: th.Tensor,
+            jacobian_func: Callable[[th.Tensor], Tuple[th.Tensor, th.Tensor]],
+            initial_constr_err: th.Tensor,
+            constr_threshold: float,
+            stagnation_threshold: float,
+            max_proj_iter: int,
+            time_step: float,
+            verbose: int,
+            logger: Any,
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """Solve the retraction in the fixed initial normal space.
+
+        Args:
+            X: Coordinates before retraction. Updated in-place with the final
+                working coordinates when the solver exits.
+            X_work: Coordinate work buffer with the same shape as ``X``.
+            sqrtM_Q: Fixed mass-weighted normal basis.
+            R: Fixed upper-triangular QR factor for force recovery.
+            aux_multiplier: Accumulated multiplier updated in-place.
+            jacobian_func: Callable returning the current Jacobian and
+                residual.
+            initial_constr_err: Initial maximum constraint residual.
+            constr_threshold: Absolute constraint convergence threshold.
+            stagnation_threshold: Threshold for the existing early-stop
+                criterion.
+            max_proj_iter: Maximum number of solver iterations.
+            time_step: Integration time step used for force conversion.
+            verbose: Constraint diagnostic verbosity.
+            logger: Logger used for diagnostics.
+
+        Returns:
+            ``Fc``, the constraint force recovered once from the final
+            multiplier; ``dX``, the final coordinate displacement; and a
+            scalar Boolean tensor that is true only when the constraint
+            residual reached ``constr_threshold``.
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        dX = th.zeros_like(X)
+        X_work.copy_(X)
+        constr_err_old = initial_constr_err
+
+        def _final_calc_Fc():
+            fc: th.Tensor = th.linalg.solve_triangular(
+                R,
+                aux_multiplier.unsqueeze(-1),
+                upper=True,
+            ).squeeze(-1)
+            fc *= 207.28617 / (time_step ** 2)
+            X.copy_(X_work)
+            return fc
+
+        for i in range(max_proj_iter):
+            jac, y = jacobian_func(X_work)
+            constr_err = th.max(th.abs(y))
+            if verbose > 1:
+                logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
+
+            is_converged = constr_err <= constr_threshold
+            is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
+            if is_converged or is_fixed:
+                if is_fixed and not is_converged:
+                    logger.warning(
+                        'Constraint errors are not converged yet, but it has '
+                        'been fixed. This loop will be skipped.'
+                    )
+                Fc = _final_calc_Fc()
+                return Fc, dX, is_converged
+            constr_err_old = constr_err
+
+            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
+            d_multiplier, _ = th.linalg.solve_ex(aux, -y)
+            aux_multiplier.add_(d_multiplier)
+            dX = th.einsum(
+                'bnc, bc -> bn',
+                sqrtM_Q, aux_multiplier
+            ).reshape(n_batch, n_atoms, n_dim)
+            th.add(X, dX, out=X_work)
+
+        logger.warning("Projection of X to the manifold is not converged.")
+        is_converged = th.zeros((), device=X.device, dtype=th.bool)
+        Fc = _final_calc_Fc()
+        return Fc, dX, is_converged
+
+    @staticmethod
+    def _retraction_damp_newton(
+            X: th.Tensor,
+            X_work: th.Tensor,
+            sqrtM_Q: th.Tensor,
+            R: th.Tensor,
+            aux_multiplier: th.Tensor,
+            jacobian_func: Callable[[th.Tensor], Tuple[th.Tensor, th.Tensor]],
+            initial_constr_err: th.Tensor,
+            constr_threshold: float,
+            stagnation_threshold: float,
+            max_proj_iter: int,
+            time_step: float,
+            verbose: int,
+            logger: Any,
+            max_backtrack: int = 8,
+            step_shrink: float = 0.5,
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """Solve the retraction with a safeguarded Newton step.
+
+        The Newton direction is always formed in the fixed initial normal
+        space. A trial multiplier is accepted only when it lowers the maximum
+        absolute constraint residual; otherwise the same direction is reduced
+        geometrically. The accumulated multiplier is changed only after an
+        accepted trial, so the force and velocity correction retain their
+        existing physical meaning.
+
+        Args:
+            X: Coordinates before retraction. Updated in-place on exit.
+            X_work: Coordinate work buffer with the same shape as ``X``.
+            sqrtM_Q: Fixed mass-weighted normal basis.
+            R: Fixed upper-triangular QR factor for force recovery.
+            aux_multiplier: Accumulated multiplier updated in-place.
+            jacobian_func: Callable returning the current Jacobian and residual.
+            initial_constr_err: Initial maximum constraint residual.
+            constr_threshold: Absolute constraint convergence threshold.
+            stagnation_threshold: Threshold for the existing early-stop test.
+            max_proj_iter: Maximum number of solver iterations.
+            time_step: Integration time step used for force conversion.
+            verbose: Constraint diagnostic verbosity.
+            logger: Logger used for diagnostics.
+            max_backtrack: Maximum number of step reductions per iteration.
+            step_shrink: Multiplicative reduction applied to a rejected step.
+
+        Returns:
+            ``Fc``, ``dX``, and a scalar Boolean convergence status.
+        """
+        n_batch, n_atoms, n_dim = X.shape
+        dX = th.zeros_like(X)
+        X_work.copy_(X)
+        constr_err_old = initial_constr_err
+        is_converged = initial_constr_err <= constr_threshold
+
+        def _final_calc_Fc():
+            fc: th.Tensor = th.linalg.solve_triangular(
+                R,
+                aux_multiplier.unsqueeze(-1),
+                upper=True,
+            ).squeeze(-1)
+            fc *= 207.28617 / (time_step ** 2)
+            X.copy_(X_work)
+            return fc
+
+        for i in range(max_proj_iter):
+            jac, y = jacobian_func(X_work)
+            constr_err = th.max(th.abs(y))
+            if verbose > 1:
+                logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
+
+            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
+            aux_q, aux_r = th.linalg.qr(aux.mT)
+            aux_diag = th.abs(th.diagonal(aux_r, dim1=-2, dim2=-1))
+            aux_scale = th.max(aux_diag)
+            is_rank_deficient = aux_scale <= 0
+            if not is_rank_deficient:
+                is_rank_deficient = th.min(aux_diag) <= 1e-6 * aux_scale
+
+            is_converged = constr_err <= constr_threshold
+            is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
+            if is_fixed or is_converged:
+                if is_fixed and not is_converged:
+                    if is_rank_deficient:
+                        logger.warning(
+                            'Constraint errors are not converged yet, but the '
+                            'current normal-space Jacobian is degenerate. The '
+                            'remaining iterations will be skipped.'
+                        )
+                    else:
+                        logger.warning(
+                            'Constraint errors are not converged yet, but the '
+                            'residual improvement is below the stagnation '
+                            'threshold. The remaining iterations will be skipped.'
+                        )
+                Fc = _final_calc_Fc()
+                return Fc, dX, is_converged
+            constr_err_old = constr_err
+
+            d_multiplier = th.linalg.solve_triangular(
+                aux_r.mT.contiguous(),
+                (-y).unsqueeze(-1),
+                upper=False,
+            )
+            d_multiplier = th.bmm(aux_q, d_multiplier).squeeze(-1)
+            accepted = False
+            step = 1.
+            candidate_multiplier = th.empty_like(aux_multiplier)
+            candidate_dX = th.empty_like(dX)
+            for _ in range(max_backtrack + 1):
+                candidate_multiplier.copy_(aux_multiplier).add_(d_multiplier, alpha=step)
+                candidate_dX = th.einsum(
+                    'bnc, bc -> bn',
+                    sqrtM_Q, candidate_multiplier
+                ).reshape(n_batch, n_atoms, n_dim)
+                th.add(X, candidate_dX, out=X_work)
+                _, y_trial = jacobian_func(X_work)
+                trial_err = th.max(th.abs(y_trial))
+                if trial_err < constr_err:
+                    accepted = True
+                    break
+                th.add(X, dX, out=X_work)
+                step *= step_shrink
+
+            if not accepted:
+                logger.warning('Damped Newton retraction step did not lower the constraint error.')
+                Fc = _final_calc_Fc()
+                return Fc, dX, is_converged
+
+            aux_multiplier.copy_(candidate_multiplier)
+            dX.copy_(candidate_dX)
+
+        logger.warning("Projection of X to the manifold is not converged.")
+        Fc = _final_calc_Fc()
+        return Fc, dX, is_converged
+
     def _project2(
             self,
             X: th.Tensor,
             X_orig: th.Tensor | None = None,
-            V: th.Tensor | None = None
-    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+            V: th.Tensor | None = None,
+            constr_time: th.Tensor | float | None = None,
+    ) -> Tuple[th.Tensor, th.Tensor|None, th.Tensor|None]:
         """
         Continuously project the Jacobian of all constrains to the exact manifold.
         ** Update X and V (if given) in-place.
@@ -370,36 +755,74 @@ class BaseConstr(BaseIO):
             X_orig: reference coordinates for fixed Jacobian basis. Defaults to X.
             V: (n_batch, n_atom, n_dim) velocities. If given, updated in-place by
                dv = M^{-1/2} Q mu / time_step, where mu is the converged multiplier.
+            constr_time: Time at which the position constraint is enforced. If
+                ``None``, use ``self.time_now + self.time_step``, corresponding
+                to the end of the current outer MD step. Explicit values allow
+                integrators with other splitting schemes to select a half-step
+                or another stage without modifying the parent MD clock.
 
         Returns:
             Fc: constraint forces (eV/atom)
-            G, w: Fixman potential related terms (or None)
+            G: geometric Fixman force term, or ``None`` when
+                ``require_fixman=False``.
+            w: Fixman/Blue-Moon reweighting factor
+                ``1 / sqrt(det(J M^-1 J^T))`` for each batch sample, or
+                ``None`` when ``require_fixman=False``.
         """
         n_batch, n_atoms, n_dim = X.shape
         n_constr = self.R.shape[-1]
         aux_multipler = th.zeros(n_batch, n_constr, device=self.device, dtype=FLOAT_TYPE)
-        dX = th.zeros_like(X)
         if X_orig is None: X_orig = X
         time_step = self.time_step
         constr_thres = self.constr_thres
+
+        # The target value and its time derivative are constant throughout one
+        # nonlinear position projection. Refresh them once at the end-of-step
+        # stage by default, before the fixed-basis Jacobian and all subsequent
+        # Newton subiterations. The following velocity projection reuses this
+        # same staged state.
+        if constr_time is None:
+            constr_time = self.time_now + time_step
+        self._update_constr(constr_time)
 
         with th.set_grad_enabled(self.require_fixman):
             X_orig.requires_grad_(self.require_fixman)
             jac, y = self._jacobian(X_orig)
             self._do_qr(jac)
             Q, R = self.Q, self.R
-            # Safe-guard against degenerate constraint directions
+            # Safeguard against degenerate constraint directions
             # (e.g., erf soft-CN with vanishing gradients):
             #   mask y for convergence — degenerate dirs ignored
             #   clamp R diagonals — prevents solve_triangular blow-up
-            degenerate_eps = 0.5 * self.constr_thres
+            # Stop only when the residual improvement is small compared with
+            # the requested tolerance.  Five percent preserves
+            # the cheap stagnation escape without cutting off useful Newton
+            # progress too early.
+            degenerate_eps = self.retraction_stagnation_factor * self.constr_thres
             #degenerate_mask = th.abs(R.diagonal(dim1=-2, dim2=-1)) < degenerate_eps  # (n_batch, n_constr)
             #R.diagonal(dim1=-2, dim2=-1).clamp_min_(degenerate_eps)
             sqrtM_Q = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (b, an, c)
             if self.require_fixman:
                 sqrt_det_Z = th.prod(th.diagonal(R, dim1=-2, dim2=-1), dim=-1).abs()
                 half_logdetZ = th.log(sqrt_det_Z).sum()
-                half_dlnz_dx = th.autograd.grad(half_logdetZ, X_orig)[0].reshape(n_batch, -1)
+                # A linear constraint has a coordinate-independent Jacobian,
+                # hence a constant Fixman determinant and an exactly zero
+                # derivative. In that case ``half_logdetZ`` contains no
+                # autograd graph and calling ``autograd.grad`` would raise even
+                # though the required result is well-defined. ``allow_unused``
+                # also covers CV implementations whose Jacobian graph is
+                # present but independent of some/all coordinate inputs.
+                if half_logdetZ.requires_grad:
+                    half_dlnz_dx = th.autograd.grad(
+                        half_logdetZ,
+                        X_orig,
+                        allow_unused=True,
+                    )[0]
+                    if half_dlnz_dx is None:
+                        half_dlnz_dx = th.zeros_like(X_orig)
+                else:
+                    half_dlnz_dx = th.zeros_like(X_orig)
+                half_dlnz_dx = half_dlnz_dx.reshape(n_batch, -1)
                 RG = th.einsum('bnc, bn -> bc', sqrtM_Q, half_dlnz_dx)
                 G = th.linalg.solve_triangular(R, RG.unsqueeze(-1), upper=True).squeeze(-1)
                 w = sqrt_det_Z.reciprocal_()
@@ -409,52 +832,23 @@ class BaseConstr(BaseIO):
         R.detach_()
         sqrtM_Q.detach_()
 
-        # MAIN loop.
-        X_tmp = self.X_cache
-        X_tmp.copy_(X)
-        constr_err_old = th.max(th.abs(y))
-        is_fixed = False
-        for i in range(self.max_proj_iter):
-            jac, y = self._jacobian(X_tmp)
-            constr_err = th.max(th.abs(y))
-            if self.verbose > 1: self.logger.info(f'{i: <3d} Constraint errors are now: {constr_err:.4e}')
-            if th.abs(constr_err - constr_err_old) < degenerate_eps:
-                self.logger.warning(f"Constraint errors are not converged yet, but it has been fixed. This loop will be skipped.")
-                is_fixed = True
-            if (constr_err <= constr_thres) or is_fixed:
-                X.copy_(X_tmp)
-                # compute constraint forces
-                Fc = th.linalg.solve_triangular(R, aux_multipler.unsqueeze(-1), upper=True).squeeze(-1)
-                Fc *= 207.28617 / (time_step ** 2)  # convert to eV/s(X), 1 amu*Ang/fs^2 = 103.64... eV/Ang, Verlet formulae require a factor 2, hence that 207.28617 = 2 * 103.64...
-                # Numerical safe velocity correction
-                if V is not None:
-                    # dv = M^{-1/2} Q mu / time_step
-                    V.add_(dX.div_(time_step))
-                return Fc, G, w
-            constr_err_old = constr_err
+        Fc, dX, _is_converged = self._retraction_map_solver(
+            X=X,
+            X_work=self.X_cache,
+            sqrtM_Q=sqrtM_Q,
+            R=R,
+            aux_multiplier=aux_multipler,
+            jacobian_func=self._jacobian,
+            initial_constr_err=th.max(th.abs(y)),
+            constr_threshold=constr_thres,
+            stagnation_threshold=degenerate_eps,
+            max_proj_iter=self.max_proj_iter,
+            time_step=time_step,
+            verbose=self.verbose,
+            logger=self.logger,
+        )
 
-            aux = th.bmm(jac.flatten(-2, -1), sqrtM_Q)
-            d_mu, _ = th.linalg.solve_ex(aux, -y)
-            aux_multipler.add_(d_mu)
-            dX = th.einsum(
-                'bnc, bc -> bn',
-                sqrtM_Q, aux_multipler
-            ).reshape(n_batch, n_atoms, n_dim)
-            th.add(
-                X,
-                dX,
-                out=X_tmp
-            )
-
-        # If not converged (warning and still update V if requested)
-        self.logger.warning("Projection of X to the manifold is not converged.")
-        X.copy_(X_tmp)
-        Fc = th.linalg.solve_triangular(R, aux_multipler.unsqueeze(-1), upper=True).squeeze(-1)
-        Fc *= 207.28617 / (time_step ** 2)
-
-        # Numerical safe velocity correction
         if V is not None:
-            # dv = M^{-1/2} Q mu / time_step
             V.add_(dX.div_(time_step))
 
         return Fc, G, w

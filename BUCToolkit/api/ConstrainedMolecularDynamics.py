@@ -16,13 +16,13 @@ from torch import nn
 
 from BUCToolkit.BatchMD import ConstrNVT, ConstrNVE
 from BUCToolkit.utils._CheckModules import check_module
-from ._io import _CONFIGS, _LoggingEnd, _Model_Wrapper_pyg, _Model_Wrapper_dgl
+from ._io import _BaseAPI, _LoggingEnd, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.BatchGenerate.coords_interp import linear_interpolation_tens
 from BUCToolkit.BatchStructures import Batch
 
 
-class ConstrainedMolecularDynamics(_CONFIGS):
+class ConstrainedMolecularDynamics(_BaseAPI):
     """
     Class of constrained molecular dynamics simulation.
     Users need to set the dataset, dataloader, and constraint functions manually.
@@ -34,7 +34,8 @@ class ConstrainedMolecularDynamics(_CONFIGS):
     Input file parameters: (Under the section `MD` in input files)
         ENSEMBLE: Literal[NVE, NVT], the ensemble for MD.
         CONSTR_MD_SCHEME: Literal[BLUE_MOON, SLOW_GROWTH], the scheme of constrained MD.
-        NIMAGE: int, the number of images in BLUE_MOON MD. SLOW_GROWTH will ignore it.
+        N_IMAGES: int, the number of images in BLUE_MOON MD. SLOW_GROWTH uses it
+                for parallel copies of the initial structure; use 1 for one trajectory.
         THERMOSTAT: Literal[Langevin, VR, CSVR, Nose-Hoover], the thermostat type. only used for ENSEMBLE=NVT.
                     'VR' is Velocity Rescaling and 'CSVR' is Canonical Sampling Velocity Rescaling by Bussi et al. [1].
         THERMOSTAT_CONFIG: Dict, the configs of thermostat.
@@ -60,9 +61,13 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         super().__init__(config_file)
 
         self.config_file = config_file
-        assert data_type in {'pyg', 'dgl'}, f'Invalid data type {data_type}. It must be "pyg" or "dgl".'
-        self.data_type = data_type
+        self._set_data_type(data_type)
         self.reload_config(config_file)
+        if type(self.BATCH_SIZE) is not int or self.BATCH_SIZE != 1:
+            raise ValueError(
+                '`BATCH_SIZE` must be the integer 1 for constrained molecular '
+                f'dynamics, but got {self.BATCH_SIZE}. BATCH_SIZE > 1 for CMD is not supported yet.'
+            )
         if self.VERBOSE: self.logger.info('Config File Was Successfully Read.')
         self.param = None
         self._has_load_data = False
@@ -80,35 +85,66 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         except KeyError:
             raise NotImplementedError(f'Unknown Ensemble {self.MD["ENSEMBLE"]}.')
         self.require_grad = self.MD.get('REQUIRE_GRAD', False)
-        # check modes
-        self.CMD_MODE = self.MD['CONSTR_MD_SCHEME']
-        if self.CMD_MODE == 'BLUE_MOON':
-            # interp images read & check
-            self.NIMAGE = self.MD['NIMAGE']
-        elif self.CMD_MODE == 'SLOW_GROWTH':
-            self.NIMAGE = self.MD.get('NIMAGE', 1)
-        else:
-            raise NotImplementedError(f'Unknown Constrained MD Scheme {self.CMD_MODE}.')
-        if self.NIMAGE <= 0:
-            raise RuntimeError(f'Images of configurations must be greater than 0, but got {self.NIMAGE}.')
 
-        self.MD_config = {'time_step': self.MD.get('TIME_STEP', 1),
-                          'max_step': self.MD.get('MAX_STEP'),
-                          'T_init': self.MD.get('T_INIT', 298.15),
-                          'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
-                          'device': self.DEVICE,
-                          'verbose': self.VERBOSE}
-        #if self.REDIRECT:
-        #    self.MD_config['output_file'] = os.path.join(self.OUTPUT_PATH, f'{time.strftime("%Y%m%d_%H_%M_%S")}_{self.OUTPUT_POSTFIX}.out')
+        self.MD_config = {
+            'time_step': self.MD.get('TIME_STEP', 1),
+            'max_step': self.MD.get('MAX_STEP'),
+            'T_init': self.MD.get('T_INIT', 298.15),
+            'constr_threshold': self.MD.get('CONSTR_THRESHOLD', 1.e-5),
+            'require_fixman': self.MD.get('REQUIRE_FIXMAN', 'auto'),  # 'auto' means True for blue-moon and False otherwise.
+            'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
+            'device': self.DEVICE,
+            'verbose': int(self.VERBOSE)
+        }
+        if isinstance(self.MD_config['require_fixman'], str) and (self.MD_config['require_fixman']).lower() != 'auto':
+            raise ValueError(
+                f"Invalid value of `require_fixman` of {self.MD_config['require_fixman']}. "
+                f"It must be either boolean or 'str'. "
+            )
+        is_auto_fixman = (not isinstance(self.MD_config['require_fixman'], bool))
+        if self.SAVE_PREDICTIONS:
+            self.MD_config['output_file'] = self.PREDICTIONS_SAVE_FILE
         if self.MD['ENSEMBLE'] == 'NVT':
             self.MD_config['thermostat'] = self.MD.get('THERMOSTAT', 'CSVR')
             self.MD_config['thermostat_config'] = self.MD.get('THERMOSTAT_CONFIG', dict())
 
+        # check modes
+        self.CMD_MODE = self.MD['CONSTR_MD_SCHEME']
+        if self.CMD_MODE == 'BLUE_MOON':
+            # interp images read & check
+            self.N_IMAGES = self.MD.get('N_IMAGES', 1)
+            if is_auto_fixman: self.MD_config['require_fixman'] = True # Blue-Moon ensemble require fixman term
+        elif self.CMD_MODE == 'SLOW_GROWTH':
+            # Slow-growth can use Jarzynski approach, which makes multiple replica
+            #   Hence, use this variable to apply this replica scheme in parallel.
+            self.N_IMAGES = self.MD.get('N_IMAGES', 1)
+            if is_auto_fixman: self.MD_config['require_fixman'] = False  # Jarzynski needs not it
+        else:
+            raise NotImplementedError(f'Unknown Constrained MD Scheme {self.CMD_MODE}.')
+        if self.N_IMAGES <= 0:
+            raise RuntimeError(f'Images of configurations must be greater than 0, but got {self.N_IMAGES}.')
+
     def set_constr_func(self, constr_func: Callable) -> None:
+        r"""
+        Set the constraint function for CMD api. Details see `constr_func` of _BaseConstr.
+        Args:
+            constr_func: Callable of the constraints function: X \in R^n -> c \in R^k
+
+        Returns: None
+
+        """
         self.constr_func = constr_func
         pass
 
-    def set_constr_val(self, constr_val: Callable[[th.Tensor], th.Tensor|Tuple[th.Tensor]] | th.Tensor) -> None:
+    def set_constr_val(self, constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor) -> None:
+        """
+        Set the constraint value for CMD api. Details see `constr_val` of _BaseConstr.
+        Args:
+            constr_val: A single value for static constraints, or a callable for time-dependent constraints.
+
+        Returns:
+
+        """
         self.constr_val = constr_val
         pass
 
@@ -120,19 +156,22 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         # check logger
         if not self.logger.hasHandlers(): self.logger.addHandler(self.log_handler)
         # check vars
-        _model: nn.Module = model(**self.MODEL_CONFIG)
         if self.START == 'resume' or self.START == 1 or self.START == 2:
-            chk_data = th.load(self.LOAD_CHK_FILE_PATH, weights_only=True)
+            _chk_hyperparam, _chk_model_param, _chk_train_state = self._load_chk()
+            hyperparam = self._checkpoint_hyperparameters(_chk_hyperparam)
+        else:
+            _chk_hyperparam, _chk_model_param, _chk_train_state = None, None, {}
+            hyperparam = self._current_model_hyperparameters()
+        _model = self._instantiate_model(model, hyperparam)
+        if self.START == 'resume' or self.START == 1 or self.START == 2:
             if self.param is None:
-                _model.load_state_dict(chk_data['model_state_dict'], strict=False)
+                _model.load_state_dict(_chk_model_param, strict=False)
             else:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
-            epoch_now = chk_data['epoch']
         elif self.START == 'from_scratch' or self.START == 0:
             self.logger.warning(
                 'WARNING: The model was not read the trained parameters from checkpoint file. I HOPE YOU KNOW WHAT YOU ARE DOING!'
             )
-            epoch_now = 0
             if self.param is not None:
                 _model.load_state_dict(self.param, self.is_strict, self.is_assign)
         else:
@@ -156,7 +195,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
         try:
             # PRINT TASK INFO
             if self.VERBOSE > 0:
-                self.logout_task_information(_model, 'CMD', self.MD_config, self.n_samp)
+                self.logout_task_information(_model, 'CMD', self.MD_config, self.n_samp, checkpoint_hyperparam=_chk_hyperparam, model_hyperparam=hyperparam)
 
             time_tol = time.perf_counter()
             _model.eval()
@@ -171,7 +210,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     #ImportError('The method is unavailable because the `torch-geometric` cannot be imported.')
                     self.pygBatch = Batch
 
-                model_wrap = _Model_Wrapper_pyg(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 def get_batch_size(data):
                     return len(data)
 
@@ -200,10 +239,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     return n_batch_
 
                 def get_init_veloc(data):
-                    veloc = getattr(data, 'velocity', None)
-                    if veloc is not None:
-                        veloc = veloc.unsqueeze(0)
-                    return veloc
+                    return getattr(data, 'velocity', None)
 
                 def rebatched_graph(single_graph, X):
                     """ expand batches """
@@ -214,7 +250,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     return graph
 
             else:
-                model_wrap = _Model_Wrapper_dgl(_model)
+                model_wrap = self._build_model_wrapper(_model, hyperparam=hyperparam)
                 raise NotImplementedError  # TODO <<<<
                 def get_batch_size(data):
                     return data.num_nodes('atom')
@@ -265,22 +301,31 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 )
 
         except Exception as e:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             excp = traceback.format_exc()
             self.logger.exception(f'An ERROR occurred:\n\t{e}\nTraceback:\n{excp}')
 
         finally:
-            th.cuda.synchronize()
+            if th.cuda.is_available(): th.cuda.synchronize()
             if mole_dynam is not None:
                 mole_dynam.dumper.close()
             self.logger.removeHandler(self.log_handler)
             if isinstance(self.log_handler, logging.FileHandler):
                 self.log_handler.close()
 
-    def _run_cmd_blue_moon(self, mole_dynam, model_wrap,
-                           get_batch_size, get_cell_vec, get_atomic_number,
-                           get_indx, get_fixed_mask, get_batch_indx,
-                           get_init_veloc, rebatched_graph):
+    def _run_cmd_blue_moon(
+            self,
+            mole_dynam,
+            model_wrap,
+            get_batch_size,
+            get_cell_vec,
+            get_atomic_number,
+            get_indx,
+            get_fixed_mask,
+            get_batch_indx,
+            get_init_veloc,
+            rebatched_graph
+    ):
         """BLUE_MOON scheme: ISFS loader, IS/FS pairs, linear interpolation."""
         val_set: Any = self._data_loader(
             self.TRAIN_DATA, self.BATCH_SIZE,
@@ -345,19 +390,23 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 else:
                     X_is = dataIS.nodes['atom'].data['pos']
                     X_fs = dataFS.nodes['atom'].data['pos']
-                X_init_ = linear_interpolation_tens(X_is, X_fs, self.NIMAGE)
+                X_init_ = linear_interpolation_tens(X_is, X_fs, self.N_IMAGES)
                 origin_elem_list = get_atomic_number(dataIS)
                 dataIS = rebatched_graph(dataIS, X_init_)
+                _init_V = get_init_veloc(dataIS)
+                _init_V = _init_V if _init_V is None else _init_V.reshape_as(X_init_)
 
                 mole_dynam.run(
                     model_wrap.Energy, X_init_,
-                    [origin_elem_list] * self.NIMAGE,
-                    V_init=get_init_veloc(dataIS),
+                    [origin_elem_list] * self.N_IMAGES,
+                    Cell_vector=np.repeat(_cell, self.N_IMAGES, axis=0),
+                    V_init=_init_V,
                     grad_func=model_wrap.Grad,
                     func_args=(dataIS,), grad_func_args=(dataIS,),
                     is_grad_func_contain_y=False,
                     require_grad=self.require_grad,
                     fixed_atom_tensor=fixed_mask,
+                    move_to_center_freq=int(self.MD.get('MOVE_TO_CENTER_FREQ', -1)),
                 )
 
                 if self.VERBOSE > 0:
@@ -391,7 +440,7 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                     if self.VERBOSE: self.logger.info('Empty batch. Skipped.')
                     continue
                 elif n_images > 1:
-                    __err_msg = ('BLUE_MOON does not support batched calculation yet. '
+                    __err_msg = ('SLOW_GROWTH does not support batched calculation yet. '
                                  'Set BATCH_SIZE to 1.')
                     if self.VERBOSE: self.logger.error(__err_msg)
                     raise RuntimeError(__err_msg)
@@ -416,19 +465,23 @@ class ConstrainedMolecularDynamics(_CONFIGS):
                 else:
                     X_is = dataIS.nodes['atom'].data['pos']
                 # For SLOW_GROWTH: copy the same structure N_Images times
-                X_init_ = X_is.unsqueeze(0).expand(self.NIMAGE, *X_is.shape)
+                X_init_ = X_is.unsqueeze(0).expand(self.N_IMAGES, *X_is.shape)
                 origin_elem_list = get_atomic_number(dataIS)
                 dataIS = rebatched_graph(dataIS, X_init_)
+                _init_V = get_init_veloc(dataIS)
+                _init_V = _init_V if _init_V is None else _init_V.reshape_as(X_init_)
 
                 mole_dynam.run(  #  Model not support the regular batch, although our code do.
                     model_wrap.Energy, X_init_,
-                    [origin_elem_list] * self.NIMAGE,
-                    V_init=get_init_veloc(dataIS),
+                    [origin_elem_list] * self.N_IMAGES,
+                    Cell_vector=np.repeat(_cell, self.N_IMAGES, axis=0),
+                    V_init=_init_V,
                     grad_func=model_wrap.Grad,
                     func_args=(dataIS,), grad_func_args=(dataIS,),
                     is_grad_func_contain_y=False,
                     require_grad=self.require_grad,
                     fixed_atom_tensor=fixed_mask,
+                    move_to_center_freq=int(self.MD.get('MOVE_TO_CENTER_FREQ', -1)),
                 )
 
                 if self.VERBOSE > 0:

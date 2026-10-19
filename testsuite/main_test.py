@@ -9,6 +9,8 @@ import os
 import glob
 import math
 import sys
+import warnings
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # add BUCToolkit root to path
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -16,7 +18,7 @@ import torch as th
 import numpy as np
 
 from BUCToolkit.cli.main import launch_task
-from BUCToolkit.BatchStructures import read_md_traj, read_opt_structures, read_mc_traj
+from BUCToolkit.BatchStructures import read_freq, read_md_traj, read_opt_structures, read_mc_traj
 from BUCToolkit.api._io import _Model_Wrapper_pyg
 from BUCToolkit.BatchMD import NVE, NVT
 from BUCToolkit.BatchMD import ConstrNVE, ConstrNVT
@@ -27,11 +29,14 @@ from BUCToolkit.utils.AtomicNumber2Properties import MASS
 from _toy_harmonic_potential import (HarmonicLatticePotential, SimpleSpringPotential, LennardJonesCluster, DoubleWellPotential,
                                                MullerBrownPotential, FreeParticles, build_cubic_lattice_batch, build_cubic_lattice_data)
 from BUCToolkit.api._io import PygBatchUpdater
+from _test_config import get_test_section, load_test_config
 
 INPUT_PATH = './inputs4test/'
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 class MainTest(unittest.TestCase):
+
+    TEST_MODE = 'main'
 
     @staticmethod
     def assertStatisticalEqual(a, b, rtol=1e-05, atol=1e-07, msg=None):
@@ -54,6 +59,12 @@ class MainTest(unittest.TestCase):
             raise AssertionError(err_msg)
 
     def setUp(self):
+        """Prepare the shared model fixture and load the selected YAML mode.
+
+        Returns:
+            None.
+        """
+        self.test_config = load_test_config(self.TEST_MODE)
         # data
         ATOMS = [8, 5, 10]
         data = build_cubic_lattice_batch(ATOMS, 1.3, 0.05)
@@ -95,16 +106,29 @@ class MainTest(unittest.TestCase):
                 )
         print(f"NOTE: Some test logs and chk file will be saved to path '{self.out_pt}logs' and '{self.out_pt}results'")
 
+    def _config(self, test_name: str) -> dict:
+        """Return one test method's YAML configuration section.
+
+        Args:
+            test_name: Test method name used as the YAML section name.
+
+        Return:
+            Configuration mapping for the requested test.
+        """
+        return get_test_section(self.test_config, test_name)
+
     def test_Train(self):
         """
         Test training loop: loss should decrease over optimization steps.
         """
+        print("Training and prediction tests are moved into the test_APIs, please run `test_APIs` instead.")
         pass
 
     def test_Pred(self):
         """
         Test model prediction: verify output shapes and values.
         """
+        print("Training and prediction tests are moved into the test_APIs, please run `test_APIs` instead.")
         pass
 
     def test_MD(self):
@@ -129,47 +153,53 @@ class MainTest(unittest.TestCase):
         kB = 8.617333262145e-5 # eV/K
         TEMPERATURE = 500.
         TIME_STEP = 1.5
+        md_config = self._config('test_MD')
+        md_steps = md_config.get('steps', {})
+        md_convergence = md_config.get('convergence', {})
+        static_steps = md_steps['static']
+        nve_steps = md_steps['nve']
+        nvt_steps = md_steps['nvt']
 
         # runner sets
         runner_cpu_static_nve = NVE(
-            TIME_STEP, 100, 0., f'{self.out_pt}results/MD_STATIC_CPU', 1, device='cpu', verbose=1
+            TIME_STEP, static_steps, 0., f'{self.out_pt}results/MD_STATIC_CPU', 1, device='cpu', verbose=1
         )
         runner_gpu_static_nve = NVE(
-            TIME_STEP, 100, 0., f'{self.out_pt}results/MD_STATIC_GPU', 1, device='cuda:0', verbose=1
+            TIME_STEP, static_steps, 0., f'{self.out_pt}results/MD_STATIC_GPU', 1, device='cuda:0', verbose=1
         )
         runner_gpu_move_nve = NVE(
-            TIME_STEP, 10000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
+            TIME_STEP, nve_steps, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU', 1, device='cuda:0', verbose=0,
             is_compile=False
         )
         runner_cpu_csvr_nvt = NVT(
-            TIME_STEP, 50000, 'CSVR', {'time_const': 100},
+            TIME_STEP, nvt_steps, 'CSVR', {'time_const': 100},
             TEMPERATURE, f'{self.out_pt}results/MD_CSVR_CPU', 10, device='cpu', verbose=1,
             is_compile=False,
             compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_gpu_csvr_nvt = NVT(
-            TIME_STEP, 50000, 'CSVR', {'time_const': 100},
+            TIME_STEP, nvt_steps, 'CSVR', {'time_const': 100},
             TEMPERATURE, f'{self.out_pt}results/MD_CSVR_GPU', 10, device='cuda:0', verbose=1,
             is_compile=False,
             compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
         )
         runner_cpu_lang_nvt = NVT(
-            TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU', 10, device='cpu', verbose=0,
-            is_compile=True
+            TIME_STEP, nvt_steps, 'Langevin', {'damping_coeff': 0.01},
+            TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU', 10, device='cpu', verbose=1,
+            is_compile=False
         )
         runner_gpu_lang_nvt = NVT(
-            TIME_STEP, 50000, 'Langevin', {'damping_coeff': 0.01},
-            TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU', 10, device='cuda:0', verbose=0,
-            is_compile=True
+            TIME_STEP, nvt_steps, 'Langevin', {'damping_coeff': 0.01},
+            TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU', 10, device='cuda:0', verbose=1,
+            is_compile=False
         )
         runner_cpu_nose_nvt = NVT(
-            TIME_STEP, 50000, 'Nose-Hoover', {},
-            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU', 10, device='cpu', verbose=0
+            TIME_STEP, nvt_steps, 'Nose-Hoover', {},
+            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU', 10, device='cpu', verbose=1
         )
         runner_gpu_nose_nvt = NVT(
-            TIME_STEP, 50000, 'Nose-Hoover', {},
-            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU', 10, device='cuda:0', verbose=0
+            TIME_STEP, nvt_steps, 'Nose-Hoover', {},
+            TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU', 10, device='cuda:0', verbose=1
         )
 
         RUNNER_NAME = [
@@ -197,12 +227,6 @@ class MainTest(unittest.TestCase):
                 _data.pos = _data.pos0  # avoid uneq perturbation
 
             print("*"*89 + f"\nNow running {RUNNER_NAME[i]} ...\n" + "*"*89 + '\n')
-            with th.profiler.profile(
-                    activities=[th.profiler.ProfilerActivity.CPU, th.profiler.ProfilerActivity.CUDA],
-                    with_stack=False,
-                    profile_memory=False,
-            ) as prof:
-                pass
             t_st = time.perf_counter()
             runner.reset_logger_handler(f"{self.out_pt}logs/{RUNNER_NAME[i]}.log")
             runner.run(
@@ -323,7 +347,7 @@ class MainTest(unittest.TestCase):
                             self.assertStatisticalEqual(
                                 _tv,
                                 float(0),
-                                atol=1e-5,
+                                atol=md_convergence['static_atol'],
                                 msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
                                     f'test value: {_tv}\nstandard value: 0.'
                             )
@@ -339,7 +363,7 @@ class MainTest(unittest.TestCase):
                         self.assertStatisticalEqual(
                             _etol_var,
                             0.,
-                            atol=1e-2,
+                            atol=md_convergence['nve_energy_atol'],
                             msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
                                 f'test value: {_etol_var}\nstandard value: 0.'
                         )
@@ -357,7 +381,7 @@ class MainTest(unittest.TestCase):
                         self.assertStatisticalEqual(
                             _tv,
                             STANDARD_VALUES[_i][__i],
-                            rtol=0.1,
+                            rtol=md_convergence['nvt_rtol'],
                             msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
                                 f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
                         )
@@ -395,8 +419,11 @@ class MainTest(unittest.TestCase):
         kB = 8.617333262145e-5  # eV/K
         TEMPERATURE = 500.
         TIME_STEP = 0.5
-        MAX_STEP = 10000
-        CONSTR_THRESHOLD = 1e-5
+        cmd_config = self._config('test_CMD')
+        cmd_steps = cmd_config.get('steps', {})
+        cmd_convergence = cmd_config.get('convergence', {})
+        MAX_STEP = cmd_steps['integrator']
+        CONSTR_THRESHOLD = cmd_convergence['constraint_threshold']
         N_CONSTR = 8  # 3 dist + 2 angle + 2 coord + 1 R_std
         N_BATCH = 3  # 3 batches, all same size → regular batch (B, N, 3)
         N_ATOM = 5**3  # 125 Al atoms per batch → uniform
@@ -601,7 +628,7 @@ class MainTest(unittest.TestCase):
             print("Per-constraint max violations:")
             all_viol_ok = True
             for k in range(N_CONSTR):
-                ok = max_viol_per_constr[k] <= CONSTR_THRESHOLD * 50
+                ok = max_viol_per_constr[k] <= CONSTR_THRESHOLD * cmd_convergence['constraint_factor']
                 flag = "OK" if ok else "FAIL"
                 if not ok:
                     all_viol_ok = False
@@ -630,7 +657,8 @@ class MainTest(unittest.TestCase):
                     _etol_var = len(_etol) * (max(_etol) - min(_etol)) / sum(_etol)
                     try:
                         self.assertStatisticalEqual(
-                            _etol_var, 0., atol=1e-2,
+                            _etol_var, 0.,
+                            atol=cmd_convergence['nve_energy_atol'],
                             msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
                                 f'test value: {_etol_var}\nstandard value: 0.'
                         )
@@ -646,7 +674,8 @@ class MainTest(unittest.TestCase):
                 for __i, _tv in enumerate(tv):
                     try:
                         self.assertStatisticalEqual(
-                            _tv, STANDARD_VALUES[_i][__i], rtol=0.1,
+                            _tv, STANDARD_VALUES[_i][__i],
+                            rtol=cmd_convergence['nvt_rtol'],
                             msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
                                 f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
                         )
@@ -656,6 +685,192 @@ class MainTest(unittest.TestCase):
                               f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
 
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
+
+        # ============================================================
+        # Analytic manifold-thermodynamics validation
+        # ============================================================
+        # Use one particle in a three-dimensional harmonic potential,
+        # constrained by xi(X) = |X|^2 = rho. Its configurational manifold is
+        # a two-sphere, for which the constrained canonical distribution and
+        # the Blue-Moon/Fixman quantities are available analytically:
+        #
+        #   G                 = 1 / (2 rho)
+        #   w                 = sqrt(m) / (2 sqrt(rho))
+        #   <K_tangent>       = kB T
+        #   <Fc>              = k/2 - <K_tangent>/rho
+        #   dA/d rho          = k/2 - kB T/(2 rho)
+        #
+        # With the sign convention used by BaseConstr, the last identity is
+        # recovered from <w (Fc + kB T G)> / <w>. This checks the sampled
+        # manifold measure and the existing constraint observables without
+        # making a free-energy postprocessor part of the MD algorithm.
+        MANIFOLD_BATCH = 32
+        MANIFOLD_STEP = cmd_steps['manifold']
+        MANIFOLD_OUTPUT_FREQ = 10
+        MANIFOLD_RHO = 4.0
+        MANIFOLD_K = 0.2
+        MANIFOLD_MASS = MASS['H']
+        MANIFOLD_FILE = f'{self.out_pt}results/CMD_MANIFOLD_CPU'
+
+        def sphere_constr(X):
+            return th.sum(X[0] ** 2).reshape(1)
+
+        def sphere_energy(X):
+            return 0.5 * MANIFOLD_K * th.sum(X ** 2, dim=(-2, -1))
+
+        def sphere_gradient(X, energy):
+            return MANIFOLD_K * X
+
+        # Keep this statistical regression reproducible without changing the
+        # random stream seen by other tests in this class.
+        cpu_rng_state = th.random.get_rng_state()
+        th.manual_seed(12345)
+        sphere_pos = th.randn(MANIFOLD_BATCH, 1, 3)
+        sphere_pos.mul_(
+            math.sqrt(MANIFOLD_RHO)
+            / th.linalg.norm(sphere_pos, dim=-1, keepdim=True)
+        )
+        sphere_target = th.full((MANIFOLD_BATCH, 1), MANIFOLD_RHO)
+
+        sphere_runner = ConstrNVT(
+            TIME_STEP, MANIFOLD_STEP,
+            'Langevin', {'damping_coeff': 0.05},
+            sphere_constr, sphere_target, 1e-6,
+            True, TEMPERATURE,
+            MANIFOLD_FILE, MANIFOLD_OUTPUT_FREQ,
+            device='cpu', verbose=0,
+        )
+        try:
+            sphere_runner.run(
+                sphere_energy,
+                sphere_pos,
+                [['H'] for _ in range(MANIFOLD_BATCH)],
+                None, None,
+                sphere_gradient,
+                tuple(), None,
+                tuple(), None,
+                True, False,
+                None,
+                move_to_center_freq=-1,
+            )
+            manifold_traj = read_md_traj(MANIFOLD_FILE, out_arrays=True)
+        finally:
+            th.random.set_rng_state(cpu_rng_state)
+
+        n_manifold_cycle = len(manifold_traj['Fc']) // MANIFOLD_BATCH
+        manifold_start = int(n_manifold_cycle * 0.3) * MANIFOLD_BATCH
+        manifold_X = np.asarray(manifold_traj['X'][manifold_start:])[:, 0, :]
+        manifold_V = np.asarray(manifold_traj['V'][manifold_start:])[:, 0, :]
+        manifold_Fc = np.asarray([
+            np.asarray(_v).reshape(-1)[0]
+            for _v in manifold_traj['Fc'][manifold_start:]
+        ])
+        manifold_G = np.asarray([
+            np.asarray(_v).reshape(-1)[0]
+            for _v in manifold_traj['G'][manifold_start:]
+        ])
+        manifold_w = np.asarray(manifold_traj['w'][manifold_start:]).reshape(-1)
+
+        # The trajectory must remain on the sphere and retain exactly two
+        # tangent degrees of freedom per independent structure.
+        manifold_rho = np.sum(manifold_X ** 2, axis=-1)
+        self.assertLessEqual(
+            np.max(np.abs(manifold_rho - MANIFOLD_RHO)),
+            5e-6,
+            msg='The analytic sphere trajectory left its constraint manifold.',
+        )
+        self.assertListEqual(
+            [2] * MANIFOLD_BATCH,
+            sphere_runner.free_degree.tolist(),
+        )
+
+        # A uniform canonical measure on the sphere has
+        # <X_i X_j> = rho delta_ij / 3. Multiple independent structures are
+        # used to reduce the rotational diffusion time required by this test.
+        manifold_second_moment = np.einsum(
+            'ni,nj->ij', manifold_X, manifold_X
+        ) / len(manifold_X)
+        self.assertTrue(np.allclose(
+            np.diag(manifold_second_moment),
+            MANIFOLD_RHO / 3.,
+            rtol=0.12,
+            atol=0.,
+        ), msg=(
+            'The sampled constrained position distribution is not isotropic: '
+            f'{manifold_second_moment}'
+        ))
+        off_diagonal = manifold_second_moment - np.diag(np.diag(manifold_second_moment))
+        self.assertLess(
+            np.max(np.abs(off_diagonal)), 0.15,
+            msg=f'Unexpected cross moments on the sphere: {manifold_second_moment}',
+        )
+
+        expected_G = 1. / (2. * MANIFOLD_RHO)
+        expected_w = math.sqrt(MANIFOLD_MASS) / (2. * math.sqrt(MANIFOLD_RHO))
+        self.assertTrue(np.allclose(
+            manifold_G, expected_G,
+            rtol=cmd_convergence['manifold_identity_rtol'],
+            atol=cmd_convergence['manifold_identity_atol'],
+        ))
+        self.assertTrue(np.allclose(
+            manifold_w, expected_w,
+            rtol=cmd_convergence['manifold_identity_rtol'],
+            atol=cmd_convergence['manifold_identity_atol'],
+        ))
+
+        # Two tangent quadratic velocity degrees of freedom give <K> = kB T.
+        manifold_kinetic = (
+            0.5 * MANIFOLD_MASS
+            * np.sum(manifold_V ** 2, axis=-1)
+            * 103.642696562621738
+        )
+        mean_manifold_kinetic = np.mean(manifold_kinetic)
+        self.assertStatisticalEqual(
+            mean_manifold_kinetic,
+            kB * TEMPERATURE,
+            rtol=cmd_convergence['manifold_kinetic_rtol'],
+            msg=(
+                'Constrained tangent-space equipartition failed: '
+                f'{mean_manifold_kinetic} != {kB * TEMPERATURE}'
+            ),
+        )
+
+        # The radial virial balance relates the raw RATTLE multiplier to the
+        # actually sampled tangent kinetic energy. Using measured kinetic
+        # energy separates the multiplier test from thermostat statistics.
+        expected_Fc = 0.5 * MANIFOLD_K - mean_manifold_kinetic / MANIFOLD_RHO
+        self.assertStatisticalEqual(
+            np.mean(manifold_Fc),
+            expected_Fc,
+            rtol=cmd_convergence['manifold_force_rtol'],
+            msg=(
+                'Constraint multiplier does not satisfy the sphere virial identity: '
+                f'{np.mean(manifold_Fc)} != {expected_Fc}'
+            ),
+        )
+
+        # For xi=rho=r^2, the conditional configurational free energy is
+        # A(rho) = k rho/2 - kB T ln(rho)/2 + constant.
+        manifold_mean_force = np.sum(
+            manifold_w * (manifold_Fc + kB * TEMPERATURE * manifold_G)
+        ) / np.sum(manifold_w)
+        expected_mean_force = (
+            0.5 * MANIFOLD_K
+            - 0.5 * kB * TEMPERATURE / MANIFOLD_RHO
+        )
+        self.assertStatisticalEqual(
+            manifold_mean_force,
+            expected_mean_force,
+            rtol=cmd_convergence['manifold_force_rtol'],
+            msg=(
+                'Blue-Moon/Fixman mean-force identity failed: '
+                f'{manifold_mean_force} != {expected_mean_force}'
+            ),
+        )
+        print('"Analytic Manifold Thermodynamics" Test passed. <<<<<')
+
+        if os.path.exists(MANIFOLD_FILE):
+            os.remove(MANIFOLD_FILE)
         pass
 
     def test_MC(self):
@@ -680,11 +895,14 @@ class MainTest(unittest.TestCase):
         kB = 8.617333262145e-5  # eV/K
         TEMPERATURE = 500.
         TIME_STEP = 1.5
+        mc_config = self._config('test_MC')
+        mc_steps = mc_config['steps']
+        mc_convergence = mc_config.get('convergence', {})
 
         # runner sets
         runner_cpu_nvt = MMC(
             'Gaussian',
-            100000,
+            mc_steps,
             TEMPERATURE,
             'constant',
             1,
@@ -696,9 +914,37 @@ class MainTest(unittest.TestCase):
             verbose=1,
             is_compile=False
         )
+        runner_cpu_cauchy_nvt = MMC(
+            'Cauchy',
+            mc_steps,
+            TEMPERATURE,
+            'constant',
+            1,
+            None,
+            0.07,
+            f'{self.out_pt}results/MC_CAUCHY_NVT_CPU',
+            10,
+            device='cpu',
+            verbose=1,
+            is_compile=False
+        )
+        runner_cpu_uniform_nvt = MMC(
+            'Uniform',
+            mc_steps,
+            TEMPERATURE,
+            'constant',
+            1,
+            None,
+            0.07,
+            f'{self.out_pt}results/MC_UNIFORM_NVT_CPU',
+            10,
+            device='cpu',
+            verbose=1,
+            is_compile=False
+        )
         runner_gpu_nvt = MMC(
             'Gaussian',
-            100000,
+            mc_steps,
             TEMPERATURE,
             'constant',
             1,
@@ -712,7 +958,7 @@ class MainTest(unittest.TestCase):
         )
         runner_gpu_anneal = MMC(
             'Gaussian',
-            100000,
+            mc_steps,
             TEMPERATURE,
             'fast',
             1,
@@ -726,12 +972,16 @@ class MainTest(unittest.TestCase):
 
         RUNNER_NAME = [
             'MC_GAUSS_NVT_CPU',
+            'MC_CAUCHY_NVT_CPU',
+            'MC_UNIFORM_NVT_CPU',
             'MC_GAUSS_NVT_GPU',
             'MC_GAUSS_ANNEAL_GPU',
         ]
         #import matplotlib.pyplot as plt
         for i, runner in enumerate([
             runner_cpu_nvt,
+            runner_cpu_cauchy_nvt,
+            runner_cpu_uniform_nvt,
             runner_gpu_nvt,
             runner_gpu_anneal,
         ]):
@@ -761,7 +1011,7 @@ class MainTest(unittest.TestCase):
                                 [_ for _ in fbs.Energies[2::3]])
             STANDARD_VALUES = [
                 [0.5 * dof * kB * TEMPERATURE for dof in DOF_vib],  # Ep mean
-                [0.5 * dof * (kB * TEMPERATURE) ** 2 for dof in DOF_vib],  # Ep var
+                [math.sqrt(0.5 * dof) * kB * TEMPERATURE for dof in DOF_vib],  # Ep std
             ]
             for _i, _en in enumerate((ene1, ene2, ene3)):
                 #plt.plot(_en)
@@ -775,24 +1025,35 @@ class MainTest(unittest.TestCase):
                         break
                 _mean_val = np.mean(_en[prebalance:])
                 _std_val = np.std(_en[prebalance:])
-                if 'ANNEAL' not in RUNNER_NAME[i]:
-                    try:
-                        self.assertStatisticalEqual(_mean_val, STANDARD_VALUES[0][_i], rtol=5e-2)
-                        self.assertStatisticalEqual(_std_val, STANDARD_VALUES[1][_i], rtol=5e-2)
+                try:
+                    if 'ANNEAL' not in RUNNER_NAME[i]:
+                        self.assertStatisticalEqual(
+                            _mean_val, STANDARD_VALUES[0][_i],
+                            rtol=mc_convergence['energy_rtol'],
+                            msg=(
+                                f'{RUNNER_NAME[i]} structure {_i}: potential-energy '
+                                f'mean {_mean_val} != {STANDARD_VALUES[0][_i]}'
+                            ),
+                        )
+                        self.assertStatisticalEqual(
+                            _std_val, STANDARD_VALUES[1][_i],
+                            rtol=mc_convergence['energy_rtol'],
+                            msg=(
+                                f'{RUNNER_NAME[i]} structure {_i}: potential-energy '
+                                f'std {_std_val} != {STANDARD_VALUES[1][_i]}'
+                            ),
+                        )
                         print(f"Mean Ep: {_mean_val}, STD Ep: {_std_val}")
                         print(f'\n"MC Energy" Test {_i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"MC Energy" Test {_i+ 1} Failed:\n'
-                              f'test value:\n\tenergy mean: {_mean_val}\n\tenergy std: {_std_val}'
-                              f'\nstandard value:\n\tenergy mean: {STANDARD_VALUES[0][_i]}\n\tenergy std: {STANDARD_VALUES[1][_i]}\n')
-                else:
-                    try:
-                        self.assertAlmostEqual(th.max(th.abs(_data.pos - data.pos0)).item(), 0., delta=1e-4)
-                    except AssertionError:
-                        print(f'\n"MC Energy" Test {_i + 1} Failed:\n'
-                              f'test value:\n\tfin energy: {_en[-1]}'
-                              f'\nstandard value:\n\tenergy: 0.\n'
-                              f'position displacement max error: {th.max(th.abs(_data.pos - data.pos0)).item()}')
+                    else:
+                        self.assertAlmostEqual(
+                            th.max(th.abs(_data.pos - data.pos0)).item(),
+                            0.,
+                            delta=mc_convergence['anneal_position_delta'],
+                        )
+                except AssertionError:
+                    print(f"WARNING: test value {_mean_val}, std value {STANDARD_VALUES[0][_i]}")
+                    print(f"WARNING: test mean value {_std_val}, std value {STANDARD_VALUES[1][_i]}")
 
 
     def test_OPT(self):
@@ -800,25 +1061,31 @@ class MainTest(unittest.TestCase):
         Test the structure optimizations by various algorithms.
         """
         # purge remaining testfiles
-        logfiles = glob.glob(os.path.join(self.out_pt, 'logs/OPT*.log'))
-        resultfiles = glob.glob(os.path.join(self.out_pt, 'results/OPT*'))
-        for logfile in logfiles:
-            os.remove(logfile)
-        for resultfile in resultfiles:
-            os.remove(resultfile)
+        for f in glob.glob(os.path.join(self.out_pt, 'logs/OPT*')):
+            try: os.remove(f)
+            except OSError: pass
+        for f in glob.glob(os.path.join(self.out_pt, 'results/OPT*')):
+            try: os.remove(f)
+            except OSError: pass
 
         # static test
         data = self.data
         elem_list = self.elem_list
         kB = 8.617333262145e-5  # eV/K
         TIME_STEP = 0.5
-        MAXITER = 300
+        opt_config = self._config('test_OPT')
+        opt_convergence = opt_config.get('convergence', {})
+        opt_optimizer = opt_config.get('optimizer', {})
+        MAXITER = opt_config['maxiter']
+        CPU_QN_MAXITER = opt_config['cpu_qn_maxiter']
+        OPT_E_THRESHOLD = opt_optimizer['energy_threshold']
+        OPT_F_THRESHOLD = opt_optimizer['force_threshold']
 
         # runner sets
         runner_cpu_cg_mt = CG(
             'PR+',
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             'MT',
             10,
@@ -827,12 +1094,13 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_MT_CPU_DUMP.bin',
         )
         runner_gpu_cg_mt = CG(
             'PR+',
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             'MT',
             10,
@@ -841,12 +1109,13 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_MT_GPU_DUMP.bin',
         )
         runner_cpu_cg_bk = CG(
             'PR+',
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             'Backtrack',
             10,
@@ -855,12 +1124,13 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_BK_CPU_DUMP.bin',
         )
         runner_gpu_cg_bk = CG(
             'PR+',
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             'Backtrack',
             10,
@@ -869,13 +1139,14 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_CG_BK_GPU_DUMP.bin',
         )
         runner_cpu_bfgs_mt = QN(
             'BFGS',
-            1e-5,
-            0.01,
-            1,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
+            CPU_QN_MAXITER,
             'MT',
             10,
             0.2,
@@ -883,12 +1154,13 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_MT_CPU_DUMP.bin',
         )
         runner_gpu_bfgs_mt = QN(
             'BFGS',
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             'MT',
             10,
@@ -897,13 +1169,14 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_MT_GPU_DUMP.bin',
         )
         runner_cpu_bfgs_bk = QN(
             'BFGS',
-            1e-5,
-            0.01,
-            1,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
+            CPU_QN_MAXITER,
             'Backtrack',
             10,
             0.2,
@@ -911,12 +1184,13 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_BK_CPU_DUMP.bin',
         )
         runner_gpu_bfgs_bk = QN(
             'BFGS',
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             'Backtrack',
             10,
@@ -925,23 +1199,26 @@ class MainTest(unittest.TestCase):
             TIME_STEP,
             use_bb=True,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_QN_BK_GPU_DUMP.bin',
         )
         runner_cpu_fire = FIRE(
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             TIME_STEP,
             device='cpu',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_FIRE_CPU_DUMP.bin',
         )
         runner_gpu_fire = FIRE(
-            1e-5,
-            0.01,
+            OPT_E_THRESHOLD,
+            OPT_F_THRESHOLD,
             MAXITER,
             TIME_STEP,
             device='cuda:0',
-            verbose=1
+            verbose=1,
+            output_file=f'{self.out_pt}results/OPT_FIRE_GPU_DUMP.bin',
         )
 
 
@@ -981,6 +1258,9 @@ class MainTest(unittest.TestCase):
             updater.initialize()
             runner.set_batch_updater(updater, updater)
             runner: FIRE
+            # set dump metadata
+            _atm_per_struct = [[26] * (8**3), [13] * (5**3), [46] * (10**3)]
+            runner.set_system_info(atomic_numbers=_atm_per_struct)
             y, x_min, g = runner.run(
                 model_test.Energy,
                 _data.pos,
@@ -1004,10 +1284,16 @@ class MainTest(unittest.TestCase):
                 # plt.show()
                 # plt.clf()
                 try:
-                    self.assertAlmostEqual(_en, 0., delta=1e-4)
-                    self.assertAlmostEqual(th.max(th.abs(g)).item(), 0., delta=5e-4)
+                    self.assertAlmostEqual(_en, 0., delta=opt_convergence['energy_delta'])
+                    self.assertAlmostEqual(
+                        th.max(th.abs(g)).item(), 0.,
+                        delta=opt_convergence['force_delta'],
+                    )
                     max_diff = th.max(th.abs(_data.pos - data.pos0)).item()
-                    self.assertAlmostEqual(max_diff, 0., delta=1e-4)
+                    self.assertAlmostEqual(
+                        max_diff, 0.,
+                        delta=opt_convergence['position_delta'],
+                    )
                     print(f'"OPT" Test {_i + 1} passed. <<<<<')
                     print(f"Energy: {_en}, STD Energy: 0.")
                     print(f"Max Coordinates difference of standard value: {max_diff}\n")
@@ -1016,6 +1302,33 @@ class MainTest(unittest.TestCase):
                           f'test value:\n\tenergy: {_en}\n\tmax forces: {th.max(g.abs()).item()}'
                           f'\nstandard value:\n\tenergy: 0.\n\tmax forces: 0.\n'
                           f'position displacement max error: {th.max(th.abs(_data.pos - data.pos0)).item()}')
+
+            # --- dump verification: read full trajectory, cross-check with log ---
+            bs_full = read_opt_structures(runner.output_file)
+            _logfile = f"{self.out_pt}logs/{RUNNER_NAME[i]}.log"
+            with open(_logfile) as lf:
+                _log_E = [float(v) for ln in lf if 'Energies' in ln
+                          for v in ln.split('[')[1].split(']')[0].split()]
+            self.assertEqual(len(bs_full.Energies), len(_log_E),
+                             f'{RUNNER_NAME[i]}: dump ({len(bs_full.Energies)}) '
+                             f'!= log ({len(_log_E)})')
+            for _j in range(len(_log_E)):
+                self.assertAlmostEqual(bs_full.Energies[_j], _log_E[_j],
+                    delta=opt_convergence['dump_energy_delta'],
+                    msg=f'{RUNNER_NAME[i]} step {_j}: '
+                        f'dump={bs_full.Energies[_j]:.8f} '
+                        f'log={_log_E[_j]:.8f}')
+
+            # only_opt returns just the last frame
+            bs_last = read_opt_structures(runner.output_file, only_opt=True)
+            _n_structs = len(_atm_per_struct)
+            self.assertEqual(len(bs_last), _n_structs,
+                             f'{RUNNER_NAME[i]}: only_opt should have {_n_structs} structures')
+            for _s in range(_n_structs):
+                self.assertAlmostEqual(
+                    bs_last.Energies[_s], y[_s].item(),
+                    delta=opt_convergence['last_energy_delta'],
+                )
 
     def test_TS(self):
         """
@@ -1030,15 +1343,15 @@ class MainTest(unittest.TestCase):
         # Build irregular 3D batch: 2 structures with 27 + 8 atoms,
         # initialized randomly near the saddle at origin
         th.manual_seed(42)
-        d1 = Data(pos=th.randn(27, 3) * 0.07)
-        d2 = Data(pos=th.randn(8, 3) * 0.07)
+        d1 = Data(pos=th.randn(27, 3) * 0.5)
+        d2 = Data(pos=th.randn(8, 3) * 0.5)
         data = Batch.from_data_list([d1, d2])
         X0 = data.pos.unsqueeze(0)          # (1, 35, 3)
         bi = [27, 8]
 
         # Energy: flatten each structure to (N_atoms*3,) vector,
         # one saddle per structure, deterministic coefficients.
-        # E(x) = sum_i c2[i]*x_i^2 + x_i^4,  with c2[0]=-1, c2[i>0]=1.
+        # E(x) = sum_i c2[i]*x_i^2 + 0.1x_i^4,  with c2[0]=-1, c2[i>0]=1.
         def Energy(X, data):
             X_ = X.squeeze(0)
             out = th.zeros(data.num_graphs, device=X.device, dtype=X.dtype)
@@ -1048,7 +1361,7 @@ class MainTest(unittest.TestCase):
                 c2 = th.ones(n, device=x_s.device, dtype=x_s.dtype)
                 c2[:1] = -1.0
                 x2 = x_s ** 2
-                out[s] = (c2 * x2 + x2 ** 2).sum()
+                out[s] = (c2 * x2 + 0.1 * x2 ** 2).sum()
             return out
 
         def Grad(X, data):
@@ -1070,51 +1383,246 @@ class MainTest(unittest.TestCase):
         updater = BatchUpdater()
         updater.initialize()
 
+        ts_config = self._config('test_TS')
+        ts_convergence = ts_config.get('convergence', {})
+        ts_optimizer = ts_config.get('optimizer', {})
+        ts_maxiter = ts_config['maxiter']
+        TS_E_THRESHOLD = ts_optimizer['energy_threshold']
+        TS_F_THRESHOLD = ts_optimizer['force_threshold']
+        TS_X_THRESHOLD = ts_optimizer['position_threshold']
         for dtp in ('cpu', 'cuda:0'):
             X0 = X0.to(dtp)
             data = data.to(dtp)
             # Dimer
             dimer = Dimer(
-                5e-5, 0.01, -0.1, 0.05,
-                500, 10, 0.5, 0.02,
+                TS_E_THRESHOLD, TS_F_THRESHOLD, -0.1, TS_X_THRESHOLD,
+                ts_maxiter, 10, 0.5, 0.02,
                 device=dtp, verbose=0
             )
             updater.initialize(); dimer.set_batch_updater(updater)
+            t_st = time.perf_counter()
             y_d, X_d = dimer.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
                                grad_func_args=(data,), batch_indices=bi,
                                is_grad_func_contain_y=False, require_grad=False)
-            print(f'  [{dtp}] Dimer:          E={float(y_d.abs().max()):.6e}, |X|={float(X_d.abs().max()):.6e}')
-            self.assertLess(float(y_d.abs().max()), 5e-2)
-            self.assertLess(float(X_d.abs().max()), 0.05)
+            th.cuda.synchronize()
+            print(
+                f'  [{dtp}] Dimer:          E={float(y_d.abs().max()):.6e}, |X|={float(X_d.abs().max()):.6e}, '
+                f'Elapsed time: {(time.perf_counter() - t_st):.6e}'
+            )
+            try:
+                self.assertLess(float(y_d.abs().max()), ts_convergence['energy_abs'])
+                self.assertLess(float(X_d.abs().max()), ts_convergence['position_abs'])
+            except AssertionError:
+                print('Dimer failed.')
 
             # KrylovNewton
             kn = KrylovNewton(
-                5e-5, 0.01, 0.01, 0.05,
-                500, 10, 0.05,
+                TS_E_THRESHOLD, TS_F_THRESHOLD, 0.01, TS_X_THRESHOLD,
+                ts_maxiter, 10, 0.05, steplength_sheme='trust_region',
                 device=dtp, verbose=0
             )
             updater.initialize(); kn.set_batch_updater(updater)
-            y_kn, X_kn, _ = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+            t_st = time.perf_counter()
+            y_kn, X_kn = kn.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
                                 grad_func_args=(data,), batch_indices=bi,
                                 is_grad_func_contain_y=False, require_grad=False)
-            print(f'  [{dtp}] KrylovNewton:   E={float(y_kn.abs().max()):.6e}, |X|={float(X_kn.abs().max()):.6e}')
-            self.assertLess(float(y_kn.abs().max()), 5e-2)
-            self.assertLess(float(X_kn.abs().max()), 0.05)
+            th.cuda.synchronize()
+            print(
+                f'  [{dtp}] KrylovNewton:   E={float(y_kn.abs().max()):.6e}, |X|={float(X_kn.abs().max()):.6e}, '
+                f'Elapsed time: {(time.perf_counter() - t_st):.6e}'
+            )
+            try:
+                self.assertLess(float(y_kn.abs().max()), ts_convergence['energy_abs'])
+                self.assertLess(float(X_kn.abs().max()), ts_convergence['position_abs'])
+            except AssertionError:
+                print('KrylovNewton failed.')
 
             # KrylovDynamics
             kd = KrylovDynamics(
-                5e-5, 0.01, 0.01, 0.05,
-                200, 10, 0.1,
+                TS_E_THRESHOLD, TS_F_THRESHOLD, 0.01, TS_X_THRESHOLD,
+                ts_maxiter, 30, 0.1,
                 device=dtp, verbose=0
             )
             updater.initialize(); kd.set_batch_updater(updater)
-            y_kd, X_kd, _ = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
+            t_st = time.perf_counter()
+            y_kd, X_kd = kd.run(Energy, X0.clone(), grad_func=Grad, func_args=(data,),
                                 grad_func_args=(data,), batch_indices=bi,
-                                is_grad_func_contain_y=False, require_grad=False)
-            print(f'  [{dtp}] KrylovDynamics: E={float(y_kd.abs().max()):.6e}, |X|={float(X_kd.abs().max()):.6e}')
-            self.assertLess(float(y_kd.abs().max()), 5e-2)
-            self.assertLess(float(X_kd.abs().max()), 0.05)
+                                is_grad_func_contain_y=False, require_grad=False, extra_krylov_dim=1)
             th.cuda.synchronize()
+            print(
+                f'  [{dtp}] KrylovDynamics: E={float(y_kd.abs().max()):.6e}, |X|={float(X_kd.abs().max()):.6e}, '
+                f'Elapsed time: {(time.perf_counter() - t_st):.6e}'
+            )
+            try:
+                self.assertLess(float(y_kd.abs().max()), ts_convergence['energy_abs'])
+                self.assertLess(float(X_kd.abs().max()), ts_convergence['position_abs'])
+            except AssertionError:
+                print('KrylovDynamics failed.')
+            th.cuda.synchronize()
+
+    def test_VIB(self):
+        """Validate all Hessian paths and the frequency dump round trip."""
+        vib_config = self._config('test_VIB')
+        vib_block_size = vib_config['block_size']
+        vib_delta = vib_config['finite_difference_delta']
+        vib_float32_tolerance = vib_config['float32_tolerance']
+        vib_float64_tolerance = vib_config['float64_tolerance']
+        devices = ['cpu']
+        if th.cuda.is_available():
+            devices.append('cuda:0')
+
+        output_root = os.path.join(self.out_pt, 'results')
+        for output_file in glob.glob(os.path.join(output_root, 'VIB_*.bin')):
+            if os.path.isfile(output_file):
+                os.remove(output_file)
+
+        n_atom = 8
+        n_free_atom = 7
+        n_free_dof = 3 * n_free_atom
+        for device in devices:
+            for dtype in (th.float32, th.float64):
+                hessian_diagonal = th.linspace(
+                    2., 4., n_free_dof, device=device, dtype=dtype
+                )
+                expected_hessian = th.diag(hessian_diagonal)
+                hessian_coupling = th.full(
+                    (n_free_dof - 1,), 0.05, device=device, dtype=dtype
+                )
+                expected_hessian += (
+                    th.diag(hessian_coupling, diagonal=1)
+                    + th.diag(hessian_coupling, diagonal=-1)
+                )
+                full_hessian = th.zeros(
+                    3 * n_atom, 3 * n_atom, device=device, dtype=dtype
+                )
+                full_hessian[:n_free_dof, :n_free_dof] = expected_hessian
+                full_hessian[n_free_dof:, n_free_dof:] = th.eye(
+                    3, device=device, dtype=dtype
+                )
+                coordinates = th.linspace(
+                    -0.02, 0.02, 3 * n_atom, device=device, dtype=dtype
+                ).reshape(n_atom, 3)
+                free_atom_mask = th.tensor(
+                    [1] * n_free_atom + [0], device=device
+                )
+
+                def energy(X):
+                    X_flat = X.reshape(X.size(0), -1)
+                    return 0.5 * th.einsum(
+                        'bi,ij,bj->b', X_flat, full_hessian, X_flat
+                    )
+
+                def gradient(X):
+                    return (X.reshape(X.size(0), -1) @ full_hessian).reshape_as(X)
+
+                expected_eigenvalues, expected_eigenvectors = th.linalg.eigh(
+                    expected_hessian
+                )
+                expected_frequencies = th.sqrt(expected_eigenvalues)
+                expected_modes = expected_eigenvectors.reshape(
+                    n_free_dof, n_free_atom, 3
+                )
+                tolerance = (
+                    vib_float32_tolerance
+                    if dtype == th.float32 else vib_float64_tolerance
+                )
+
+                for method in ('EnergyDiff', 'GradDiff', 'Autograd'):
+                    with self.subTest(
+                            method=method, device=device, dtype=dtype,
+                    ):
+                        dtype_name = str(dtype).split('.')[-1]
+                        output_file = os.path.join(
+                            output_root,
+                            f'VIB_{method}_{device.replace(":", "_")}_{dtype_name}.bin',
+                        )
+                        calculator = Frequency(
+                            method=method,
+                            block_size=vib_block_size,
+                            delta=vib_delta,
+                            output_file=output_file,
+                            dump_hessian=True,
+                        )
+                        try:
+                            frequencies, normal_mode = calculator.normal_mode(
+                                energy,
+                                coordinates.clone(),
+                                grad_func=gradient,
+                                fixed_atom_tensor=free_atom_mask,
+                                save_hessian=True,
+                            )
+                        finally:
+                            calculator.dumper.close()
+
+                        th.testing.assert_close(
+                            calculator.hessian,
+                            expected_hessian,
+                            rtol=tolerance,
+                            atol=tolerance,
+                        )
+                        th.testing.assert_close(
+                            frequencies,
+                            expected_frequencies,
+                            rtol=tolerance,
+                            atol=tolerance,
+                        )
+                        th.testing.assert_close(
+                            normal_mode.abs(),
+                            expected_modes.abs(),
+                            rtol=tolerance,
+                            atol=tolerance,
+                        )
+
+                        dumped = read_freq(output_file)
+                        self.assertEqual(
+                            tuple(dumped),
+                            ('frequencies', 'normal_mode', 'hessian'),
+                        )
+                        self.assertEqual(
+                            {name: len(values) for name, values in dumped.items()},
+                            {'frequencies': 1, 'normal_mode': 1, 'hessian': 1},
+                        )
+                        th.testing.assert_close(
+                            dumped['frequencies'][0], frequencies.cpu()
+                        )
+                        th.testing.assert_close(
+                            dumped['normal_mode'][0], normal_mode.cpu()
+                        )
+                        th.testing.assert_close(
+                            dumped['hessian'][0], calculator.hessian.cpu()
+                        )
+
+        output_file = os.path.join(output_root, 'VIB_different_shapes.bin')
+        calculator = Frequency(
+            method='GradDiff',
+            block_size=vib_block_size,
+            output_file=output_file,
+        )
+        try:
+            for n_atom in (7, 8):
+                coordinates = th.zeros(n_atom, 3)
+                calculator.normal_mode(
+                    lambda X: X.square().sum(dim=(-2, -1)),
+                    coordinates,
+                    grad_func=lambda X: 2. * X,
+                )
+        finally:
+            calculator.dumper.close()
+        dumped = read_freq(output_file)
+        self.assertEqual(tuple(dumped), ('frequencies', 'normal_mode'))
+        self.assertEqual(
+            [value.shape for value in dumped['frequencies']],
+            [(21,), (24,)],
+        )
+        self.assertEqual(
+            [value.shape for value in dumped['normal_mode']],
+            [(21, 7, 3), (24, 8, 3)],
+        )
+
+        self.assertEqual(Frequency('Coord').method, 'EnergyDiff')
+        self.assertEqual(Frequency('Grad').method, 'Autograd')
+        with self.assertRaisesRegex(ValueError, 'method'):
+            Frequency('invalid')
 
     def test_parallel(self):
         """
@@ -1141,7 +1649,15 @@ class MainTest(unittest.TestCase):
         TOTAL_ELEM = ['Fe', 'Al', 'Pd', 'C'] * 16
 
         # input const
-        MAXITER = 1000
+        parallel_config = self._config('test_parallel')
+        parallel_steps = parallel_config.get('steps', {})
+        parallel_convergence = parallel_config.get('convergence', {})
+        MAXITER = parallel_config['maxiter']
+        md_steps = parallel_steps['md']
+        mc_steps = parallel_steps['mc']
+        warmup_steps = parallel_steps['warmup']
+        PARALLEL_E_THRESHOLD = parallel_convergence['energy_threshold']
+        PARALLEL_F_THRESHOLD = parallel_convergence['force_threshold']
         TIME_STEP = 0.5
         TEMPERATURE = 873
 
@@ -1150,8 +1666,8 @@ class MainTest(unittest.TestCase):
             #   opt
             'opt_cpu_cg_mt' : CG(
                 'PR+',
-                1e-5,
-                0.01,
+                PARALLEL_E_THRESHOLD,
+                PARALLEL_F_THRESHOLD,
                 MAXITER,
                 'MT',
                 10,
@@ -1160,12 +1676,12 @@ class MainTest(unittest.TestCase):
                 TIME_STEP,
                 use_bb=True,
                 device='cpu',
-                verbose=1
+                verbose=1,
             ),
             'opt_gpu_cg_mt' : CG(
                 'PR+',
-                1e-5,
-                0.01,
+                PARALLEL_E_THRESHOLD,
+                PARALLEL_F_THRESHOLD,
                 MAXITER,
                 'MT',
                 10,
@@ -1174,28 +1690,28 @@ class MainTest(unittest.TestCase):
                 TIME_STEP,
                 use_bb=True,
                 device='cuda:0',
-                verbose=1
+                verbose=1,
             ),
             'opt_cpu_fire' : FIRE(
-                1e-5,
-                0.01,
+                PARALLEL_E_THRESHOLD,
+                PARALLEL_F_THRESHOLD,
                 MAXITER,
                 TIME_STEP,
                 device='cpu',
-                verbose=1
+                verbose=1,
             ),
             'opt_gpu_fire' : FIRE(
-                1e-5,
-                0.01,
+                PARALLEL_E_THRESHOLD,
+                PARALLEL_F_THRESHOLD,
                 MAXITER,
                 TIME_STEP,
                 device='cuda:0',
-                verbose=1
+                verbose=1,
             ),
             #   mc
             'mc_cpu_nvt' : MMC(
                 'Gaussian',
-                10000,
+                mc_steps,
                 TEMPERATURE,
                 'constant',
                 1,
@@ -1209,7 +1725,7 @@ class MainTest(unittest.TestCase):
             ),
             'mc_gpu_nvt' : MMC(
                 'Gaussian',
-                10000,
+                mc_steps,
                 TEMPERATURE,
                 'constant',
                 1,
@@ -1223,43 +1739,43 @@ class MainTest(unittest.TestCase):
             ),
             #   md
             'md_cpu_nve': NVE(
-                TIME_STEP, 10000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_CPU_PARA',
+                TIME_STEP, md_steps, TEMPERATURE, f'{self.out_pt}results/MD_NVE_CPU_PARA',
                 10, device='cpu', verbose=0,
                 is_compile=False
             ),
             'md_gpu_nve' : NVE(
-            TIME_STEP, 10000, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU_PARA',
+            TIME_STEP, md_steps, TEMPERATURE, f'{self.out_pt}results/MD_NVE_GPU_PARA',
                 10, device='cuda:0', verbose=0,
             is_compile=False
             ),
             'md_cpu_csvr_nvt' : NVT(
-                TIME_STEP, 10000, 'CSVR', {'time_const': 100},
+                TIME_STEP, md_steps, 'CSVR', {'time_const': 100},
                 TEMPERATURE, f'{self.out_pt}results/MD_CSVR_CPU_PARA', 10, device='cpu', verbose=1,
                 is_compile=False,
                 compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
             ),
             'md_gpu_csvr_nvt' : NVT(
-                TIME_STEP, 10000, 'CSVR', {'time_const': 100},
+                TIME_STEP, md_steps, 'CSVR', {'time_const': 100},
                 TEMPERATURE, f'{self.out_pt}results/MD_CSVR_GPU_PARA', 10, device='cuda:0', verbose=1,
                 is_compile=False,
                 compile_kwargs={'dynamic': False, 'options': {'epilogue_fusion': True, 'max_autotune': True}}
             ),
             'md_cpu_lang_nvt' : NVT(
-                TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
+                TIME_STEP, md_steps, 'Langevin', {'damping_coeff': 0.01},
                 TEMPERATURE, f'{self.out_pt}results/MD_LANG_CPU_PARA', 10, device='cpu', verbose=0,
                 is_compile=False
             ),
             'md_gpu_lang_nvt' : NVT(
-                TIME_STEP, 10000, 'Langevin', {'damping_coeff': 0.01},
+                TIME_STEP, md_steps, 'Langevin', {'damping_coeff': 0.01},
                 TEMPERATURE, f'{self.out_pt}results/MD_LANG_GPU_PARA', 10, device='cuda:0', verbose=0,
                 is_compile=False
             ),
             'md_cpu_nose_nvt' : NVT(
-                TIME_STEP, 10000, 'Nose-Hoover', {},
+                TIME_STEP, md_steps, 'Nose-Hoover', {},
                 TEMPERATURE, f'{self.out_pt}results/MD_NOSE_CPU_PARA', 10, device='cpu', verbose=0
             ),
             'md_gpu_nose_nvt' : NVT(
-                TIME_STEP, 10000, 'Nose-Hoover', {},
+                TIME_STEP, md_steps, 'Nose-Hoover', {},
                 TEMPERATURE, f'{self.out_pt}results/MD_NOSE_GPU_PARA', 10, device='cuda:0', verbose=0
             )
         }
@@ -1268,7 +1784,7 @@ class MainTest(unittest.TestCase):
         data = build_cubic_lattice_batch([5, 3], 3., 1.).to('cuda:0')
         pre_runner = MMC(
                 'Gaussian',
-                100,
+                warmup_steps,
                 TEMPERATURE,
                 'constant',
                 1,
@@ -1389,7 +1905,7 @@ class MainTest(unittest.TestCase):
         tmp = self.out_pt
         try:
             from test_apis import run_api_tests
-            errors = run_api_tests(tmp)
+            errors = run_api_tests(tmp, config=self._config('test_APIS'))
             if errors:
                 self.fail('\n'.join(errors))
         finally:

@@ -4,37 +4,43 @@
 #  File: input_stub.py
 #  Environment: Python 3.12
 from typing import Any
+import copy
 
 # The parameter dictionary in the format:
 # key: (value, type, description)
 CONFIG_STUB = {
     "TASK": ("MD", str, "task name. Options: 'OPT', 'TS', 'VIB', 'NEB', 'MD', 'CMD', 'MC'"),
-    "START": (1, int, "0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights"),
+    "START": (0, int, "0: from scratch; 1: load checkpoint from LOAD_CHK_FILE_PATH; 2: only load model parameters/weights"),
     "VERBOSE": (1, int, "verbosity level for log output"),
-    "DEVICE": ("cuda:0", str, "the device on which the task would run"),
-    "BATCH_SIZE": (16, int, "the batch size of input data during calculation"),
+    "DEVICE": ("cpu", str, "the device on which the task would run"),
+    "BATCH_SIZE": (1, int, "the batch size of input data during calculation"),
 
     # I/O configs
     "LOAD_CHK_FILE_PATH": ("your/model/checkpoint/file/path", str, "path of model checkpoint to load"),
+    "OUTPUT_ROOT": ("./output", str, "root directory that owns task outputs"),
     "OUTPUT_PATH": ("your/log/output/path", str, "path to save logs"),
     "OUTPUT_POSTFIX": ("your_logfile_suffix", str, "suffix for log file name"),
     "PREDICTIONS_SAVE_FILE": ("your/model/predictions/save/path", str, "path of saving predictions"),
     "STRICT_LOAD": (True, bool, "whether to strictly load model parameter"),
     "REDIRECT": (True, bool, "whether output training logs to OUTPUT_PATH or directly print on screen"),
     "SAVE_PREDICTIONS": (True, bool, "only for predictions. Whether output predictions to a dump file"),
-    "DATA_TYPE": ("BS", str, "Data type. Options: 'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD'"),
+    "DATA_TYPE": ("BS", str, "Data type. Options: 'POSCAR', 'OUTCAR', 'CIF', 'ASE_TRAJ', 'BS', 'OPT', 'MD', 'MC'"),
     "DATA_PATH": ("/your/data/path", str, "path of data used for calculation. If training, it is viewed as the training set"),
     "DATA_NAME_SELECTOR": (".*$", str, "regular expression to select data names. Only matched names will be loaded"),
     "FSDATA_PATH": ("your/final/state/data/path", str, "path for final state data, used for calculations requiring both initial and final states, e.g., CI-NEB"),
     "DISPDATA_PATH": ("your/displacement/data/path", str, "path for displacement data, used for calculations requiring initial guess of a direction, e.g., Dimer"),
     "VAL_SET_PATH": ("your/validation/set/path", str, "path for validation set, used for training that requires validation data"),
     "VAL_SPLIT_RATIO": (0.1, float, "ratio of validation set in the total dataset. Ignored if VAL_SET_PATH is provided"),
-    "DATA_LOADER_KWARGS": ({}, dict, "other keyword arguments for data loader"),
+    "DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader"),
+    "DATA_LOADER_KWARGS": ({}, dict, "keyword arguments for the API DataLoader"),
     "IS_SHUFFLE": (False, bool, "whether to randomly shuffle dataset before calculating"),
 
     # Training
     "TRAIN": {
         "EPOCH": (10, int, "number of training epochs"),
+        "SAVE_CHK": (True, bool, "whether to save checkpoints during training."),
+        "CHK_SAVE_PATH": ("./output/chk", str, "directory used to save training checkpoints"),
+        "CHK_SAVE_POSTFIX": ("your_saved_chk_file_suffix", str, "postfix of checkpoint file name."),
         "VAL_BATCH_SIZE": (20, int, "batch size for validation. default is the same as BATCH_SIZE"),
         "VAL_PER_STEP": (100, int, "validate every VAL_PER_STEP steps. step = BATCH_SIZE * ACCUMULATE_STEP"),
         "VAL_IF_TRN_LOSS_BELOW": (1e5, float, "only validating after training loss < VAL_IF_TRN_LOSS_BELOW"),
@@ -66,13 +72,13 @@ CONFIG_STUB = {
     # Relaxation
     "RELAXATION": {
         "ALGO": ("FIRE", str, "optimization algorithm. Options: CG, BFGS, FIRE"),
-        "ITER_SCHEME": ("PR+", str, "conjugate gradient iteration scheme. Only for ALGO=CG. Options: 'PR+', 'FR', 'PR', 'WYL'"),
+        "ITER_SCHEME": ("PR+", str, "conjugate gradient iteration scheme. Only for ALGO=CG. Options: 'PR+', 'FR', 'SD'"),
         "E_THRES": (1e4, float, "threshold of energy difference for convergence"),
         "F_THRES": (0.05, float, "threshold of max force for convergence"),
         "MAXITER": (300, int, "maximum number of iterations"),
         "STEPLENGTH": (0.5, float, "initial step length"),
         "USE_BB": (True, bool, "whether to use Barzilai-Borwein I steplength as initial steplength"),
-        "LINESEARCH": ("B", str, "line search method. 'Backtrack' with Armijo's condition, 'Wolfe' for weak Wolfe condition, 'Exact' for exact linear search"),
+        "LINESEARCH": ("B", str, "line search method. Options: 'Backtrack'/'B', 'Wolfe'/'W'/'MT', 'EXACT', 'None'/'N'"),
         "LINESEARCH_MAXITER": (8, int, "maximum iterations of line search per outer iteration"),
         "LINESEARCH_THRES": (0.02, float, "threshold for exact line search"),
         "LINESEARCH_FACTOR": (0.5, float, "shrinkage factor for backtracking"),
@@ -95,9 +101,10 @@ CONFIG_STUB = {
 
     # Vibration analyses
     "VIBRATION": {
-        "METHOD": ("Coord", str, "method for vibration analysis. 'Coord' for finite difference, 'Grad' for auto-grad"),
+        "METHOD": ("EnergyDiff", str, "Hessian method: EnergyDiff, GradDiff, or Autograd"),
         "BLOCK_SIZE": (1, int, "block size for tensor/vectorize parallelization"),
         "DELTA": (0.01, float, "finite difference length for Hessian-vector product"),
+        "SAVE_HESSIAN": (False, bool, "whether to dump the Hessian with vibration results"),
     },
 
     # NEB transition state
@@ -125,16 +132,53 @@ CONFIG_STUB = {
         "MAX_STEP": (100, int, "total number of MD steps. Total time = TIME_STEP * MAX_STEP"),
         "T_INIT": (298.15, float, "initial temperature. Unit: K. For NVE, used to generate random initial velocities"),
         "OUTPUT_COORDS_PER_STEP": (1, int, "frequency of outputting atom coordinates. If verbose=3, velocities also output"),
+
+        "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
+        "N_IMAGES": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
+        "CONSTR_THRESHOLD": (1.e-5, float, "The threshold of constraints violated"),
+        "REQUIRE_FIXMAN": ("auto", str, "`auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually"),
         "CONSTRAINTS_FILE": ("./constraints.py", str, "path to constraints function file"),
         "CONSTRAINTS_FUNC": ("func", str, "name of constraints function in CONSTRAINTS_FILE"),
+        "CONSTRAINTS_VAL_FUNC": (None, str, "optional name of constr_val(t) or constr_val(t, c0) in CONSTRAINTS_FILE, where c0 is constr_func(X_init).  `null` keeps the initial-value default"),
         "REQUIRE_GRAD": (False, bool, "whether to toggle on auto-gradient during calculation"),
     },
 
+    # Monte Carlo
+    "MC": {
+        "TYPE": ("Metropolis", str, "Monte Carlo type. Currently supported: Metropolis"),
+        "ITER_SCHEME": ("Gaussian", str, "coordinate proposal distribution. Options: Gaussian, Cauchy, Uniform"),
+        "COORDINATE_UPDATE_PARAM": (0.2, float, "scale of coordinate proposals"),
+        "MAXITER": (10000, int, "number of Monte Carlo iterations"),
+        "T_INIT": (298.15, float, "initial temperature"),
+        "T_SCHEME": ("constant", str, "temperature scheme. Options: constant, linear, exponential, log, fast"),
+        "T_UPDATE_FREQ": (1, int, "frequency of temperature updates"),
+        "T_SCHEME_PARAM": (0.0, float, "parameter passed to the temperature scheme"),
+        "OUTPUT_COORDS_PER_STEP": (1, int, "frequency of writing coordinates"),
+        "MOVE_TO_CENTER_FREQ": (20, int, "frequency of moving structures to their center"),
+    },
+
     # Model configs
+    "MODEL_TYPE": ("pyg", str, "Model path: pyg, pyg_multi, mace, vasp, or custom"),
     "MODEL_FILE": ("your/model/file/path/template_model.py", str, "path to model definition file"),
     "MODEL_NAME": ("YourModel", str, "name of the model class in MODEL_FILE"),
     "MODEL_CONFIG": {
         "hyperparameter1": ("xxx", Any, "Model hyperparameter"),
         "hyperparameter2": ("xxx", Any, "Model hyperparameter"),
     },
+    "MODEL_WRAPPER_CONFIG": {},
+    "MODEL_WRAPPER_FILE": (None, str, "path to custom model wrapper source file"),
+    "MODEL_WRAPPER_NAME": (None, str, "name of custom model wrapper in MODEL_WRAPPER_FILE"),
 }
+
+def apply_runtime_defaults(stub: dict[str, Any] = CONFIG_STUB) -> dict[str, Any]:
+    """Synchronize editable values with API defaults when the CLI is used.
+
+    The import is intentionally delayed because ``api._io`` imports the CLI
+    logging helpers while the package is being initialized.
+    """
+    from BUCToolkit.api._io import CONFIG_DEFAULTS
+    for key, default in CONFIG_DEFAULTS.items():
+        value = stub.get(key)
+        if isinstance(value, tuple) and len(value) == 3:
+            stub[key] = (copy.deepcopy(default), value[1], value[2])
+    return stub

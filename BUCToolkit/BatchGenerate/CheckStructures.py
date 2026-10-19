@@ -183,12 +183,12 @@ class CheckStructures:
                 bott_mask = np.abs(coo[:, -1] - np.min(centers)) < smoothness_threshold
                 surf_coo = coo[surf_mask]
                 bott_coo = coo[bott_mask]
-                if surf_check_method == ('ConnectedGraph' or 'C'):
+                if surf_check_method in ('ConnectedGraph', 'C'):
                     n_sub_surf = self._spectrum_clustering(surf_coo, r_cutoff=r_cutoff)
                     n_sub_bott = self._spectrum_clustering(bott_coo, r_cutoff=r_cutoff)
                     if (n_sub_surf > 1) or (n_sub_bott > 1):
                         mask[i] = False
-                elif surf_check_method == ('MinDistance'or 'M'):
+                elif surf_check_method in ('MinDistance', 'M'):
                     surf_dist = np.linalg.norm(surf_coo[:, None] - surf_coo[None, :], axis=-1) + (r_cutoff + 10.) * np.eye(len(surf_coo))  # exclude the diag.
                     bott_dist = np.linalg.norm(bott_coo[:, None] - bott_coo[None, :], axis=-1) + (r_cutoff + 10.) * np.eye(len(bott_coo))
                     if (not np.all(np.sum(surf_dist < r_cutoff, axis=-1))) or (not np.all(np.sum(bott_dist < r_cutoff, axis=-1))):

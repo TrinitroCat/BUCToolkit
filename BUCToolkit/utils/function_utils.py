@@ -113,11 +113,35 @@ class _BaseWrapper(ABC):
     def eval(self):
         """
         wrap the `eval` method of wrapped model. If the wrapped model has not `eval` method, simply passed.
-        Returns: None
+        Returns: self
 
         """
         if hasattr(self._model, 'eval') and callable(self._model.eval):
             self._model.eval()
+        return self
+
+    def load_state_dict(self, *args, **kwargs):
+        """Forward checkpoint loading when the wrapped object supports it.
+
+        Wrappers around external numerical engines do not have trainable
+        parameters. They silently ignore checkpoint requests so API code can
+        use one lifecycle protocol for neural and non-neural models.
+        """
+        method = getattr(self._model, 'load_state_dict', None)
+        if callable(method):
+            return method(*args, **kwargs)
+        return None
+
+    def requires_grad_(self, *args, **kwargs):
+        """Forward ``requires_grad_`` when the wrapped object supports it.
+
+        Returns:
+            This wrapper, matching :class:`torch.nn.Module` chaining semantics.
+        """
+        method = getattr(self._model, 'requires_grad_', None)
+        if callable(method):
+            method(*args, **kwargs)
+        return self
 
 
 def preload_func(func: Callable, device: Any) -> Callable:
