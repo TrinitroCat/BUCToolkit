@@ -18,7 +18,14 @@ from torch import nn
 
 from BUCToolkit.utils.index_ops import index_reduce
 from ._BaseMD import _BaseMD
-from .fused_ops.utils import KernelLauncher
+from .fused_ops.utils import (
+    DEFAULT_REDUCTION_BLOCK,
+    ELEMENTWISE_CANDIDATES,
+    KernelLauncher,
+    REDUCTION_CANDIDATES,
+    autotune_block_size,
+    resolve_block_sizes,
+)
 from .fused_ops.VelocityVerlet import velocity_verlet_1_kernel, velocity_verlet_2_kernel
 from .fused_ops.thermostats import (
     csvr_alpha_kernel,
@@ -52,10 +59,11 @@ class NVT(_BaseMD):
     """
 
     __slots__ = (
-        'inv_m', '_alpha', '_randn', '_sigma', '_p_iota', '_smass',
+        'inv_m', '_alpha', '_sigma', '_p_iota', '_smass',
         '_free_degree', '_ek_target', '_n_batch', '_n_chunk', '_n_elem',
         '_is_irregular', '_batch_starts', '_sqrt_c', '_one_sub_c',
         '_epsK', '_target_kT', '_scalar_dtype',
+        '_block_size', '_reduction_block', '_rng_seed', '_rng_step',
         '_vv1', '_vv2', '_csvr_alpha', '_vr_scale', '_scale',
         '_langevin', '_nose_half', '_nose_reduce', '_nose_throttle',
     )
@@ -170,7 +178,9 @@ class NVT(_BaseMD):
         # Here build the Triton kernel
         fused_scheme = self._build_fused_scheme(batch_indices, X, masses)
         if fused_scheme is not None:
+            if self.verbose > 0: self.logger.info(f"JIT compiled fused kernels are used...")
             return fused_scheme
+
         return eager_scheme
 
     def initialize(
@@ -593,13 +603,19 @@ class NVT(_BaseMD):
         if X.device.type != 'cuda' or X.dtype not in (th.float16, th.float32, th.float64):
             return None
         scalar_dtype = th.float32 if X.dtype == th.float16 else X.dtype
+        # Validate the block-size environment before the fused fallback so an
+        # invalid value raises instead of silently selecting the eager path.
+        block_size, reduction_block = resolve_block_sizes(self.max_step)
         try:
+            # Section: cache the run's fixed layout and dtype facts
             self.inv_m = (1.0 / masses).contiguous()
             self._scalar_dtype = scalar_dtype
             self._n_batch = self.free_degree.numel()
             self._n_elem = X.numel()
             self._is_irregular = batch_indices is not None
             if self._is_irregular:
+                # Irregular batches are concatenated in the flat buffer.  The
+                # cumulative starts delimit each batch in the reduction kernels.
                 offsets = [0] + list(accumulate(batch_indices))
                 self._batch_starts = th.as_tensor(
                     [_ * X.shape[2] for _ in offsets],
@@ -608,99 +624,154 @@ class NVT(_BaseMD):
                 ).contiguous()
                 self._n_chunk = 0
             else:
+                # Regular batches have a uniform flat length n_atom * 3.
                 self._batch_starts = None
                 self._n_chunk = X.shape[1] * X.shape[2]
             self._free_degree = self.free_degree.to(scalar_dtype).contiguous()
             self._ek_target = self.EK_TARGET.to(scalar_dtype).contiguous()
-            grid = (triton.cdiv(self._n_elem, 256),)
+
+            # Section: block-size autotuning
+            # 'auto' and a long run leave block_size/reduction_block as None;
+            # tune representative kernels once before creating the launchers.
             X_dummy = th.zeros_like(X)
             V_dummy = th.zeros_like(X)
             F_dummy = th.zeros_like(X)
             mask_dummy = th.ones_like(X)
+            if block_size is None:
+                block_size = autotune_block_size(
+                    velocity_verlet_1_kernel,
+                    ELEMENTWISE_CANDIDATES,
+                    lambda bs: (
+                        X_dummy, V_dummy, F_dummy, self.inv_m,
+                        self.time_step, self._n_elem, bs,
+                    ),
+                    lambda bs: (triton.cdiv(self._n_elem, bs),),
+                )
+            self._block_size = block_size
+            grid = (triton.cdiv(self._n_elem, block_size),)
+
+            # Section: in-kernel RNG state
+            # The seed is a runtime scalar and the counter advances once per
+            # MD step; do_not_specialize in the kernels avoids recompilation.
+            self._rng_seed = int(th.initial_seed()) & 0x7FFFFFFF  # 0x7FFFFFFF is a mask to enforce the symbol positive. Ensure seed \in [0, 2^31 - 1]
+            self._rng_step = 0
+
             batch_scatter = self.batch_scatter if self._is_irregular else V_dummy
             batch_starts = self._batch_starts if self._is_irregular else V_dummy
             if self.thermostat == "Langevin":
                 self._sigma = (
                     th.sqrt((8314.462618 * self.T_init * (1 - self.alpha ** 2)) / masses) * 1e-5
                 ).to(X.dtype).contiguous()
+                self._reduction_block = DEFAULT_REDUCTION_BLOCK
                 self._langevin = KernelLauncher(langevin_middle_kernel, grid)
                 self._vv2 = KernelLauncher(velocity_verlet_2_kernel, grid)
                 self._langevin(
                     X_dummy, V_dummy, F_dummy, self.inv_m, self._sigma,
-                    th.zeros_like(X), self.alpha,
+                    0, self.alpha,
                     self.half_time_step_const, self.raw_half_time_step_const,
-                    self._n_elem, 256,
+                    self._n_elem, block_size,
                 )
                 self._vv2(
                     V_dummy, F_dummy, mask_dummy, self.inv_m,
-                    self.time_step, self._n_elem, 256,
+                    self.time_step, self._n_elem, block_size,
                 )
                 return self.__Langevin_fused
             if self.thermostat == "VR":
                 self._alpha = th.empty(self._n_batch, dtype=scalar_dtype, device=X.device)
+                self._reduction_block = DEFAULT_REDUCTION_BLOCK
                 self._vv1 = KernelLauncher(velocity_verlet_1_kernel, grid)
                 self._vv2 = KernelLauncher(velocity_verlet_2_kernel, grid)
                 self._vr_scale = KernelLauncher(vr_scale_kernel, grid)
                 Ek_dummy = th.ones(self._n_batch, dtype=X.dtype, device=X.device)
-                self._vv1(X_dummy, V_dummy, F_dummy, self.inv_m, self.time_step, self._n_elem, 256)
-                self._vv2(V_dummy, F_dummy, mask_dummy, self.inv_m, self.time_step, self._n_elem, 256)
+                self._vv1(X_dummy, V_dummy, F_dummy, self.inv_m, self.time_step, self._n_elem, block_size)
+                self._vv2(V_dummy, F_dummy, mask_dummy, self.inv_m, self.time_step, self._n_elem, block_size)
                 self._vr_scale(
                     V_dummy, Ek_dummy, self._ek_target, batch_scatter,
-                    self._n_chunk, self._n_elem, self._is_irregular, 256,
+                    self._n_chunk, self._n_elem, self._is_irregular, block_size,
                 )
                 return self.__VR_fused
             if self.thermostat == "CSVR":
                 self._alpha = th.empty(self._n_batch, dtype=scalar_dtype, device=X.device)
-                self._randn = th.empty(self._n_batch, dtype=scalar_dtype, device=X.device)
                 self._sqrt_c = float(self.sqrt_c)
                 self._one_sub_c = float(self.one_sub_c)
                 self._epsK = float(self.epsK)
+                # The chi-square draw keeps the external torch sampler; its
+                # non-integer degrees of freedom have no direct Triton kernel.
+                chi2 = th.zeros(self._n_batch, dtype=scalar_dtype, device=X.device)
+                if reduction_block is None:
+                    reduction_block = autotune_block_size(
+                        csvr_alpha_kernel,
+                        REDUCTION_CANDIDATES,
+                        lambda bs: (
+                            V_dummy, masses, self._alpha, self._ek_target,
+                            self._free_degree, chi2, batch_starts,
+                            self._n_chunk, self._sqrt_c, self._one_sub_c, self._epsK,
+                            0, self._is_irregular, bs,
+                        ),
+                        lambda bs: (self._n_batch,),
+                        num_warps=8,
+                    )
+                self._reduction_block = reduction_block
                 self._vv1 = KernelLauncher(velocity_verlet_1_kernel, grid)
                 self._vv2 = KernelLauncher(velocity_verlet_2_kernel, grid)
                 self._csvr_alpha = KernelLauncher(csvr_alpha_kernel, (self._n_batch,), num_warps=8)
                 self._scale = KernelLauncher(scale_by_batch_kernel, grid)
-                randn = th.zeros(self._n_batch, dtype=scalar_dtype, device=X.device)
-                chi2 = th.zeros(self._n_batch, dtype=scalar_dtype, device=X.device)
-                self._vv1(X_dummy, V_dummy, F_dummy, self.inv_m, self.time_step, self._n_elem, 256)
-                self._vv2(V_dummy, F_dummy, mask_dummy, self.inv_m, self.time_step, self._n_elem, 256)
+                # warm-up and check for passability
+                self._vv1(X_dummy, V_dummy, F_dummy, self.inv_m, self.time_step, self._n_elem, block_size)
+                self._vv2(V_dummy, F_dummy, mask_dummy, self.inv_m, self.time_step, self._n_elem, block_size)
                 self._csvr_alpha(
                     V_dummy, masses, self._alpha, self._ek_target,
-                    self._free_degree, randn, chi2, batch_starts,
+                    self._free_degree, chi2, batch_starts,
                     self._n_chunk, self._sqrt_c, self._one_sub_c, self._epsK,
-                    self._is_irregular, 1024,
-                )
+                    0, self._is_irregular, reduction_block,
+                )  # seed set to 0 just for warm-up and check
                 self._scale(
                     V_dummy, self._alpha, batch_scatter,
-                    self._n_chunk, self._n_elem, self._is_irregular, 256,
+                    self._n_chunk, self._n_elem, self._is_irregular, block_size,
                 )
                 return self.__CSVR_fused
             if self.thermostat == "Nose-Hoover":
                 self._p_iota = self.p_iota.reshape(-1)
                 self._smass = self.smass.reshape(-1).expand(self._n_batch).to(scalar_dtype).contiguous()
                 self._target_kT = float(self.T_init * 8.617333262145e-5)
+                p_iota = self._p_iota.clone()
+                if reduction_block is None:
+                    reduction_block = autotune_block_size(
+                        nose_reduce_update_kernel,
+                        REDUCTION_CANDIDATES,
+                        lambda bs: (
+                            V_dummy, masses, p_iota, self._free_degree, self._smass,
+                            batch_starts, self._n_chunk,
+                            self.raw_half_time_step_const, self._target_kT,
+                            self._is_irregular, bs,
+                        ),
+                        lambda bs: (self._n_batch,),
+                        num_warps=8,
+                    )
+                self._reduction_block = reduction_block
                 self._nose_half = KernelLauncher(nose_half_step_1_kernel, grid)
                 self._vv2 = KernelLauncher(velocity_verlet_2_kernel, grid)
                 self._nose_reduce = KernelLauncher(nose_reduce_update_kernel, (self._n_batch,), num_warps=8)
                 self._nose_throttle = KernelLauncher(nose_throttle_reduce_update_kernel, (self._n_batch,), num_warps=8)
-                p_iota = self._p_iota.clone()
+                # warm-up and check for passability
                 self._nose_half(
                     X_dummy, V_dummy, F_dummy, self.inv_m, p_iota,
                     batch_scatter, self.time_step,
                     self.half_time_step_const, self.raw_half_time_step_const,
-                    self._n_chunk, self._n_elem, self._is_irregular, 256,
+                    self._n_chunk, self._n_elem, self._is_irregular, block_size,
                 )
                 self._nose_reduce(
                     V_dummy, masses, p_iota, self._free_degree, self._smass,
                     batch_starts, self._n_chunk,
                     self.raw_half_time_step_const, self._target_kT,
-                    self._is_irregular, 1024,
+                    self._is_irregular, reduction_block,
                 )
-                self._vv2(V_dummy, F_dummy, mask_dummy, self.inv_m, self.time_step, self._n_elem, 256)
+                self._vv2(V_dummy, F_dummy, mask_dummy, self.inv_m, self.time_step, self._n_elem, block_size)
                 self._nose_throttle(
                     V_dummy, masses, p_iota, self._free_degree, self._smass,
                     batch_starts, self._n_chunk,
                     self.raw_half_time_step_const, self._target_kT,
-                    self._is_irregular, 1024,
+                    self._is_irregular, reduction_block,
                 )
                 return self.__NoseHoover_fused
         except Exception as e:
@@ -714,11 +785,14 @@ class NVT(_BaseMD):
     ) -> None:
         """Advance one BAOAB Langevin step with the fused kernels."""
         with th.no_grad():
-            noise = th.randn_like(s.V)
+            # Every step gets a fresh seed; the white noise itself is generated
+            # inside the kernel, so no external randn_like launch is needed.
+            seed = self._rng_seed + self._rng_step
+            self._rng_step += 1
             self._langevin(
-                s.X, s.V, s.Force, self.inv_m, self._sigma, noise,
+                s.X, s.V, s.Force, self.inv_m, self._sigma, seed,
                 self.alpha, self.half_time_step_const,
-                self.raw_half_time_step_const, self._n_elem, 256,
+                self.raw_half_time_step_const, self._n_elem, self._block_size,
             )
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
@@ -726,7 +800,10 @@ class NVT(_BaseMD):
                 self.require_grad, is_grad_func_contain_y,
             )
             Forces = Forces.contiguous()
-            self._vv2(s.V, Forces, atom_masks, self.inv_m, self.time_step, self._n_elem, 256)
+            self._vv2(
+                s.V, Forces, atom_masks, self.inv_m,
+                self.time_step, self._n_elem, self._block_size,
+            )
             s.Energy = Energy
             s.Force = Forces
 
@@ -737,18 +814,24 @@ class NVT(_BaseMD):
     ) -> None:
         """Advance one VR step with the fused kernels."""
         with th.no_grad():
-            self._vv1(s.X, s.V, s.Force, self.inv_m, self.time_step, self._n_elem, 256)
+            self._vv1(
+                s.X, s.V, s.Force, self.inv_m,
+                self.time_step, self._n_elem, self._block_size,
+            )
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
                 grad_func_, grad_func_args, grad_func_kwargs,
                 self.require_grad, is_grad_func_contain_y,
             )
             Forces = Forces.contiguous()
-            self._vv2(s.V, Forces, atom_masks, self.inv_m, self.time_step, self._n_elem, 256)
+            self._vv2(
+                s.V, Forces, atom_masks, self.inv_m,
+                self.time_step, self._n_elem, self._block_size,
+            )
             self._vr_scale(
                 s.V, self.Ek, self._ek_target,
                 self.batch_scatter if self._is_irregular else s.V,
-                self._n_chunk, self._n_elem, self._is_irregular, 256,
+                self._n_chunk, self._n_elem, self._is_irregular, self._block_size,
             )
             s.Energy = Energy
             s.Force = Forces
@@ -760,27 +843,36 @@ class NVT(_BaseMD):
     ) -> None:
         """Advance one CSVR step with the fused kernels."""
         with th.no_grad():
-            self._vv1(s.X, s.V, s.Force, self.inv_m, self.time_step, self._n_elem, 256)
+            seed = self._rng_seed + self._rng_step
+            self._rng_step += 1
+            self._vv1(
+                s.X, s.V, s.Force, self.inv_m,
+                self.time_step, self._n_elem, self._block_size,
+            )
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
                 grad_func_, grad_func_args, grad_func_kwargs,
                 self.require_grad, is_grad_func_contain_y,
             )
             Forces = Forces.contiguous()
-            self._vv2(s.V, Forces, atom_masks, self.inv_m, self.time_step, self._n_elem, 256)
-            self._randn.normal_()
+            self._vv2(
+                s.V, Forces, atom_masks, self.inv_m,
+                self.time_step, self._n_elem, self._block_size,
+            )
+            # The normal draw is in-kernel; the chi-square keeps the external
+            # torch sampler to preserve the exact target distribution.
             chi2 = self._chi2_dist.sample().to(self._scalar_dtype)
             self._csvr_alpha(
                 s.V, masses, self._alpha, self._ek_target,
-                self._free_degree, self._randn, chi2,
+                self._free_degree, chi2,
                 self._batch_starts if self._is_irregular else s.V,
                 self._n_chunk, self._sqrt_c, self._one_sub_c, self._epsK,
-                self._is_irregular, 1024,
+                seed, self._is_irregular, self._reduction_block,
             )
             self._scale(
                 s.V, self._alpha,
                 self.batch_scatter if self._is_irregular else s.V,
-                self._n_chunk, self._n_elem, self._is_irregular, 256,
+                self._n_chunk, self._n_elem, self._is_irregular, self._block_size,
             )
             s.Energy = Energy
             s.Force = Forces
@@ -797,7 +889,7 @@ class NVT(_BaseMD):
                 self.batch_scatter if self._is_irregular else s.V,
                 self.time_step,
                 self.half_time_step_const, self.raw_half_time_step_const,
-                self._n_chunk, self._n_elem, self._is_irregular, 256,
+                self._n_chunk, self._n_elem, self._is_irregular, self._block_size,
             )
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
@@ -809,14 +901,17 @@ class NVT(_BaseMD):
                 s.V, masses, self._p_iota, self._free_degree, self._smass,
                 self._batch_starts if self._is_irregular else s.V,
                 self._n_chunk, self.raw_half_time_step_const, self._target_kT,
-                self._is_irregular, 1024,
+                self._is_irregular, self._reduction_block,
             )
-            self._vv2(s.V, Forces, atom_masks, self.inv_m, self.time_step, self._n_elem, 256)
+            self._vv2(
+                s.V, Forces, atom_masks, self.inv_m,
+                self.time_step, self._n_elem, self._block_size,
+            )
             self._nose_throttle(
                 s.V, masses, self._p_iota, self._free_degree, self._smass,
                 self._batch_starts if self._is_irregular else s.V,
                 self._n_chunk, self.raw_half_time_step_const, self._target_kT,
-                self._is_irregular, 1024,
+                self._is_irregular, self._reduction_block,
             )
             s.Energy = Energy
             s.Force = Forces

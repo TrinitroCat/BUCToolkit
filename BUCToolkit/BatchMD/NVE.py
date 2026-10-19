@@ -15,7 +15,12 @@ import torch.nn as nn
 import triton
 
 from ._BaseMD import _BaseMD
-from .fused_ops.utils import KernelLauncher
+from .fused_ops.utils import (
+    ELEMENTWISE_CANDIDATES,
+    KernelLauncher,
+    autotune_block_size,
+    resolve_block_sizes,
+)
 from .fused_ops.VelocityVerlet import velocity_verlet_1_kernel, velocity_verlet_2_kernel
 
 
@@ -39,7 +44,7 @@ class NVE(_BaseMD):
 
     """
 
-    __slots__ = ('inv_m', '_vv1', '_vv2', '_n_elem')
+    __slots__ = ('inv_m', '_vv1', '_vv2', '_n_elem', '_block_size')
 
     def __init__(
             self,
@@ -121,19 +126,43 @@ class NVE(_BaseMD):
         self.inv_m = (1.0 / masses).contiguous()
         self._updateXV = self._updateXV_eager
         if X.device.type == 'cuda' and X.dtype in (th.float16, th.float32, th.float64):
+            # Section: resolve the run's block size
+            # This happens before the fused fallback so an invalid environment
+            # value raises instead of silently selecting the eager path.
+            block_size, _ = resolve_block_sizes(self.max_step)
             try:
                 n_elem = X.numel()
-                grid = (triton.cdiv(n_elem, 256),)
-                self._n_elem = n_elem
-                self._vv1 = KernelLauncher(velocity_verlet_1_kernel, grid)
-                self._vv2 = KernelLauncher(velocity_verlet_2_kernel, grid)
                 X_dummy = th.zeros_like(X)
                 V_dummy = th.zeros_like(X)
                 F_dummy = th.zeros_like(X)
                 mask_dummy = th.ones_like(X)
-                self._vv1(X_dummy, V_dummy, F_dummy, self.inv_m, self.time_step, n_elem, 256)
-                self._vv2(V_dummy, F_dummy, mask_dummy, self.inv_m, self.time_step, n_elem, 256)
+                if block_size is None:
+                    block_size = autotune_block_size(
+                        velocity_verlet_1_kernel,
+                        ELEMENTWISE_CANDIDATES,
+                        lambda bs: (
+                            X_dummy, V_dummy, F_dummy, self.inv_m,
+                            self.time_step, n_elem, bs,
+                        ),
+                        lambda bs: (triton.cdiv(n_elem, bs),),
+                    )
+                self._block_size = block_size
+                self._n_elem = n_elem
+                grid = (triton.cdiv(n_elem, block_size),)
+
+                # Section: create launchers and warm up their specializations
+                self._vv1 = KernelLauncher(velocity_verlet_1_kernel, grid)
+                self._vv2 = KernelLauncher(velocity_verlet_2_kernel, grid)
+                self._vv1(
+                    X_dummy, V_dummy, F_dummy, self.inv_m,
+                    self.time_step, n_elem, block_size,
+                )
+                self._vv2(
+                    V_dummy, F_dummy, mask_dummy, self.inv_m,
+                    self.time_step, n_elem, block_size,
+                )
                 self._updateXV = self._updateXV_fused
+                if self.verbose > 0: self.logger.info(f"JIT compiled fused kernels are used...")
             except Exception as e:
                 self._warn_fused_fallback(e)
 
@@ -188,7 +217,7 @@ class NVE(_BaseMD):
             None. The state container is updated in place.
         """
         with th.no_grad():
-            self._vv1(s.X, s.V, s.Force, self.inv_m, self.time_step, self._n_elem, 256)
+            self._vv1(s.X, s.V, s.Force, self.inv_m, self.time_step, self._n_elem, self._block_size)
             Energy, Forces = self._calc_EF(
                 s.X,
                 func,
@@ -201,7 +230,7 @@ class NVE(_BaseMD):
                 is_grad_func_contain_y,
             )
             Forces = Forces.contiguous()
-            self._vv2(s.V, Forces, atom_masks, self.inv_m, self.time_step, self._n_elem, 256)
+            self._vv2(s.V, Forces, atom_masks, self.inv_m, self.time_step, self._n_elem, self._block_size)
             s.Energy = Energy
             s.Force = Forces
 

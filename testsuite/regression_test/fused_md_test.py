@@ -25,19 +25,38 @@ import time
 import unittest
 from importlib.util import find_spec
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 import torch as th
 
-from BUCToolkit.BatchMD import NVE as EagerNVE, NVT as EagerNVT
-from BUCToolkit.BatchMD.fused_NVE import NVE as FusedNVE
-from BUCToolkit.BatchMD.fused_NVT import NVT as FusedNVT
+from BUCToolkit.BatchMD import NVE as FusedNVE, NVT as FusedNVT
+
+
+class EagerNVE(FusedNVE):
+    """The merged engine with its eager velocity-Verlet update forced."""
+
+    def initialize(self, *args, **kwargs) -> None:
+        """Initialize the fused engine, then select the eager update."""
+        super().initialize(*args, **kwargs)
+        self._updateXV = self._updateXV_eager
+
+
+class EagerNVT(FusedNVT):
+    """The merged engine with its eager thermostat paths forced."""
+
+    def _build_fused_scheme(self, *args, **kwargs):
+        """Skip the fused scheme so ``update_scheme`` stays eager."""
+        return None
 from BUCToolkit.BatchStructures import read_md_traj
 from BUCToolkit.utils._Element_info import MASS
 from BUCToolkit.api._io import _Model_Wrapper_pyg
-from _toy_harmonic_potential import SimpleSpringPotential, build_cubic_lattice_batch
+try:
+    from .._toy_harmonic_potential import SimpleSpringPotential, build_cubic_lattice_batch
+except ImportError:  # direct ``python fused_md_test.py`` execution
+    from _toy_harmonic_potential import SimpleSpringPotential, build_cubic_lattice_batch
 
 HAS_TRITON = find_spec('triton') is not None
 HAS_CUDA = th.cuda.is_available()
@@ -55,6 +74,25 @@ if HAS_TRITON:
         vv1,
         vv2,
     )
+
+    import triton
+    import triton.language as tl
+
+    @triton.jit(do_not_specialize=['seed'])
+    def _randn_probe(seed, out_ptr, n: tl.constexpr, BLOCK: tl.constexpr):
+        """Write the ``tl.randn`` stream of ``(seed, flat offset)``."""
+        pid = tl.program_id(0)
+        offsets = pid * BLOCK + tl.arange(0, BLOCK)
+        offsets = tl.max_contiguous(offsets, BLOCK)
+        mask = offsets < n
+        noise = tl.randn(seed, offsets)
+        tl.store(out_ptr + offsets, noise, mask=mask)
+
+    def _randn(seed: int, n: int) -> th.Tensor:
+        """Return the same normal stream the fused kernels generate."""
+        out = th.empty(n, dtype=th.float32, device=DEVICE)
+        _randn_probe[(triton.cdiv(n, 256),)](seed, out, n, 256)
+        return out
 
 DEVICE = 'cuda'
 ELEMENTS = ['H']
@@ -342,13 +380,16 @@ class FusedMDTest(unittest.TestCase):
             )
 
             free_degree = th.randint(3, 30, (n_batch,), device=DEVICE).float()
-            randn = th.randn(n_batch, device=DEVICE)
+            seed = 12345
+            # The normal draw is generated inside the kernel; reproduce the
+            # same (seed, offset) stream with the probe for the reference.
+            randn = _randn(seed, n_batch)
             chi2 = th.rand(n_batch, device=DEVICE) * 10
             sqrt_c, one_sub_c, epsK = 0.99, 0.01, 1e-12
             alpha = th.empty(n_batch, device=DEVICE)
             csvr_alpha(
-                V2, masses, alpha, ek_target, free_degree, randn, chi2,
-                batch_starts, n_chunk, sqrt_c, one_sub_c, epsK, is_irregular,
+                V2, masses, alpha, ek_target, free_degree, chi2,
+                batch_starts, n_chunk, sqrt_c, one_sub_c, epsK, seed, is_irregular,
             )
             ek_ref = 0.5 * self._per_batch_sum(masses * V2 ** 2, layout, atom_ranges) * EK_CONST
             K = th.clamp(ek_ref, min=epsK)
@@ -360,10 +401,12 @@ class FusedMDTest(unittest.TestCase):
             )
 
             sigma = th.rand_like(X) * 0.01
-            noise = th.randn_like(X)
+            seed = 54321
+            # Same in-kernel (seed, flat offset) stream as langevin_middle.
+            noise = _randn(seed, n_elem).view_as(X)
             X5, V5 = X.clone(), V.clone()
             alpha_l = 0.98
-            langevin_middle(X5, V5, F, inv_M, sigma, noise, alpha_l, half_step, raw_half)
+            langevin_middle(X5, V5, F, inv_M, sigma, seed, alpha_l, half_step, raw_half)
             V0 = V + half_step * F * inv_M
             V_ref = alpha_l * V0 + sigma * noise
             X_ref = X + raw_half * V0 + raw_half * V_ref
@@ -421,7 +464,10 @@ class FusedMDTest(unittest.TestCase):
     @unittest.skipUnless(FUSED_AVAILABLE, 'CUDA and Triton are required')
     def test_nvt_parity(self):
         """The fused NVT thermostats must match the eager thermostats."""
-        for thermostat in ('VR', 'Langevin', 'CSVR', 'Nose-Hoover'):
+        # Langevin and CSVR draw random numbers inside the kernels, so their
+        # trajectories are not bitwise comparable with the eager torch RNG;
+        # they are validated statistically in test_nvt_statistics.
+        for thermostat in ('VR', 'Nose-Hoover'):
             for layout in ('regular', 'irregular'):
                 fused = self._run(
                     FusedNVT, thermostat, 40, layout, tag=f'parity_{thermostat}',
@@ -479,8 +525,10 @@ class FusedMDTest(unittest.TestCase):
             os.remove(output_file)
             return trajectory
 
+        # Stochastic thermostats are validated statistically in
+        # test_nvt_statistics; their in-kernel RNG is not torch's RNG.
         cases = [(None, EagerNVE, FusedNVE)]
-        cases += [(_t, EagerNVT, FusedNVT) for _t in ('VR', 'Langevin', 'CSVR', 'Nose-Hoover')]
+        cases += [(_t, EagerNVT, FusedNVT) for _t in ('VR', 'Nose-Hoover')]
         for thermostat, eager_cls, fused_cls in cases:
             # The Nose-Hoover reduction order differs between the fused and
             # eager implementations; its chaotic dynamics amplifies the tiny
