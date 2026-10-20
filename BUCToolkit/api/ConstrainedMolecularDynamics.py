@@ -14,7 +14,7 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.BatchMD import ConstrNVT, ConstrNVE
+from BUCToolkit.BatchMD import NVE, NVT
 from BUCToolkit.utils._CheckModules import check_module
 from ._io import _BaseAPI, _LoggingEnd, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
@@ -75,7 +75,7 @@ class ConstrainedMolecularDynamics(_BaseAPI):
         self.constr_func = None
         self.constr_val = None
 
-        __ensembles = {'NVE': ConstrNVE, 'NVT': ConstrNVT}
+        __ensembles = {'NVE': NVE, 'NVT': NVT}
         if self.MD is None:
             raise RuntimeError('Molecular Dynamics Configs was NOT Set.')
         self.MD: Dict

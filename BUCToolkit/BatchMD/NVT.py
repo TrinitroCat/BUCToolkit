@@ -12,30 +12,39 @@ import math
 from itertools import accumulate
 
 import numpy as np
-import triton
 import torch as th
 from torch import nn
 
 from BUCToolkit.utils.index_ops import index_reduce
+from BUCToolkit.utils._CheckModules import check_module
 from ._BaseMD import _BaseMD
-from .fused_ops.utils import (
-    DEFAULT_REDUCTION_BLOCK,
-    ELEMENTWISE_CANDIDATES,
-    KernelLauncher,
-    REDUCTION_CANDIDATES,
-    autotune_block_size,
-    resolve_block_sizes,
-)
-from .fused_ops.VelocityVerlet import velocity_verlet_1_kernel, velocity_verlet_2_kernel
-from .fused_ops.thermostats import (
-    csvr_alpha_kernel,
-    langevin_middle_kernel,
-    nose_half_step_1_kernel,
-    nose_reduce_update_kernel,
-    nose_throttle_reduce_update_kernel,
-    scale_by_batch_kernel,
-    vr_scale_kernel,
-)
+from .utils import _initialize_constr, _resolve_constrained_quantities
+from BUCToolkit.Bases.BaseConstraints import BaseConstr
+
+# Triton is optional. CPU-only installations use the eager thermostats, and
+# CUDA runs without Triton also fall back to the eager thermostats.
+triton = check_module('triton')
+_HAS_TRITON = triton is not None
+
+if _HAS_TRITON:
+    from .fused_ops.utils import (
+        DEFAULT_REDUCTION_BLOCK,
+        ELEMENTWISE_CANDIDATES,
+        KernelLauncher,
+        REDUCTION_CANDIDATES,
+        autotune_block_size,
+        resolve_block_sizes,
+    )
+    from .fused_ops.VelocityVerlet import velocity_verlet_1_kernel, velocity_verlet_2_kernel
+    from .fused_ops.thermostats import (
+        csvr_alpha_kernel,
+        langevin_middle_kernel,
+        nose_half_step_1_kernel,
+        nose_reduce_update_kernel,
+        nose_throttle_reduce_update_kernel,
+        scale_by_batch_kernel,
+        vr_scale_kernel,
+    )
 
 
 class NVT(_BaseMD):
@@ -54,6 +63,14 @@ class NVT(_BaseMD):
             2 or greater also prints selected arrays.
         is_compile: whether to use jit to compile integrator or not.
         compile_kwargs: keyword arguments passed to compile. Only work when is_compile is True.
+        dump_quantities: names written to the binary trajectory.
+        log_quantities: names printed in the text log.
+        constr_func: constraint function; None runs plain NVT, otherwise the
+            constraint component is enabled.
+        constr_val: constant constraint target or a time-dependent callback.
+        constr_threshold: absolute constraint error tolerance.
+        require_fixman: whether the Fixman geometric force and Blue-Moon
+            weight are evaluated.
     Methods:
         run: run the NVT ensemble BatchMD.
     """
@@ -81,6 +98,12 @@ class NVT(_BaseMD):
             verbose: int = 2,
             is_compile: Literal['full', 'partial', 'no'] | bool = False,
             compile_kwargs: dict | None = None,
+            dump_quantities: Tuple[str, ...] | List[str] | None = None,
+            log_quantities: Tuple[str, ...] | List[str] | None = None,
+            constr_func: Callable[[th.Tensor], th.Tensor] | None = None,
+            constr_val: Callable[..., th.Tensor | Tuple[th.Tensor]] | th.Tensor | None = None,
+            constr_threshold: float = 1e-5,
+            require_fixman: bool = False,
     ) -> None:
         """
         Parameters:
@@ -94,7 +117,28 @@ class NVT(_BaseMD):
             device: device that program run on.
             verbose: print level. 0 is silent, 1 prints selected scalars only,
                 and 2 or greater also prints selected arrays.
+            dump_quantities: names written to the binary trajectory.
+            log_quantities: names printed in the text log.
+            constr_func: constraint function; None runs plain NVT, otherwise
+                the constraint component is enabled.
+            constr_val: constant constraint target or a time-dependent
+                callback.
+            constr_threshold: absolute constraint error tolerance.
+            require_fixman: whether the Fixman geometric force and Blue-Moon
+                weight are evaluated.
         """
+        is_constrained = constr_func is not None
+        if is_constrained:
+            self.ALLOWED_QUANTITIES = type(self).ALLOWED_QUANTITIES | {'Fc', 'G', 'w'}
+            dump_quantities, log_quantities = _resolve_constrained_quantities(
+                require_fixman, dump_quantities, log_quantities,
+            )
+            is_compile = False
+        else:
+            if dump_quantities is None:
+                dump_quantities = ('Energy', 'X', 'V', 'Force')
+            if log_quantities is None:
+                log_quantities = ('Energy', 'Ek', 'temperature', 'X', 'V')
         super().__init__(
             time_step,
             max_step,
@@ -104,7 +148,9 @@ class NVT(_BaseMD):
             device,
             verbose,
             is_compile,
-            compile_kwargs
+            compile_kwargs,
+            dump_quantities,
+            log_quantities,
         )
         __ENSEMBLES_DICT = {'Langevin': None, 'VR': None, 'Nose-Hoover': None, 'CSVR': None}
         if thermostat not in {'Langevin', 'Langevin_old', 'test', 'VR', 'CSVR', 'Nose-Hoover'}:
@@ -119,6 +165,21 @@ class NVT(_BaseMD):
         # CUDAGraph handles for full-loop capture (lazy-init on first step)
         self._graph_A = None
         self._graph_B = None
+        if is_constrained:
+            self._constr = BaseConstr(
+                constr_func,
+                constr_val,
+                constr_threshold,
+                require_fixman,
+                self.device,
+                self.verbose,
+            )
+            self._has_constr = True
+        elif (constr_val is not None or require_fixman) and self.verbose > 0:
+            self.logger.warning(
+                "The `constr_func` is None while `constr_val` is not None or `require_fixman`. "
+                "`constr_val` and `require_fixman` will be ignored. "
+            )
 
     def __resolve_update_scheme(self, batch_indices, X, masses) -> Callable:
         """
@@ -171,7 +232,7 @@ class NVT(_BaseMD):
             self._chi2_dist = th.distributions.chi2.Chi2(
                 df=th.clamp(self.free_degree.float() - 1.0, min=1.0)
             )
-            eager_scheme = self.__CSVR_cpu if self.device.type != 'cuda' else self.__CSVR_cuda
+            eager_scheme = self.__CSVR_cpu if (self.device.type != 'cuda' or self._has_constr) else self.__CSVR_cuda
         else:
             raise NotImplementedError("Unknown Thermostat Type.")
 
@@ -201,8 +262,89 @@ class NVT(_BaseMD):
             fixed_atom_tensor: Optional[th.Tensor] = None,
             is_fix_mass_center: bool = False
     ) -> None:
+        """Initialize one run with or without constraints.
+
+        Args:
+            func: Potential-energy callable.
+            X: Coordinates of the run.
+            Element_list: Element symbols or atomic numbers per atom.
+            masses: Atomic masses broadcast to ``X``, or ``None`` for unit
+                masses.
+            V_init: Initial velocities, or ``None``.
+            grad_func: Force/gradient callable, or ``None``.
+            func_args: Positional arguments forwarded to ``func``.
+            func_kwargs: Keyword arguments forwarded to ``func``.
+            grad_func_args: Positional arguments forwarded to ``grad_func``.
+            grad_func_kwargs: Keyword arguments forwarded to ``grad_func``.
+            is_grad_func_contain_y: Whether the gradient callable accepts the
+                energy output.
+            require_grad: Whether the potential is evaluated with autograd.
+            batch_indices: Split sizes of an irregular batch, or ``None``.
+            fixed_atom_tensor: Indices of fixed atoms, or ``None``.
+            is_fix_mass_center: Whether the mass center is fixed.
+
+        Returns:
+            None.
+        """
         if masses is None:
             masses = th.ones_like(X)
+        if self._has_constr:
+            _initialize_constr(
+                self, func, X, Element_list, masses, V_init,
+                grad_func, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+                is_grad_func_contain_y, require_grad, batch_indices,
+                fixed_atom_tensor, is_fix_mass_center,
+            )
+        else:
+            self._initialize_no_constr(
+                func, X, Element_list, masses, V_init,
+                grad_func, func_args, func_kwargs, grad_func_args, grad_func_kwargs,
+                is_grad_func_contain_y, require_grad, batch_indices,
+                fixed_atom_tensor, is_fix_mass_center,
+            )
+
+    def _initialize_no_constr(
+            self,
+            func: Any | nn.Module,
+            X: th.Tensor,
+            Element_list: List[List[str]] | List[List[int]],
+            masses: th.Tensor,
+            V_init: th.Tensor | None = None,
+            grad_func: Any | nn.Module = None,
+            func_args: Sequence = tuple(),
+            func_kwargs: Dict | None = None,
+            grad_func_args: Sequence = tuple(),
+            grad_func_kwargs: Dict | None = None,
+            is_grad_func_contain_y: bool = True,
+            require_grad: bool = False,
+            batch_indices: List[int] | Tuple[int, ...] | th.Tensor | np.ndarray | None = None,
+            fixed_atom_tensor: Optional[th.Tensor] = None,
+            is_fix_mass_center: bool = False
+    ) -> None:
+        """Resolve the thermostat scheme and prepare the update implementation.
+
+        Args:
+            func: Potential-energy callable.
+            X: Coordinates of the run.
+            Element_list: Element symbols or atomic numbers per atom.
+            masses: Atomic masses broadcast to ``X``.
+            V_init: Initial velocities, or ``None``.
+            grad_func: Force/gradient callable, or ``None``.
+            func_args: Positional arguments forwarded to ``func``.
+            func_kwargs: Keyword arguments forwarded to ``func``.
+            grad_func_args: Positional arguments forwarded to ``grad_func``.
+            grad_func_kwargs: Keyword arguments forwarded to ``grad_func``.
+            is_grad_func_contain_y: Whether the gradient callable accepts the
+                energy output.
+            require_grad: Whether the potential is evaluated with autograd.
+            batch_indices: Split sizes of an irregular batch, or ``None``.
+            fixed_atom_tensor: Indices of fixed atoms, or ``None``.
+            is_fix_mass_center: Whether the mass center is fixed.
+
+        Returns:
+            None. ``self.update_scheme`` is bound to the fused or eager
+            implementation and the CSVR buffers are allocated.
+        """
         self.update_scheme = self.__resolve_update_scheme(batch_indices, X, masses)
         # Pre-allocate random buffers for CSVR thermostat
         if self.thermostat == 'CSVR':
@@ -246,6 +388,9 @@ class NVT(_BaseMD):
         raw_half_time_step_const = self.raw_half_time_step_const
         with th.no_grad():
             alpha = self.alpha
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             # half-step
             s.V.addcdiv_(s.Force, masses, value=half_time_step_const)
             s.X.add_(s.V, alpha=raw_half_time_step_const)
@@ -253,6 +398,11 @@ class NVT(_BaseMD):
             s.V.mul_(alpha)
             s.V.add_(th.sqrt((8314.462618 * self.T_init * (1 - alpha ** 2)) / masses) * 1e-5 * th.randn_like(s.V))
             s.X.add_(s.V, alpha=raw_half_time_step_const)
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
             # update energy & forces
             Energy, Forces = self._calc_EF(
                 s.X,
@@ -268,6 +418,8 @@ class NVT(_BaseMD):
             Forces.mul_(atom_masks)
             # the rest half-step
             s.V.addcdiv_(Forces, masses, value=half_time_step_const)
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             s.Energy = Energy
             s.Force = Forces
 
@@ -292,8 +444,16 @@ class NVT(_BaseMD):
         # NVE Step
         s.X = s.X.detach()
         with th.no_grad():
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             s.V.addcdiv_(s.Force, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
             s.X.add_(s.V, alpha=self.time_step)
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
             Energy, Forces = self._calc_EF(
                 s.X,
                 func,
@@ -308,6 +468,8 @@ class NVT(_BaseMD):
             Forces.mul_(atom_masks)
 
             s.V.addcdiv_(Forces, masses, value=0.5 * self.time_step * 9.64853329045427e-3)
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             if batch_indices is not None:
                 # Rescaling factor
                 alpha = th.sqrt(self.EK_TARGET / self.Ek).unsqueeze(-1).unsqueeze(-1)
@@ -369,8 +531,16 @@ class NVT(_BaseMD):
         half_dt = self.half_time_step_const
         time_step = self.time_step
         with th.no_grad():
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             s.V.addcdiv_(s.Force, masses, value=half_dt)
             s.X.add_(s.V, alpha=time_step)
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
                 grad_func_, grad_func_args, grad_func_kwargs,
@@ -378,6 +548,8 @@ class NVT(_BaseMD):
             )
             Forces.mul_(atom_masks)
             s.V.addcdiv_(Forces, masses, value=half_dt)
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             if self.Ek_T_graph is not None:
                 self.Ek_T_graph.replay()
             else:
@@ -475,6 +647,9 @@ class NVT(_BaseMD):
         smass = self.smass
         # Main update
         with th.no_grad():
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             if batch_indices is not None:
                 _iota = self.p_iota[:, self.batch_scatter, :]
             else:
@@ -482,6 +657,11 @@ class NVT(_BaseMD):
             s.V.addcdiv_(s.Force, masses, value=half_time_step_const)
             s.V.mul_(th.exp(- _iota * raw_half_time_step_const))
             s.X.add_(s.V, alpha=time_step)
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
 
             Energy, Forces = self._calc_EF(
                 s.X,
@@ -535,6 +715,8 @@ class NVT(_BaseMD):
                     th.sub(reduced_Ek, self.long_free_degree, alpha=self.T_init * 8.617333262145e-5),
                     smass, value=raw_half_time_step_const
                 )
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             s.Energy = Energy
             s.Force = Forces
 
@@ -600,7 +782,7 @@ class NVT(_BaseMD):
             The bound fused update method, or None when the fused path is
             unavailable or its warm-up fails.
         """
-        if X.device.type != 'cuda' or X.dtype not in (th.float16, th.float32, th.float64):
+        if not _HAS_TRITON or X.device.type != 'cuda' or X.dtype not in (th.float16, th.float32, th.float64):
             return None
         scalar_dtype = th.float32 if X.dtype == th.float16 else X.dtype
         # Validate the block-size environment before the fused fallback so an
@@ -785,6 +967,9 @@ class NVT(_BaseMD):
     ) -> None:
         """Advance one BAOAB Langevin step with the fused kernels."""
         with th.no_grad():
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             # Every step gets a fresh seed; the white noise itself is generated
             # inside the kernel, so no external randn_like launch is needed.
             seed = self._rng_seed + self._rng_step
@@ -794,6 +979,11 @@ class NVT(_BaseMD):
                 self.alpha, self.half_time_step_const,
                 self.raw_half_time_step_const, self._n_elem, self._block_size,
             )
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
                 grad_func_, grad_func_args, grad_func_kwargs,
@@ -804,6 +994,8 @@ class NVT(_BaseMD):
                 s.V, Forces, atom_masks, self.inv_m,
                 self.time_step, self._n_elem, self._block_size,
             )
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             s.Energy = Energy
             s.Force = Forces
 
@@ -814,10 +1006,18 @@ class NVT(_BaseMD):
     ) -> None:
         """Advance one VR step with the fused kernels."""
         with th.no_grad():
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             self._vv1(
                 s.X, s.V, s.Force, self.inv_m,
                 self.time_step, self._n_elem, self._block_size,
             )
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
                 grad_func_, grad_func_args, grad_func_kwargs,
@@ -828,6 +1028,8 @@ class NVT(_BaseMD):
                 s.V, Forces, atom_masks, self.inv_m,
                 self.time_step, self._n_elem, self._block_size,
             )
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             self._vr_scale(
                 s.V, self.Ek, self._ek_target,
                 self.batch_scatter if self._is_irregular else s.V,
@@ -843,12 +1045,20 @@ class NVT(_BaseMD):
     ) -> None:
         """Advance one CSVR step with the fused kernels."""
         with th.no_grad():
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             seed = self._rng_seed + self._rng_step
             self._rng_step += 1
             self._vv1(
                 s.X, s.V, s.Force, self.inv_m,
                 self.time_step, self._n_elem, self._block_size,
             )
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
                 grad_func_, grad_func_args, grad_func_kwargs,
@@ -859,6 +1069,8 @@ class NVT(_BaseMD):
                 s.V, Forces, atom_masks, self.inv_m,
                 self.time_step, self._n_elem, self._block_size,
             )
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             # The normal draw is in-kernel; the chi-square keeps the external
             # torch sampler to preserve the exact target distribution.
             chi2 = self._chi2_dist.sample().to(self._scalar_dtype)
@@ -884,6 +1096,9 @@ class NVT(_BaseMD):
     ) -> None:
         """Advance one Nose-Hoover step with the fused kernels."""
         with th.no_grad():
+            X_init = None
+            if self._has_constr:
+                X_init = s.X.clone()
             self._nose_half(
                 s.X, s.V, s.Force, self.inv_m, self._p_iota,
                 self.batch_scatter if self._is_irregular else s.V,
@@ -891,6 +1106,11 @@ class NVT(_BaseMD):
                 self.half_time_step_const, self.raw_half_time_step_const,
                 self._n_chunk, self._n_elem, self._is_irregular, self._block_size,
             )
+            if self._has_constr:
+                Fc, G, w = self._constr._project2(s.X, X_init, s.V)
+                s.Fc = Fc
+                if G is not None: s.G = G
+                if w is not None: s.w = w
             Energy, Forces = self._calc_EF(
                 s.X, func, func_args, func_kwargs,
                 grad_func_, grad_func_args, grad_func_kwargs,
@@ -913,5 +1133,7 @@ class NVT(_BaseMD):
                 self._n_chunk, self.raw_half_time_step_const, self._target_kT,
                 self._is_irregular, self._reduction_block,
             )
+            if self._has_constr:
+                self._constr._project1(s.V, s.X, out=s.V)
             s.Energy = Energy
             s.Force = Forces

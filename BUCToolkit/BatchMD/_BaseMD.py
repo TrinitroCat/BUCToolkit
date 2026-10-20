@@ -35,7 +35,7 @@ class _BaseMD(BaseMotion):
 
     #: Quantities known to the MD framework that may appear in
     #: ``dump_quantities`` / ``log_quantities``.  Subclasses extend
-    #: this set (e.g. ``_BaseConstrMD`` adds ``'Fc'``, ``'G'``, ``'w'``).
+    #: this set (e.g. the constrained wrappers add ``'Fc'``, ``'G'``, ``'w'``).
     ALLOWED_QUANTITIES: Set[str] = {'Energy', 'Ek', 'temperature', 'X', 'V', 'Force'}
 
     __slots__ = [
@@ -49,6 +49,8 @@ class _BaseMD(BaseMotion):
         'Ek',
         'p_iota',
         'require_Ek_update',
+        '_constr',
+        '_has_constr',
         #'__dict__'
     ]
 
@@ -139,6 +141,12 @@ class _BaseMD(BaseMotion):
         self.free_degree = None  # (n_batch, ), freedom degree tensor
         self.require_grad = None
 
+        # Optional constraint component (a BaseConstr) and the boolean that
+        # guards its two projection points in every step body. Plain MD keeps
+        # both empty and never allocates a constraint solver.
+        self._constr = None
+        self._has_constr = False
+
         # An inner attr that lets the dumper do not close after `self.run`.
         # It is used to contiguously run within a loop.
         # Adv. API `MolecularDynamics` turns on it.
@@ -148,9 +156,10 @@ class _BaseMD(BaseMotion):
         super().__init__(output_file)
         self.init_logger('Main.MD')
         self._setup_register_vars(dump_quantities, log_quantities)
-        if (self.output_file is None) and self.output_structures_per_step < self.max_step + 1:
+        if (self.verbose > 0) and (self.output_file is None) and (self.output_structures_per_step < self.max_step + 1):
             self.logger.warning(
-                f"WARNING: Here is no output file while output structure per {self.output_structures_per_step} is required."
+                f"WARNING: Here is no output file "
+                f"while output structure per {self.output_structures_per_step} is required."
             )
 
     def _reduce_Ek_T(self, batch_size_tensor, masses, V):
@@ -854,6 +863,10 @@ class _BaseMD(BaseMotion):
             if is_fix_mass_center and (i % move_to_center_freq == 0):
                 mass_center_graph.replay()
             self.time_now += self.time_step
+            # Keep the constraint-stage clock identical to the MD clock. The
+            # projection then stages its target at ``time_now + time_step``.
+            if self._has_constr:
+                self._constr.time_now = self.time_now
 
     def __run_on_cpu(
             self,
@@ -1164,6 +1177,9 @@ class _BaseMD(BaseMotion):
                         s.X.add_(dX)
                         s.V.add_(dV)
                     self.time_now += self.time_step
+                    # Keep the constraint-stage clock identical to the MD clock.
+                    if self._has_constr:
+                        self._constr.time_now = self.time_now
                 if self.verbose > 0:
                     self.logger.info(f'MAIN LOOP DONE. Elapsed time: {time.perf_counter() - t_main_loop:>5.4f} s')
             finally:

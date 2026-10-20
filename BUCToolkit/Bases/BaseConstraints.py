@@ -26,16 +26,11 @@ class BaseConstr(BaseIO):
     It can be combined into any normal gradient-based algorithms by applying `project1` to gradient or any other tangent space vectors,
      and `project2` as a retraction mapping to coordinates or any other vectors on the manifold.
 
-     I strongly suggest that using combination with proxy instead of inheritance when it is applied in other class.
-     e.g., define following method in the class with aligning `self._constr = BaseConstr(...)` in the self.__init__ method.
-     ```python
-        def __getattr__(self, name):
-            if '_constr' in self.__dict__:
-                constr = self._constr
-                if hasattr(constr, name):
-                    return getattr(constr, name)
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-    ```
+     I strongly suggest composition instead of inheritance when BaseConstr is
+     embedded in another class: create the component as ``self._constr`` and
+     call its methods directly (for example ``self._constr._project2(...)``).
+     Do not reproduce a dynamic ``__getattr__`` proxy, which makes the host
+     class opaque to tooling and compilers.
 
     Args:
         constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k.
