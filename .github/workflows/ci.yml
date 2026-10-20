@@ -56,10 +56,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python-version: '3.11'
-            torch: '2.5.1'
-          - python-version: '3.11'
-            torch: 'latest'
           - python-version: '3.12'
             torch: '2.5.1'
           - python-version: '3.12'
