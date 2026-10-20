@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'dev-*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_VISIBLE_DEVICES: ""
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile Python sources
+        run: python -m compileall -q BUCToolkit testsuite
+
+      - name: Fetch pull-request base
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin "${{ github.base_ref }}"
+
+      - name: Check pull-request whitespace
+        if: github.event_name == 'pull_request'
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+  test:
+    name: test py${{ matrix.python-version }} torch${{ matrix.torch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.11'
+            torch: '2.5.1'
+          - python-version: '3.11'
+            torch: 'latest'
+          - python-version: '3.12'
+            torch: '2.5.1'
+          - python-version: '3.12'
+            torch: 'latest'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CPU PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ matrix.torch }}" = "latest" ]; then
+            python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          else
+            python -m pip install "torch==${{ matrix.torch }}" --index-url https://download.pytorch.org/whl/cpu
+          fi
+
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Check installed dependencies
+        run: python -m pip check
+
+      - name: Regression tests
+        run: python -m pytest -q --junitxml=reports/pytest.xml
+
+      - name: CPU smoke tests
+        working-directory: testsuite
+        run: |
+          python -m unittest \
+            fast_test.FastTest.test_IO \
+            fast_test.FastTest.test_APIS \
+            fast_test.FastTest.test_VIB -v
+
+      - name: Import and CLI smoke
+        run: |
+          python -c "import BUCToolkit; from BUCToolkit._version import __version__; print(__version__)"
+          buctoolkit --help > /dev/null
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-py${{ matrix.python-version }}-torch${{ matrix.torch }}
+          path: reports/pytest.xml
+          if-no-files-found: ignore
+
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Install wheel in a clean environment
+        run: |
+          python -m venv /tmp/wheel-smoke
+          /tmp/wheel-smoke/bin/python -m pip install --upgrade pip
+          /tmp/wheel-smoke/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          /tmp/wheel-smoke/bin/python -m pip install dist/*.whl
+          /tmp/wheel-smoke/bin/python -c "import BUCToolkit; from BUCToolkit._version import __version__; print(__version__)"
+          /tmp/wheel-smoke/bin/buctoolkit --help > /dev/null
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*

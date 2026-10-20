@@ -93,8 +93,16 @@ class ConstrainedFreeEnergyTest(unittest.TestCase):
             / (MASS['H'] * cls.VELOCITY_ENERGY_CONVERSION)
         ))
 
-    def _run_blue_moon(self, output_path: str) -> float:
-        """Run fixed-CV windows and return the integrated barrier."""
+    def _run_blue_moon(self, output_path: str, device: str) -> float:
+        """Run fixed-CV windows and return the integrated barrier.
+
+        Args:
+            output_path: Binary trajectory output path.
+            device: Device used by the constrained MD runner.
+
+        Return:
+            The Blue-Moon free-energy barrier in eV.
+        """
         th.manual_seed(1234)
         n_image = 7
         n_step = 3000
@@ -127,7 +135,7 @@ class ConstrainedFreeEnergyTest(unittest.TestCase):
             self.TEMPERATURE,
             output_path,
             2,
-            device='cuda:0',
+            device=device,
             verbose=2,
         )
         runner.run(
@@ -217,42 +225,53 @@ class ConstrainedFreeEnergyTest(unittest.TestCase):
 
     def test_known_barrier_with_blue_moon_and_jarzynski(self):
         """Both constrained-MD routes reproduce the same analytic barrier."""
+        devices = ['cpu']
+        if th.cuda.is_available():
+            devices.append('cuda:0')
+
+        exact_barrier = self.exact_barrier()
         with tempfile.TemporaryDirectory() as tempdir:
-            blue_moon_barrier = self._run_blue_moon(
-                f'{tempdir}/blue_moon.bin'
-            )
             jarzynski_barrier = self._run_jarzynski(
                 f'{tempdir}/jarzynski.bin'
             )
+            self.assertAlmostEqual(
+                jarzynski_barrier,
+                exact_barrier,
+                delta=0.018,
+                msg=(
+                    f'Jarzynski barrier {jarzynski_barrier} eV does not match '
+                    f'the exact barrier {exact_barrier} eV.'
+                ),
+            )
 
-        exact_barrier = self.exact_barrier()
-        self.assertAlmostEqual(
-            blue_moon_barrier,
-            exact_barrier,
-            delta=0.012,
-            msg=(
-                f'Blue-Moon barrier {blue_moon_barrier} eV does not match '
-                f'the exact barrier {exact_barrier} eV.'
-            ),
-        )
-        self.assertAlmostEqual(
-            jarzynski_barrier,
-            exact_barrier,
-            delta=0.018,
-            msg=(
-                f'Jarzynski barrier {jarzynski_barrier} eV does not match '
-                f'the exact barrier {exact_barrier} eV.'
-            ),
-        )
-        self.assertAlmostEqual(
-            blue_moon_barrier,
-            jarzynski_barrier,
-            delta=0.015,
-            msg=(
-                f'Blue-Moon and Jarzynski barriers differ: '
-                f'{blue_moon_barrier} versus {jarzynski_barrier} eV.'
-            ),
-        )
+            # The CPU route is mandatory; a CUDA route is validated in
+            # addition whenever a device is available.
+            for device in devices:
+                with self.subTest(device=device):
+                    blue_moon_barrier = self._run_blue_moon(
+                        f'{tempdir}/blue_moon_{device.replace(":", "_")}.bin',
+                        device,
+                    )
+                    self.assertAlmostEqual(
+                        blue_moon_barrier,
+                        exact_barrier,
+                        delta=0.012,
+                        msg=(
+                            f'Blue-Moon barrier {blue_moon_barrier} eV on '
+                            f'{device} does not match the exact barrier '
+                            f'{exact_barrier} eV.'
+                        ),
+                    )
+                    self.assertAlmostEqual(
+                        blue_moon_barrier,
+                        jarzynski_barrier,
+                        delta=0.015,
+                        msg=(
+                            f'Blue-Moon ({device}) and Jarzynski barriers '
+                            f'differ: {blue_moon_barrier} versus '
+                            f'{jarzynski_barrier} eV.'
+                        ),
+                    )
 
 
 if __name__ == '__main__':
