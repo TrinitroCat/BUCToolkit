@@ -44,7 +44,7 @@ Various tools capable of handling catalyst structure files and data formats for 
 
 Manuals will be completed soon. The current manuals can be found in [Manual](Manual/).
 
-Please note that the project is still a beta version and may change in the future.
+BUCToolkit 1.0.0 is the first stable release. See [CHANGELOG.md](CHANGELOG.md) for the main changes since the beta series.
 
 ## Installation
 ### Requirements
@@ -338,6 +338,7 @@ buctoolkit -i './input_file.inp'
 # or
 buctoolkit './input_file.inp'
 ```
+`bct` is a short alias of `buctoolkit` and launches the same command-line interface.
 Paths inside YAML input files are resolved relative to the input file's
 directory. Command-line paths passed to `-i`, `-o`, or `--convert` remain
 relative to the directory where the command is invoked.
@@ -347,8 +348,10 @@ The central source-checkout tests are available through the same CLI:
 ```shell
 buctoolkit --test main     # strict scientific checks
 buctoolkit --test fast     # short smoke checks
-buctoolkit --test profile  # fast checks with torch profiler reports
 ```
+
+The `profile` test mode is temporarily unavailable because `torch.profiler`
+perturbs CUDA-graph replay and the asynchronous custom kernels.
 
 Iteration counts and convergence tolerances are maintained in
 `testsuite/configs/main_test.yaml`; fast-mode overrides are in
@@ -407,7 +410,7 @@ user@host:/some/path$ buctoolkit
 |    BBBBBB   UUUUU   CCCCC     T     OOOOO   OOOOO  LLLLLLL K     K    II      T       |
 |                                                                                       |
 |                                                                                       |
-|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.          |
+|  BUCToolkit 1.0.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.        |
 +=======================================================================================+
    |_________________________________________________________________________________| 
   |___________________________________________________________________________________|

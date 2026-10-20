@@ -589,7 +589,7 @@ def main():
     group.add_argument(
         '--test',
         choices=('main', 'fast', 'profile'),
-        help='Run the central testsuite in main, fast, or profile mode.',
+        help='Run the central testsuite in main or fast mode. The profile mode is temporarily unavailable.',
         default=None,
     )
     parser.add_argument('input_path', nargs='?', help='Input YAML file (equivalent to --input).')
@@ -629,6 +629,11 @@ def main():
                 parser.error('`--test` cannot be combined with an input task, conversion, or output file.')
             input_file = args.input or args.input_path
             if args.test is not None:
+                if args.test == 'profile':
+                    raise SystemExit(
+                        'The `profile` test mode is temporarily unavailable because torch.profiler '
+                        'interferes with CUDA-graph replay and the asynchronous custom kernels.'
+                    )
                 repository_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
                 if not os.path.isdir(os.path.join(repository_root, 'testsuite')):
                     raise RuntimeError(

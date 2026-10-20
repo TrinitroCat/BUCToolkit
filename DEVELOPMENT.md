@@ -214,6 +214,13 @@ nontrivial methods.
 - Remote GitHub Actions is a lightweight gate only: it runs the CPU regression
   suite, the I/O/API/vibration smoke tests, and package-build checks. It does
   not replace local GPU or strict scientific validation.
+- The `fast` and `main` suites use soft numerical diagnostics: statistical or
+  convergence checks may print their values and continue. A green run means no
+  hard exception, not that every printed deviation is acceptable. Review the
+  printed OPT/TS/MD/MC values before declaring a change scientifically correct.
+- `buctoolkit --test profile` is temporarily unavailable because
+  `torch.profiler` perturbs CUDA-graph replay and the asynchronous custom
+  kernels. Do not use its reports for release decisions.
 - CPU-only installations do not require Triton. Install the optional extras
   required by the work, for example `pip install -e ".[test,mace,triton]"`.
   Tests for missing optional dependencies are skipped.

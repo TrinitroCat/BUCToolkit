@@ -13,6 +13,7 @@ The input functions of energy and forces have very flexible interfaces, and
 the most typical input functions are PyTorch-based **deep-learning models** (of molecular or crystal potentials).
 For these nn.Module objects, BUCToolkit also provided training and prediction APIs.
 """
+readme = "README.md"
 license = {text = "MIT"}
 authors = [
     {name = "Pu Pengxin", email = "buctoolkit@163.com"},
@@ -38,7 +39,7 @@ btvasp = "BUCToolkit.cli.main:main_btvasp"
 bckt_cli = "BUCToolkit.cli.__init__:run_base_cli"
 
 [project.optional-dependencies]
-dgl = ["dgl"]
+#dgl = ["dgl"]  # deprecated
 pyg = ["torch_geometric>=2.6.1"]
 prompt-toolkit = ["prompt-toolkit>=3.0.43"]
 mace = ["mace-torch", "e3nn"]

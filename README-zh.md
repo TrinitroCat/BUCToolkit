@@ -40,7 +40,7 @@ Python 函数（返回能量及其梯度，即力的相反数）。
 
 完整文档将陆续完成。当前手册可在 [Manual](Manual) 目录下找到。
 
-请注意，本项目目前仍处于测试版，未来可能发生变化。
+BUCToolkit 1.0.0 是首个正式版本。主要变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 安装
 
@@ -328,6 +328,8 @@ buctoolkit -i './input_file.inp'
 buctoolkit './input_file.inp'
 ```
 
+`bct` 是 `buctoolkit` 的短别名，启动相同的命令行界面。
+
 YAML 输入文件中的路径统一相对于输入文件所在目录解析；命令行参数 `-i`、
 `-o` 和 `--convert` 中的路径仍相对于命令执行时的当前目录解析。
 
@@ -336,8 +338,9 @@ YAML 输入文件中的路径统一相对于输入文件所在目录解析；命
 ```shell
 buctoolkit --test main     # 长时间测试, 严格科学正确性检查, 通过Virial定理检查MD/MC的统计力学性质
 buctoolkit --test fast     # 短步数 smoke 检查, 只检查代码通过性
-buctoolkit --test profile  # fast 测试并生成 torch profiler 报告
 ```
+
+`profile` 测试模式暂时不可用，因为 `torch.profiler` 会干扰 CUDA Graph 重放和异步自定义内核。
 
 迭代步数和收敛限统一维护在
 `testsuite/configs/main_test.yaml`，fast 模式的覆盖值在
@@ -391,7 +394,7 @@ user@host:/some/path$ buctoolkit
 |    BBBBBB   UUUUU   CCCCC     T     OOOOO   OOOOO  LLLLLLL K     K    II      T       |
 |                                                                                       |
 |                                                                                       |
-|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.          |
+|  BUCToolkit 1.0.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.        |
 +=======================================================================================+
    |_________________________________________________________________________________| 
   |___________________________________________________________________________________|

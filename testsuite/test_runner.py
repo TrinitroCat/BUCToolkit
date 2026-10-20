@@ -16,12 +16,14 @@ def build_test_suite(mode: str) -> unittest.TestSuite:
     """Build the requested central test suite.
 
     Args:
-        mode: One of ``main``, ``fast`` or ``profile``.
+        mode: One of ``main`` or ``fast``. The ``profile`` mode is currently
+            unavailable because the profiler perturbs CUDA-graph replay.
 
     Return:
         A unittest suite containing the selected central test class.
 
     Raises:
+        RuntimeError: If the requested mode is currently unavailable.
         ValueError: If ``mode`` is not supported.
     """
     if mode == "main":
@@ -33,9 +35,10 @@ def build_test_suite(mode: str) -> unittest.TestSuite:
 
         test_class = FastTest
     elif mode == "profile":
-        from test_profile import ProfileTest
-
-        test_class = ProfileTest
+        raise RuntimeError(
+            'The profile test mode is temporarily unavailable because torch.profiler '
+            'interferes with CUDA-graph replay and the asynchronous custom kernels.'
+        )
     else:
         raise ValueError(f"Unsupported central test mode: {mode!r}")
     return unittest.defaultTestLoader.loadTestsFromTestCase(test_class)
@@ -45,7 +48,8 @@ def run_test_suite(mode: str, verbosity: int = 2) -> unittest.TestResult:
     """Run one central test suite and return its unittest result.
 
     Args:
-        mode: One of ``main``, ``fast`` or ``profile``.
+        mode: One of ``main`` or ``fast``. The ``profile`` mode is currently
+            unavailable.
         verbosity: unittest runner verbosity.
 
     Return:
@@ -61,5 +65,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a BUCToolkit central test suite.")
     parser.add_argument("mode", choices=("main", "fast", "profile"))
     args = parser.parse_args()
-    result = run_test_suite(args.mode)
+    try:
+        result = run_test_suite(args.mode)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from None
     raise SystemExit(0 if result.wasSuccessful() else 1)

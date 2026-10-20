@@ -73,7 +73,9 @@ class Predictor(_BaseAPI):
                 name for name in sorted(data)
                 if isinstance(data[name], th.Tensor)
             ]
-            arrays = [data[name].numpy() for name in tensor_names]
+            # Predicted tensors may still carry a grad_fn; detach before the
+            # host-side NumPy conversion used by the asynchronous dumper.
+            arrays = [data[name].detach().numpy() for name in tensor_names]
             dumper.start_from_arrays(
                 1,
                 *arrays,
