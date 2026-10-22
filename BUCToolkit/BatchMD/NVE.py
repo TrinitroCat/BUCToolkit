@@ -136,12 +136,12 @@ class NVE(_BaseMD):
         )
         if is_constrained:
             self._constr = BaseConstr(
-                constr_func,
-                constr_val,
-                constr_threshold,
-                require_fixman,
-                self.device,
-                self.verbose,
+                constr_func=constr_func,
+                constr_val=constr_val,
+                constr_threshold=constr_threshold,
+                require_fixman=require_fixman,
+                device=self.device,
+                verbose=self.verbose,
             )
             self._has_constr = True
         elif (constr_val is not None or require_fixman) and self.verbose > 0:

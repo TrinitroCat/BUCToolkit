@@ -5,6 +5,7 @@
 #  Environment: Python 3.12
 import inspect
 import os
+import warnings
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
 import torch as th
@@ -18,6 +19,29 @@ from BUCToolkit.Bases.BaseMotion import BaseIO
 
 FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
 FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
+
+
+def _report_solver_failure(message: str, verbose: int, logger: Any) -> None:
+    """
+    Report a constraint projection that did not converge.
+
+    Args:
+        message: Human-readable description of the failure.
+        verbose: Diagnostic verbosity of the constraint solver.
+        logger: Logger used when ``verbose > 0``.
+
+    Return: None.
+
+    Note:
+        At ``verbose == 0`` the message is emitted as a ``RuntimeWarning`` so
+        that it still reaches stderr after the standard logger has been
+        redirected to a file; at ``verbose > 0`` it goes to ``logger`` at
+        WARNING level. The default warning filter reports each call site once.
+    """
+    if verbose > 0:
+        logger.warning(message)
+    else:
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
 
 
 class BaseConstr(BaseIO):
@@ -43,6 +67,11 @@ class BaseConstr(BaseIO):
             value of `constr_func(X_init)` computed at initialization.
         constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
         require_fixman: bool, whether to calculate fixman
+        retraction_solver: Literal['newton', 'damped'], the position projection solver.
+            ``'newton'`` takes the default full Newton step; ``'damped'`` adds
+            a backtracking line search that is slower but can recover from an
+            ill-conditioned normal-space Jacobian. The solver is bound at
+            construction; reassign ``_retraction_map_solver`` to switch later.
         device: str|torch.device, device that program rum on.
         verbose: print level. 0 is silent, 1 permits scalar diagnostics only,
             and 2 or greater also permits array diagnostics.
@@ -77,11 +106,16 @@ class BaseConstr(BaseIO):
             constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
             constr_threshold: float = 1e-5,
             require_fixman: bool = False,
+            retraction_solver: Literal['newton', 'damped'] = 'newton',
             device: str | th.device = 'cpu',
             verbose: int = 0,
     ):
         if constr_func is None:
             constr_func = lambda X: th.tensor(0.)
+        if retraction_solver not in ('newton', 'damped'):
+            raise ValueError(
+                f"`retraction_solver` must be 'newton' or 'damped', but got {retraction_solver!r}."
+            )
         self._lazy_calc_constr_val = False  # use the value of constr_func(X_init) to determine constr_val (and fixed).
         self.device = th.device(device)
 
@@ -93,6 +127,7 @@ class BaseConstr(BaseIO):
         self._constr_val_c0 = None
         self.time_step = 1.
         self.require_fixman = require_fixman
+        self.retraction_solver = retraction_solver
 
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
@@ -129,10 +164,12 @@ class BaseConstr(BaseIO):
         super().__init__()
         self.init_logger('Main.Constraints')
         self.verbose = int(verbose)
-        # Bind the concrete retraction implementation once. Future solver
-        # variants can replace this binding during initialization without
-        # adding a dispatch branch to every projection call.
-        self._retraction_map_solver = self._retraction_newton
+        # Bind the concrete retraction implementation once. The solver is
+        # selected at construction; reassign this attribute to switch later.
+        if retraction_solver == 'newton':
+            self._retraction_map_solver = self._retraction_newton
+        else:
+            self._retraction_map_solver = self._retraction_damp_newton
 
     def initialize(
             self,
@@ -557,6 +594,9 @@ class BaseConstr(BaseIO):
         constr_err_old = initial_constr_err
 
         def _final_calc_Fc():
+            """
+            Re-solve the constraints force by triangular solve.
+            """
             fc: th.Tensor = th.linalg.solve_triangular(
                 R,
                 aux_multiplier.unsqueeze(-1),
@@ -576,9 +616,11 @@ class BaseConstr(BaseIO):
             is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
             if is_converged or is_fixed:
                 if is_fixed and not is_converged:
-                    logger.warning(
+                    _report_solver_failure(
                         'Constraint errors are not converged yet, but it has '
-                        'been fixed. This loop will be skipped.'
+                        'been fixed. This loop will be skipped.',
+                        verbose,
+                        logger,
                     )
                 Fc = _final_calc_Fc()
                 return Fc, dX, is_converged
@@ -593,7 +635,9 @@ class BaseConstr(BaseIO):
             ).reshape(n_batch, n_atoms, n_dim)
             th.add(X, dX, out=X_work)
 
-        logger.warning("Projection of X to the manifold is not converged.")
+        _report_solver_failure(
+            "Projection of X to the manifold is not converged.", verbose, logger,
+        )
         is_converged = th.zeros((), device=X.device, dtype=th.bool)
         Fc = _final_calc_Fc()
         return Fc, dX, is_converged
@@ -652,6 +696,9 @@ class BaseConstr(BaseIO):
         is_converged = initial_constr_err <= constr_threshold
 
         def _final_calc_Fc():
+            """
+            Re-solve the constraints force by triangular solve.
+            """
             fc: th.Tensor = th.linalg.solve_triangular(
                 R,
                 aux_multiplier.unsqueeze(-1),
@@ -678,18 +725,22 @@ class BaseConstr(BaseIO):
             is_converged = constr_err <= constr_threshold
             is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
             if is_fixed or is_converged:
-                if is_fixed and not is_converged:
+                if is_fixed and (not is_converged):
                     if is_rank_deficient:
-                        logger.warning(
+                        _report_solver_failure(
                             'Constraint errors are not converged yet, but the '
                             'current normal-space Jacobian is degenerate. The '
-                            'remaining iterations will be skipped.'
+                            'remaining iterations will be skipped.',
+                            verbose,
+                            logger,
                         )
                     else:
-                        logger.warning(
+                        _report_solver_failure(
                             'Constraint errors are not converged yet, but the '
                             'residual improvement is below the stagnation '
-                            'threshold. The remaining iterations will be skipped.'
+                            'threshold. The remaining iterations will be skipped.',
+                            verbose,
+                            logger,
                         )
                 Fc = _final_calc_Fc()
                 return Fc, dX, is_converged
@@ -721,14 +772,20 @@ class BaseConstr(BaseIO):
                 step *= step_shrink
 
             if not accepted:
-                logger.warning('Damped Newton retraction step did not lower the constraint error.')
+                _report_solver_failure(
+                    'Damped Newton retraction step did not lower the constraint error.',
+                    verbose,
+                    logger,
+                )
                 Fc = _final_calc_Fc()
                 return Fc, dX, is_converged
 
             aux_multiplier.copy_(candidate_multiplier)
             dX.copy_(candidate_dX)
 
-        logger.warning("Projection of X to the manifold is not converged.")
+        _report_solver_failure(
+            "Projection of X to the manifold is not converged.", verbose, logger,
+        )
         Fc = _final_calc_Fc()
         return Fc, dX, is_converged
 
@@ -767,7 +824,11 @@ class BaseConstr(BaseIO):
         n_batch, n_atoms, n_dim = X.shape
         n_constr = self.R.shape[-1]
         aux_multipler = th.zeros(n_batch, n_constr, device=self.device, dtype=FLOAT_TYPE)
-        if X_orig is None: X_orig = X
+        if (X_orig is None) or (X_orig is X):
+            # A detached reference is required: the retraction rewrites ``X``
+            # in place at the end, which is illegal on a leaf that requires
+            # grad for the Fixman derivative.
+            X_orig = X.detach()
         time_step = self.time_step
         constr_thres = self.constr_thres
 
@@ -798,18 +859,20 @@ class BaseConstr(BaseIO):
             #R.diagonal(dim1=-2, dim2=-1).clamp_min_(degenerate_eps)
             sqrtM_Q = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (b, an, c)
             if self.require_fixman:
-                sqrt_det_Z = th.prod(th.diagonal(R, dim1=-2, dim2=-1), dim=-1).abs()
-                half_logdetZ = th.log(sqrt_det_Z).sum()
+                # (n_batch, n_constr, n_constr) -> (n_batch, n_constr)
+                abs_diag_R = th.diagonal(R, dim1=-2, dim2=-1).abs()
+                log_sqrt_det_Z = abs_diag_R.log_().sum(dim=-1)  # (n_batch), "sqrt" is due to Z=R^T R, R is triangular
+                half_logdet_Z = log_sqrt_det_Z.sum() # scalar
                 # A linear constraint has a coordinate-independent Jacobian,
                 # hence a constant Fixman determinant and an exactly zero
-                # derivative. In that case ``half_logdetZ`` contains no
+                # derivative. In that case ``half_logdet_Z`` contains no
                 # autograd graph and calling ``autograd.grad`` would raise even
                 # though the required result is well-defined. ``allow_unused``
                 # also covers CV implementations whose Jacobian graph is
                 # present but independent of some/all coordinate inputs.
-                if half_logdetZ.requires_grad:
+                if half_logdet_Z.requires_grad:
                     half_dlnz_dx = th.autograd.grad(
-                        half_logdetZ,
+                        half_logdet_Z,
                         X_orig,
                         allow_unused=True,
                     )[0]
@@ -820,7 +883,7 @@ class BaseConstr(BaseIO):
                 half_dlnz_dx = half_dlnz_dx.reshape(n_batch, -1)
                 RG = th.einsum('bnc, bn -> bc', sqrtM_Q, half_dlnz_dx)
                 G = th.linalg.solve_triangular(R, RG.unsqueeze(-1), upper=True).squeeze(-1)
-                w = sqrt_det_Z.reciprocal_()
+                w = log_sqrt_det_Z.neg_().exp_()
             else:
                 G = None
                 w = None

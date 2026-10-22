@@ -377,12 +377,12 @@ class ConstrFIRE(FIRE):
                 )
 
         self._constr = BaseConstr(
-            constr_func,
-            constr_val,
-            constr_threshold,
-            False,
-            device,
-            verbose
+            constr_func=constr_func,
+            constr_val=constr_val,
+            constr_threshold=constr_threshold,
+            require_fixman=False,
+            device=device,
+            verbose=verbose,
         )
         super().__init__(
             E_threshold,

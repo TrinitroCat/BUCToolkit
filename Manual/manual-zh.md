@@ -205,6 +205,11 @@ PyTorch 自动梯度上下文。
 `thermostat`、`thermostat_config`；约束 MD 另外需要 `constr_func`、
 `constr_val`、`constr_threshold` 和可选的 `require_fixman`。
 
+约束投影由可直接构造的 `BaseConstr` 实现。`BaseConstr` 额外接受
+`retraction_solver`，取值为 `'newton'`（默认）或 `'damped'`。默认的 Newton
+法采用整步迭代，开销最小；damped 法增加回溯线搜索，更稳定但计算效率更低，
+建议在约束很难收敛时使用。
+
 共同 `run` 参数为 `func`、`X`、`Element_list`、可选 `Cell_vector`、
 `V_init`、`grad_func`、函数参数/关键字参数、`is_grad_func_contain_y`、
 `require_grad`、`batch_indices`、`fixed_atom_tensor` 和

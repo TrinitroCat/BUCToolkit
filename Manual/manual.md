@@ -236,6 +236,13 @@ Shared constructor parameters are `time_step`, `max_step`, `T_init`,
 takes `thermostat` and `thermostat_config`. Constrained MD additionally takes
 `constr_func`, `constr_val`, `constr_threshold`, and `require_fixman`.
 
+The projection itself is implemented by `BaseConstr`, which can also be
+constructed directly. `BaseConstr` additionally accepts `retraction_solver`,
+either `'newton'` (default) or `'damped'`. The default Newton solver takes a
+full step and is the cheapest option. The damped solver adds a backtracking
+line search; it is more stable but computationally more expensive, and is meant
+for constraints that are difficult to converge.
+
 The common `run` parameters are `func`, `X`, `Element_list`, optional
 `Cell_vector`, `V_init`, `grad_func`, function argument/keyword collections,
 `is_grad_func_contain_y`, `require_grad`, `batch_indices`,

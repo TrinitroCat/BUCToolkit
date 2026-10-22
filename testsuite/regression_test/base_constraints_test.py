@@ -1,6 +1,8 @@
 """Focused regressions for constraint Jacobian compilation."""
 
+import math
 import unittest
+import warnings
 from importlib.util import find_spec
 from typing import Any
 
@@ -14,6 +16,20 @@ from BUCToolkit.BatchMD.NVT import NVT
 
 HAS_TRITON = find_spec('triton') is not None
 FUSED_AVAILABLE = HAS_TRITON and th.cuda.is_available()
+
+
+def _device_list() -> list[str]:
+    """Return the CPU device and CUDA when it is available."""
+    return ['cpu', 'cuda:0'] if th.cuda.is_available() else ['cpu']
+
+
+def _mixed_constraints(X: th.Tensor) -> th.Tensor:
+    """Return three coordinate-dependent constraints for one structure."""
+    return th.stack((
+        th.sum(X[0] * X[1]),
+        th.sum(X[0] ** 2) + th.sum(X[2] ** 2),
+        th.sum(X[1] * X[2]),
+    ))
 
 
 class _EagerConstrNVE(ConstrNVE):
@@ -534,6 +550,354 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
             jac, y = runner._constr._jacobian(X_repeat)
         self.assertEqual(jac.shape, (3, 2, 4, 3))
         self.assertEqual(y.shape, (3, 2))
+
+    def test_fixman_distance_constraints_have_zero_geometric_force(self):
+        """Distance constraints keep a constant Fixman determinant."""
+        atom_masses = (1., 2., 3., 4.)
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    ((0., 0., 0.), (1.2, 0., 0.), (0., 2.1, 0.), (0., 0., 1.9)),
+                    dtype=th.float32,
+                    device=device,
+                ).unsqueeze(0)
+                masses = (
+                    th.ones_like(X)
+                    * th.tensor(
+                        atom_masses, dtype=X.dtype, device=device,
+                    ).reshape(1, -1, 1)
+                )
+                targets = _distance_constraints(X[0]).reshape(1, -1)
+                constr = BaseConstr(
+                    _distance_constraints,
+                    targets,
+                    require_fixman=True,
+                    device=device,
+                    verbose=0,
+                )
+                constr.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=masses,
+                    compile_jacobian=False,
+                )
+                constr.time_step = 0.5
+                # The target equals the current distances, so the projection
+                # converges immediately and only the Fixman terms are checked.
+                _, G, w = constr._project2(X.clone(), X.clone())
+
+                expected_w = 1. / math.sqrt(
+                    (1. / atom_masses[0] + 1. / atom_masses[1])
+                    * (1. / atom_masses[2] + 1. / atom_masses[3])
+                )
+                # The determinant is constant, so only round-off remains.
+                self.assertTrue(th.allclose(G, th.zeros_like(G), atol=1e-6))
+                self.assertTrue(th.allclose(
+                    w, th.full_like(w, expected_w), rtol=1e-5,
+                ))
+
+    def test_fixman_sphere_constraint_matches_analytic_terms(self):
+        """A sphere constraint reproduces the analytic Fixman terms."""
+        rho = 4.
+        for device in _device_list():
+            with self.subTest(device=device):
+                unit = th.tensor((1., 0.7, -0.3), dtype=th.float32, device=device)
+                unit = unit / th.linalg.norm(unit)
+                X = (unit * math.sqrt(rho)).reshape(1, 1, 3)
+                constr = BaseConstr(
+                    lambda sample: th.sum(sample[0] ** 2).reshape(1),
+                    th.tensor(((rho,),), dtype=X.dtype, device=device),
+                    require_fixman=True,
+                    device=device,
+                    verbose=0,
+                )
+                constr.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=th.ones_like(X),
+                    compile_jacobian=False,
+                )
+                constr.time_step = 0.5
+                _, G, w = constr._project2(X.clone(), X.clone())
+
+                self.assertTrue(th.allclose(
+                    G, th.full_like(G, 1. / (2. * rho)), rtol=1e-5,
+                ))
+                self.assertTrue(th.allclose(
+                    w, th.full_like(w, 1. / (2. * math.sqrt(rho))), rtol=1e-5,
+                ))
+
+    def test_fixman_multi_constraint_matches_determinant_reference(self):
+        """Several constraints match an independent determinant reference."""
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
+                    dtype=th.float32,
+                    device=device,
+                ).unsqueeze(0)
+                masses = th.full_like(X, 2.)
+                targets = _mixed_constraints(X[0]).reshape(1, -1)
+                constr = BaseConstr(
+                    _mixed_constraints,
+                    targets,
+                    require_fixman=True,
+                    device=device,
+                    verbose=0,
+                )
+                constr.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=masses,
+                    compile_jacobian=False,
+                )
+                constr.time_step = 0.5
+                _, G, w = constr._project2(X.clone(), X.clone())
+
+                # Reference built from the mathematical definition
+                # Z = J M^-1 J^T and G = Z^-1 J M^-1 grad(0.5 log det Z),
+                # independently of the internal QR factors.
+                X_ref = X.clone().requires_grad_(True)
+                inverse_masses = 1. / masses
+                jac = th.vmap(th.func.jacrev(_mixed_constraints))(X_ref)
+                gram = th.einsum(
+                    'bcnd,bnd,bend->bce', jac, inverse_masses, jac,
+                )
+                half_logdet = 0.5 * th.linalg.slogdet(gram)[1].sum()
+                grad_half_logdet = th.autograd.grad(half_logdet, X_ref)[0]
+                rhs = th.einsum(
+                    'bcnd,bnd,bnd->bc', jac, inverse_masses, grad_half_logdet,
+                )
+                expected_G = th.linalg.solve(gram, rhs.unsqueeze(-1)).squeeze(-1)
+                expected_w = th.rsqrt(th.linalg.det(gram))
+
+                self.assertTrue(th.allclose(
+                    G, expected_G, rtol=1e-5, atol=1e-7,
+                ))
+                self.assertTrue(th.allclose(w, expected_w, rtol=1e-5))
+
+    def test_fixman_accepts_default_x_orig(self):
+        """The default ``X_orig`` reference is detached from the copy it writes."""
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
+                    dtype=th.float32,
+                    device=device,
+                ).unsqueeze(0)
+                targets = _mixed_constraints(X[0]).reshape(1, -1)
+                constr = BaseConstr(
+                    _mixed_constraints,
+                    targets,
+                    require_fixman=True,
+                    device=device,
+                    verbose=0,
+                )
+                constr.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=th.ones_like(X),
+                    compile_jacobian=False,
+                )
+                constr.time_step = 0.5
+                _, G_reference, w_reference = constr._project2(
+                    X.clone(), X.clone(),
+                )
+
+                X_default = X.clone()
+                _, G_default, w_default = constr._project2(X_default)
+                # The projection rewrites X in place; the reference must not
+                # leave a grad-requiring leaf behind.
+                self.assertFalse(X_default.requires_grad)
+                self.assertTrue(th.isfinite(G_default).all())
+                self.assertTrue(th.allclose(
+                    G_default, G_reference, rtol=1e-6, atol=1e-8,
+                ))
+                self.assertTrue(th.allclose(w_default, w_reference, rtol=1e-6))
+
+    def test_fixman_large_determinant_remains_finite(self):
+        """A determinant product that overflows keeps finite Fixman terms."""
+        scale = 1e10
+
+        def scaled_constraints(X: th.Tensor) -> th.Tensor:
+            """Return four constraints with a large Jacobian scale."""
+            return scale * th.stack((
+                th.sum(X[0] * X[1]),
+                th.sum(X[0] ** 2) + th.sum(X[2] ** 2),
+                th.sum(X[1] * X[2]),
+                th.sum(X[1] ** 2),
+            ))
+
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
+                    dtype=th.float32,
+                    device=device,
+                ).unsqueeze(0)
+                masses = th.ones_like(X)
+                targets = scaled_constraints(X[0]).reshape(1, -1)
+                constr = BaseConstr(
+                    scaled_constraints,
+                    targets,
+                    require_fixman=True,
+                    device=device,
+                    verbose=0,
+                )
+                constr.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=masses,
+                    compile_jacobian=False,
+                )
+                constr.time_step = 0.5
+                _, G, w = constr._project2(X.clone(), X.clone())
+
+                # Keep the test inside the intended regime: a plain product of
+                # the diagonal overflows single precision.
+                diagonal = th.diagonal(constr.R, dim1=-2, dim2=-1).abs()
+                self.assertFalse(
+                    bool(th.isfinite(th.prod(diagonal, dim=-1)).all())
+                )
+                self.assertTrue(th.isfinite(G).all())
+                self.assertTrue(th.isfinite(w).all())
+                self.assertTrue(th.all(w >= 0.))
+
+                # The geometric force stays accurate; w may saturate because
+                # 1 / sqrt(det Z) is below the normal single-precision range.
+                X_ref = X.clone().requires_grad_(True)
+                inverse_masses = 1. / masses
+                jac = th.vmap(th.func.jacrev(scaled_constraints))(X_ref)
+                gram = th.einsum(
+                    'bcnd,bnd,bend->bce', jac, inverse_masses, jac,
+                )
+                half_logdet = 0.5 * th.linalg.slogdet(gram)[1].sum()
+                grad_half_logdet = th.autograd.grad(half_logdet, X_ref)[0]
+                rhs = th.einsum(
+                    'bcnd,bnd,bnd->bc', jac, inverse_masses, grad_half_logdet,
+                )
+                expected_G = th.linalg.solve(gram, rhs.unsqueeze(-1)).squeeze(-1)
+                self.assertTrue(th.allclose(
+                    G, expected_G.to(G.dtype), rtol=1e-4, atol=1e-16,
+                ))
+
+    def test_damped_retraction_matches_newton(self):
+        """The damped solver reaches the same projection as plain Newton."""
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
+                    dtype=th.float32,
+                    device=device,
+                ).unsqueeze(0)
+                masses = th.ones_like(X)
+                # ``X_orig`` lies on the manifold, the integrated coordinates
+                # are displaced, so both solvers run their iteration.
+                targets = _mixed_constraints(X[0]).reshape(1, -1)
+                displacement = th.zeros_like(X)
+                displacement[..., 0] = 1e-2
+                results = {}
+                for solver in ('newton', 'damped'):
+                    constr = BaseConstr(
+                        _mixed_constraints,
+                        targets,
+                        require_fixman=True,
+                        retraction_solver=solver,
+                        device=device,
+                        verbose=0,
+                    )
+                    self.assertEqual(constr.retraction_solver, solver)
+                    constr.initialize(
+                        func=None,
+                        X=X,
+                        Element_list=None,
+                        masses=masses,
+                        compile_jacobian=False,
+                    )
+                    constr.time_step = 0.5
+                    X_projected = X + displacement
+                    Fc, G, w = constr._project2(X_projected, X.clone())
+                    results[solver] = (Fc, G, w, X_projected)
+
+                newton, damped = results['newton'], results['damped']
+                th.testing.assert_close(damped[0], newton[0], rtol=1e-5, atol=1e-6)
+                th.testing.assert_close(damped[1], newton[1], rtol=1e-5, atol=1e-8)
+                th.testing.assert_close(damped[2], newton[2], rtol=1e-5, atol=1e-8)
+                th.testing.assert_close(damped[3], newton[3], rtol=1e-5, atol=1e-5)
+                self.assertLess(
+                    float(th.max(th.abs(
+                        _mixed_constraints(damped[3][0]) - targets[0]
+                    ))),
+                    1e-4,
+                )
+
+                with self.assertRaises(ValueError):
+                    BaseConstr(
+                        _mixed_constraints,
+                        targets,
+                        retraction_solver='rk4',
+                    )
+
+    def test_solver_failure_reports_on_stderr_when_silent(self):
+        """A stalled projection warns on stderr at verbose 0 and logs above it."""
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
+                    dtype=th.float32,
+                    device=device,
+                ).unsqueeze(0)
+                masses = th.ones_like(X)
+                # A far target stalls the retraction with an unconverged residual.
+                targets = _mixed_constraints(X[0]).reshape(1, -1) + 5.
+
+                silent = BaseConstr(
+                    _mixed_constraints,
+                    targets,
+                    require_fixman=True,
+                    device=device,
+                    verbose=0,
+                )
+                silent.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=masses,
+                    compile_jacobian=False,
+                )
+                silent.time_step = 0.5
+                with self.assertWarns(RuntimeWarning):
+                    silent._project2(X.clone(), X.clone())
+
+                loud = BaseConstr(
+                    _mixed_constraints,
+                    targets,
+                    require_fixman=True,
+                    device=device,
+                    verbose=1,
+                )
+                loud.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=masses,
+                    compile_jacobian=False,
+                )
+                loud.time_step = 0.5
+                with self.assertLogs('Main.Constraints', level='WARNING') as captured:
+                    loud._project2(X.clone(), X.clone())
+                self.assertTrue(any(
+                    'not converged' in line for line in captured.output
+                ))
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    loud._project2(X.clone(), X.clone())
+                self.assertEqual(caught, [])
 
 
 if __name__ == '__main__':
