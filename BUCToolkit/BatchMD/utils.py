@@ -117,8 +117,8 @@ def _initialize_constr(
     # Start a fresh trajectory clock. The main loop advances ``md.time_now``
     # in place and mirrors it into the constraint component after every step,
     # so the end-of-step constraint target is always ``time_now + time_step``.
-    md.time_now = th.scalar_tensor(0., device=md.device)
-    md._constr.time_now = th.scalar_tensor(0., device=md.device)
+    md.time_now = th.scalar_tensor(0., device=md.device, dtype=FLOAT_TYPE)
+    md._constr.time_now = th.scalar_tensor(0., device=md.device, dtype=FLOAT_TYPE)
     md._constr.time_step = md.time_step
     md._constr.initialize(
         func=None,

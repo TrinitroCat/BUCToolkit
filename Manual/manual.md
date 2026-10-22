@@ -152,7 +152,7 @@ finite-difference settings. `REQUIRE_GRAD` has the usual meaning. See
 | `REQUIRE_GRAD`           | boolean                                 | `false`                | Enable autograd.                                                                                                                                                                                                       |
 | `CONSTR_MD_SCHEME`       | `SLOW_GROWTH`, `BLUE_MOON`              | template value         | CMD scheme.                                                                                                                                                                                                            |
 | `N_IMAGES`               | positive integer                        | `1` or template value  | Blue-Moon interpolation images; Slow-growth parallel copies. Use `1` for one trajectory. [Slow growth](examples.md#slow-growth-cmd)                                                                                    |
-| `CONSTR_THRESHOLD`       | positive float                          | `1.e-5`                | Constraints convergence threshold. Units are determined by specific constraints formulae                                                                                                                               |
+| `CONSTR_THRESHOLD`       | positive float or `'auto'`              | `'auto'`               | Constraints convergence threshold. Units are determined by specific constraints formulae. `'auto'` estimates the achievable floor at initialization.                                                                   |
 | `REQUIRE_FIXMAN`         | boolean or "auto"                       | `"auto"`               | # `auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually.                                                                                                               |
 
 
@@ -242,6 +242,12 @@ either `'newton'` (default) or `'damped'`. The default Newton solver takes a
 full step and is the cheapest option. The damped solver adds a backtracking
 line search; it is more stable but computationally more expensive, and is meant
 for constraints that are difficult to converge.
+
+`constr_threshold` defaults to `'auto'`, which estimates the achievable
+residual floor of the current floating-point type at initialization and uses
+three times that value. The estimate is a guide, not a guarantee. An explicit
+threshold is never replaced; a warning is emitted when it lies below half of
+the estimated floor.
 
 The common `run` parameters are `func`, `X`, `Element_list`, optional
 `Cell_vector`, `V_init`, `grad_func`, function argument/keyword collections,

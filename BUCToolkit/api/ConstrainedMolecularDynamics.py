@@ -90,12 +90,23 @@ class ConstrainedMolecularDynamics(_BaseAPI):
             'time_step': self.MD.get('TIME_STEP', 1),
             'max_step': self.MD.get('MAX_STEP'),
             'T_init': self.MD.get('T_INIT', 298.15),
-            'constr_threshold': self.MD.get('CONSTR_THRESHOLD', 1.e-5),
+            'constr_threshold': self.MD.get('CONSTR_THRESHOLD', 'auto'),
             'require_fixman': self.MD.get('REQUIRE_FIXMAN', 'auto'),  # 'auto' means True for blue-moon and False otherwise.
             'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
             'device': self.DEVICE,
             'verbose': int(self.VERBOSE)
         }
+        constr_threshold = self.MD_config['constr_threshold']
+        if isinstance(constr_threshold, str) and constr_threshold != 'auto':
+            # YAML may parse an exponent-only literal such as ``1e-5`` as a
+            # string; accept it here so both input forms reach BaseConstr.
+            try:
+                self.MD_config['constr_threshold'] = float(constr_threshold)
+            except ValueError as error:
+                raise ValueError(
+                    "CONSTR_THRESHOLD must be a positive float or 'auto', but "
+                    f'got {constr_threshold!r}.'
+                ) from error
         if isinstance(self.MD_config['require_fixman'], str) and (self.MD_config['require_fixman']).lower() != 'auto':
             raise ValueError(
                 f"Invalid value of `require_fixman` of {self.MD_config['require_fixman']}. "

@@ -6,7 +6,7 @@
 #  File: ConstrNVE.py
 #  Environment: Python 3.12
 
-from typing import Callable, List, Tuple
+from typing import Callable, List, Literal, Tuple
 
 import torch as th
 
@@ -27,7 +27,7 @@ class ConstrNVE(NVE):
         constr_func: Callable[[th.Tensor], th.Tensor] = None, the constraint function.
         constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor = None, the constraint value that can depend on time.
             It may accept `(t)` or `(t, c0)` which `c0` is the initial constraint values.
-        constr_threshold: float = 1e-5, the constraint error tolerance.
+        constr_threshold: float | Literal['auto'] = 'auto', the constraint error tolerance; `'auto'` estimates it at initialization.
         require_fixman: bool = False, whether to calculate the Fixman term for constraint MD.
         T_init: float, initial temperature, only to generate initial velocities of atoms by Maxwell-Boltzmann distribution. If V_init is given, T_init will be ignored.
         output_structures_per_step: int, output structures per output_structures_per_step steps.
@@ -53,7 +53,7 @@ class ConstrNVE(NVE):
             max_step: int,
             constr_func: Callable[[th.Tensor], th.Tensor] | None = None,
             constr_val: Callable[..., th.Tensor | Tuple[th.Tensor]] | th.Tensor | None = None,
-            constr_threshold: float = 1e-5,
+            constr_threshold: float | Literal['auto'] = 'auto',
             require_fixman: bool = False,
             T_init: float = 298.15,
             output_file: str | None = None,
@@ -70,7 +70,7 @@ class ConstrNVE(NVE):
             max_step: Maximum number of steps.
             constr_func: Constraint function, or None for plain MD.
             constr_val: Constant target or a time-dependent target callback.
-            constr_threshold: Absolute constraint error tolerance.
+            constr_threshold: Absolute constraint error tolerance, or `'auto'` to estimate it at initialization.
             require_fixman: Whether the Fixman terms are evaluated.
             T_init: Initial temperature.
             output_file: Binary trajectory path, or None.

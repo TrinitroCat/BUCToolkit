@@ -355,7 +355,7 @@ class ConstrFIRE(FIRE):
             steplength: float = 1.,
             constr_func: Callable | None = None,
             constr_val: th.Tensor | None = None,
-            constr_threshold: float = 1e-5,
+            constr_threshold: float | Literal['auto'] = 'auto',
             alpha: float = 0.1,
             alpha_fac: float = 0.99,
             fac_inc: float = 1.1,

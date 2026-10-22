@@ -132,7 +132,7 @@ CLI 使用 `buctoolkit -i input.yml` 或 `buctoolkit input.yml` 读取 YAML。�
 | `REQUIRE_GRAD`           | 布尔值                                  | `false`            | 是否开启自动梯度。                                                                                                                                                                                     |
 | `CONSTR_MD_SCHEME`       | `SLOW_GROWTH`、`BLUE_MOON`              | 模板值             | CMD 模式。                                                                                                                                                                                             |
 | `N_IMAGES`               | 正整数                                  | `1` 或模板值       | Blue-Moon 插值镜像数；Slow-growth 并行副本数。单条轨迹设为 `1`。[Slow-growth](examples-zh.md#slow-growth-cmd)                                                                                          |
-| `CONSTR_THRESHOLD`       | 正浮点数                                | `1.e-5`            | 约束收敛限, 单位与具体约束的广义坐标相同.                                                                                                                                                              |
+| `CONSTR_THRESHOLD`       | 正浮点数或 `'auto'`                     | `'auto'`           | 约束收敛限, 单位与具体约束的广义坐标相同. `'auto'` 在初始化时估计可达到的残差下界.                                                                                                                     |
 | `REQUIRE_FIXMAN`         | 布尔值 or "auto"                        | `"auto"`           | `auto` 意为 `BLUE_MOON` 设为 True, `SLOW_GROWTH` 设为False. 可手动设置 True/False.                                                                                                                     |
 
 
@@ -209,6 +209,10 @@ PyTorch 自动梯度上下文。
 `retraction_solver`，取值为 `'newton'`（默认）或 `'damped'`。默认的 Newton
 法采用整步迭代，开销最小；damped 法增加回溯线搜索，更稳定但计算效率更低，
 建议在约束很难收敛时使用。
+
+`constr_threshold` 默认为 `'auto'`：初始化时估计当前浮点类型可达到的残差
+下界，并取其三倍作为阈值。该估计只是量级参考，不是保证。显式给定的阈值不会
+被替换，仅在低于估计下界的一半时发出警告。
 
 共同 `run` 参数为 `func`、`X`、`Element_list`、可选 `Cell_vector`、
 `V_init`、`grad_func`、函数参数/关键字参数、`is_grad_func_contain_y`、

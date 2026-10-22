@@ -135,7 +135,7 @@ CONFIG_STUB = {
 
         "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
         "N_IMAGES": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
-        "CONSTR_THRESHOLD": (1.e-5, float, "The threshold of constraints violated"),
+        "CONSTR_THRESHOLD": ("auto", (str, float), "The threshold of constraints violated. A positive float, or 'auto' to estimate it at initialization"),
         "REQUIRE_FIXMAN": ("auto", str, "`auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually"),
         "CONSTRAINTS_FILE": ("./constraints.py", str, "path to constraints function file"),
         "CONSTRAINTS_FUNC": ("func", str, "name of constraints function in CONSTRAINTS_FILE"),

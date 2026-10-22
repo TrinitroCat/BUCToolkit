@@ -68,7 +68,7 @@ class NVT(_BaseMD):
         constr_func: constraint function; None runs plain NVT, otherwise the
             constraint component is enabled.
         constr_val: constant constraint target or a time-dependent callback.
-        constr_threshold: absolute constraint error tolerance.
+        constr_threshold: absolute constraint error tolerance, or `'auto'` to estimate it at initialization.
         require_fixman: whether the Fixman geometric force and Blue-Moon
             weight are evaluated.
     Methods:
@@ -102,7 +102,7 @@ class NVT(_BaseMD):
             log_quantities: Tuple[str, ...] | List[str] | None = None,
             constr_func: Callable[[th.Tensor], th.Tensor] | None = None,
             constr_val: Callable[..., th.Tensor | Tuple[th.Tensor]] | th.Tensor | None = None,
-            constr_threshold: float = 1e-5,
+            constr_threshold: float | Literal['auto'] = 'auto',
             require_fixman: bool = False,
     ) -> None:
         """
@@ -123,7 +123,7 @@ class NVT(_BaseMD):
                 the constraint component is enabled.
             constr_val: constant constraint target or a time-dependent
                 callback.
-            constr_threshold: absolute constraint error tolerance.
+            constr_threshold: absolute constraint error tolerance, or `'auto'` to estimate it at initialization.
             require_fixman: whether the Fixman geometric force and Blue-Moon
                 weight are evaluated.
         """

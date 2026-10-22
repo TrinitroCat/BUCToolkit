@@ -401,6 +401,37 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(float(runner._constr.time_now), 0.2, places=6)
         self.assertAlmostEqual(float(distance_constraint(X[0])), 1.0, places=5)
 
+    def test_constrained_md_uses_auto_threshold_by_default(self):
+        """The runner default resolves to an estimated threshold."""
+        def distance_constraint(X: th.Tensor) -> th.Tensor:
+            return th.linalg.norm(X[1] - X[0]).reshape(1)
+
+        X = th.tensor(
+            (((0., 0., 0.), (1., 0., 0.)),),
+            dtype=th.float32,
+        )
+        runner = ConstrNVT(
+            time_step=0.1,
+            max_step=1,
+            thermostat='Langevin',
+            thermostat_config={'damping_coeff': 0.01},
+            constr_func=distance_constraint,
+            constr_val=None,
+            output_file=None,
+            device='cpu',
+            verbose=0,
+        )
+        runner.run(
+            lambda coo: th.zeros(coo.shape[0], device=coo.device),
+            X,
+            [['H', 'H']],
+            V_init=th.zeros_like(X),
+            grad_func=lambda coo, energy: th.zeros_like(coo),
+            is_grad_func_contain_y=True,
+        )
+        self.assertIsInstance(runner._constr.constr_thres, float)
+        self.assertGreater(runner._constr.constr_thres, 0.)
+
     @unittest.skipUnless(FUSED_AVAILABLE, 'CUDA and Triton are required')
     def test_constrained_nve_fused_matches_eager_on_cuda(self):
         """The constrained fused NVE path must mirror the eager path."""
@@ -744,9 +775,13 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
                 constr = BaseConstr(
                     scaled_constraints,
                     targets,
+                    constr_threshold=1e-5,
                     require_fixman=True,
                     device=device,
                     verbose=0,
+                    # The intentionally unphysical scale is only used to exercise
+                    # the Fixman determinant range; skip threshold estimation.
+                    _detect_dynamic_thres='None',
                 )
                 constr.initialize(
                     func=None,
@@ -898,6 +933,232 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
                     warnings.simplefilter('always')
                     loud._project2(X.clone(), X.clone())
                 self.assertEqual(caught, [])
+
+    def test_dynamic_threshold_arguments_are_validated(self):
+        """Invalid threshold-detection options are rejected early."""
+        targets = th.zeros(1, 3)
+        for value in ('Always', 0, -1, True, 1.5):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    BaseConstr(
+                        _mixed_constraints,
+                        targets,
+                        _detect_dynamic_thres=value,
+                    )
+        with self.assertRaises(ValueError):
+            BaseConstr(
+                _mixed_constraints,
+                targets,
+                constr_threshold='auto',
+                _detect_dynamic_thres='None',
+            )
+        with self.assertRaises(ValueError):
+            BaseConstr(_mixed_constraints, targets, constr_threshold='fine')
+        with self.assertRaises(ValueError):
+            BaseConstr(_mixed_constraints, targets, constr_threshold=0.)
+
+    def test_auto_threshold_resolves_at_initialization(self):
+        """An ``'auto'`` threshold becomes three times the estimated floor."""
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
+                    dtype=th.float32,
+                    device=device,
+                ).unsqueeze(0)
+                targets = _mixed_constraints(X[0]).reshape(1, -1)
+                constr = BaseConstr(
+                    _mixed_constraints,
+                    targets,
+                    constr_threshold='auto',
+                    device=device,
+                    verbose=0,
+                )
+                self.assertEqual(constr.constr_thres, 'auto')
+                constr.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=th.ones_like(X),
+                    compile_jacobian=False,
+                )
+                self.assertIsInstance(constr.constr_thres, float)
+                self.assertGreater(constr.constr_thres, 0.)
+                self.assertTrue(math.isfinite(constr.constr_thres))
+
+                # The constructor default is the same automatic mode.
+                default = BaseConstr(
+                    _mixed_constraints,
+                    targets,
+                    device=device,
+                    verbose=0,
+                )
+                default.initialize(
+                    func=None,
+                    X=X,
+                    Element_list=None,
+                    masses=th.ones_like(X),
+                    compile_jacobian=False,
+                )
+                self.assertIsInstance(default.constr_thres, float)
+                self.assertGreater(default.constr_thres, 0.)
+
+    def test_threshold_warns_below_estimated_floor(self):
+        """An explicit threshold below the probed evaluation noise warns."""
+        big = 1e6
+        value = 1.234
+
+        def cancellation_constraint(sample: th.Tensor) -> th.Tensor:
+            """Return a difference whose float32 evaluation is quantized."""
+            return ((big + sample[0, 0]) - big).reshape(1)
+
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    (((value, 0., 0.),),), dtype=th.float32, device=device,
+                )
+                target = ((big + X[0, 0, 0]) - big).reshape(1, 1)
+                constr = BaseConstr(
+                    cancellation_constraint,
+                    target,
+                    constr_threshold=1e-9,
+                    device=device,
+                    verbose=0,
+                )
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    constr.initialize(
+                        func=None,
+                        X=X,
+                        Element_list=None,
+                        masses=th.ones_like(X),
+                        compile_jacobian=False,
+                    )
+                self.assertTrue(any(
+                    'below half of the estimated achievable floor'
+                    in str(record.message)
+                    for record in caught
+                ))
+                self.assertEqual(constr.constr_thres, 1e-9)
+
+    def test_threshold_detection_failure_is_explicit(self):
+        """A non-probeable constraint function never silently changes the mode."""
+        def float32_only(sample: th.Tensor) -> th.Tensor:
+            """Reject the higher-precision probe on purpose."""
+            if sample.dtype != th.float32:
+                raise RuntimeError('float32 only')
+            return th.sum(sample[0] ** 2).reshape(1)
+
+        X = th.tensor((((2., 0., 0.),),), dtype=th.float32)
+        target = th.full((1, 1), 4.)
+        masses = th.ones_like(X)
+
+        auto = BaseConstr(
+            float32_only,
+            target,
+            constr_threshold='auto',
+            device='cpu',
+            verbose=0,
+        )
+        with self.assertRaises(RuntimeError):
+            auto.initialize(
+                func=None,
+                X=X,
+                Element_list=None,
+                masses=masses,
+                compile_jacobian=False,
+            )
+
+        explicit = BaseConstr(
+            float32_only,
+            target,
+            constr_threshold=1e-5,
+            device='cpu',
+            verbose=0,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            explicit.initialize(
+                func=None,
+                X=X,
+                Element_list=None,
+                masses=masses,
+                compile_jacobian=False,
+            )
+        self.assertTrue(any(
+            'Unable to estimate the constraint threshold floor'
+            in str(record.message)
+            for record in caught
+        ))
+        self.assertEqual(explicit.constr_thres, 1e-5)
+
+    def test_dynamic_threshold_detects_on_cadence(self):
+        """An integer cadence resolves the estimate during projection calls."""
+        X = th.tensor(
+            ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
+            dtype=th.float32,
+        ).unsqueeze(0)
+        targets = _mixed_constraints(X[0]).reshape(1, -1)
+        constr = BaseConstr(
+            _mixed_constraints,
+            targets,
+            constr_threshold='auto',
+            _detect_dynamic_thres=2,
+            device='cpu',
+            verbose=0,
+        )
+        constr.initialize(
+            func=None,
+            X=X,
+            Element_list=None,
+            masses=th.ones_like(X),
+            compile_jacobian=False,
+        )
+        self.assertEqual(constr.constr_thres, 'auto')
+        constr._project2(X.clone(), X.clone())
+        self.assertEqual(constr._proj2_call_number, 1)
+        self.assertIsInstance(constr.constr_thres, float)
+        constr._project2(X.clone(), X.clone())
+        self.assertEqual(constr._proj2_call_number, 2)
+        # An ``'auto'`` threshold keeps following the estimate on every
+        # detection instead of freezing the first value.
+        constr._apply_thres_estimate(1e-3, X)
+        self.assertAlmostEqual(constr.constr_thres, 3e-3, places=12)
+
+    def test_rank_deficiency_is_reported_at_initialization(self):
+        """Nearly dependent constraints warn once during initialization."""
+        def dependent_constraints(sample: th.Tensor) -> th.Tensor:
+            """Return two proportional constraints."""
+            radius2 = th.sum(sample[0] ** 2)
+            return th.stack((radius2, radius2 * (1. + 1e-7)))
+
+        for device in _device_list():
+            with self.subTest(device=device):
+                X = th.tensor(
+                    (((2., 0., 0.),),), dtype=th.float32, device=device,
+                )
+                targets = th.vstack((
+                    dependent_constraints(X[0]),
+                )).reshape(1, -1)
+                constr = BaseConstr(
+                    dependent_constraints,
+                    targets,
+                    device=device,
+                    verbose=0,
+                )
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    constr.initialize(
+                        func=None,
+                        X=X,
+                        Element_list=None,
+                        masses=th.ones_like(X),
+                        compile_jacobian=False,
+                    )
+                self.assertTrue(any(
+                    'numerically rank-deficient' in str(record.message)
+                    for record in caught
+                ))
 
 
 if __name__ == '__main__':
