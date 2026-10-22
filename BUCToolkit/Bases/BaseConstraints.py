@@ -585,10 +585,12 @@ class BaseConstr(BaseIO):
                     noise = th.randn(X.shape, generator=rng, device=X.device, dtype=X.dtype)
                     # 8 ULP per coord, clamp for avoiding underflow
                     step = 8. * eps * X.abs().clamp_min(coordinate_scale)
-                    stacked = th.stack([X, X + step * noise, X - step * noise])
+                    probes = (X, X + step * noise, X - step * noise)
+                    values_work = th.stack([th.vmap(self.constr_func)(p) for p in probes])
+                    values_reference = th.stack([
+                        th.vmap(self.constr_func)(p.to(reference_dtype)) for p in probes
+                    ])  # (3, batch, n_constr)
 
-                    values_work = th.vmap(self.constr_func)(stacked)
-                    values_reference = th.vmap(self.constr_func)(stacked.to(reference_dtype))
                     if values_reference.dtype != reference_dtype:
                         return None
                     difference = (values_work.to(reference_dtype) - values_reference).abs()
