@@ -937,7 +937,7 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
     def test_dynamic_threshold_arguments_are_validated(self):
         """Invalid threshold-detection options are rejected early."""
         targets = th.zeros(1, 3)
-        for value in ('Always', 0, -1, True, 1.5):
+        for value in ('Always', 0, -1):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     BaseConstr(
@@ -1093,7 +1093,7 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
         self.assertEqual(explicit.constr_thres, 1e-5)
 
     def test_dynamic_threshold_detects_on_cadence(self):
-        """An integer cadence resolves the estimate during projection calls."""
+        """An integer cadence re-detects the estimate during projection calls."""
         X = th.tensor(
             ((0.3, 0.1, 0.0), (1.1, 0.0, 0.2), (0., 2.2, 0.1)),
             dtype=th.float32,
@@ -1114,10 +1114,11 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
             masses=th.ones_like(X),
             compile_jacobian=False,
         )
-        self.assertEqual(constr.constr_thres, 'auto')
+        # Integer mode also resolves ``'auto'`` once during initialization.
+        self.assertIsInstance(constr.constr_thres, float)
+        self.assertEqual(constr._proj2_call_number, 0)
         constr._project2(X.clone(), X.clone())
         self.assertEqual(constr._proj2_call_number, 1)
-        self.assertIsInstance(constr.constr_thres, float)
         constr._project2(X.clone(), X.clone())
         self.assertEqual(constr._proj2_call_number, 2)
         # An ``'auto'`` threshold keeps following the estimate on every

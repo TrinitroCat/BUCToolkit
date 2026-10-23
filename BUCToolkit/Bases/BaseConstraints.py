@@ -566,7 +566,7 @@ class BaseConstr(BaseIO):
             jac: Constraint Jacobian at ``X``. Recomputed when omitted.
 
         Returns:
-            The estimated residual floor, or ``NaN`` when the constraint
+            The estimated residual floor, or ``None`` when the constraint
             function cannot be probed in the reference precision.
         """
         if jac is None:
@@ -583,7 +583,7 @@ class BaseConstr(BaseIO):
                 try:
                     rng = th.Generator(device=X.device).manual_seed(114514)  # the hard-code seed is only for reproduction
                     noise = th.randn(X.shape, generator=rng, device=X.device, dtype=X.dtype)
-                    # 8 ULP per coord, clamp for avoiding underflow
+                    # 8 ULP of the largest coordinate; clamped to avoid underflow
                     step = 8. * eps * X.abs().clamp_min(coordinate_scale)
                     probes = (X, X + step * noise, X - step * noise)
                     values_work = th.stack([th.vmap(self.constr_func)(p) for p in probes])
@@ -609,7 +609,7 @@ class BaseConstr(BaseIO):
         Apply or warn about an estimated constraint-residual floor.
 
         Args:
-            floor: Estimate from ``_detect_thres_inf``; ``NaN`` when it failed.
+            floor: Estimate from ``_detect_thres_inf``; ``None`` when it failed.
             X: Coordinates used for the estimate.
 
         Returns:
