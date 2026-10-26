@@ -7,7 +7,7 @@ Conjugate Gradient Algorithm for optimization.
 #  File: CG.py
 #  Environment: Python 3.12
 
-from typing import Literal
+from typing import Literal, Tuple, List
 import os
 
 import torch as th
@@ -54,7 +54,9 @@ class CG(_BaseOpt):
             use_bb: bool = True,
             output_file: str | None = None,
             device: str | th.device = 'cpu',
-            verbose: int = 2
+            verbose: int = 2,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
     ):
         super().__init__(
             iter_scheme,
@@ -69,7 +71,10 @@ class CG(_BaseOpt):
             use_bb,
             output_file,
             device,
-            verbose
+            verbose,
+            _hold_samples=False,
+            dump_quantities = dump_quantities,
+            log_quantities = log_quantities
         )
         self.__update_scheme = None
         self.MIN_CACHE = th.scalar_tensor(1.e-20, device=self.device)

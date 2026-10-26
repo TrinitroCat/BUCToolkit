@@ -27,6 +27,8 @@ class Dimer(_BaseOpt):
             output_file: str | None = None,
             device: str | th.device = 'cpu',
             verbose: int = 2,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
     ) -> None:
         """Initialize a Dimer search using the shared optimizer lifecycle.
 
@@ -66,6 +68,8 @@ class Dimer(_BaseOpt):
             output_file=output_file,
             device=device,
             verbose=verbose,
+            dump_quantities=dump_quantities,
+            log_quantities=log_quantities
         )
         self._is_inplace_update = True
         self.Rotator = FindMinEigen(

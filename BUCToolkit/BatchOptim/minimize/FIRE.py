@@ -39,6 +39,8 @@ class FIRE(_BaseOpt):
             device: str | th.device = 'cpu',
             verbose: int = 2,
             _hold_samples: bool = False,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
             **kwargs
     ):
         r"""
@@ -76,7 +78,9 @@ class FIRE(_BaseOpt):
             output_file=output_file,
             device = device,
             verbose = verbose,
-            _hold_samples=_hold_samples
+            _hold_samples=_hold_samples,
+            dump_quantities =  dump_quantities,
+            log_quantities =  log_quantities
         )
         self.MAX_STEPLENGTH = th.scalar_tensor(10 * steplength, device=self.device)
         self.FIRE_t_init = steplength
