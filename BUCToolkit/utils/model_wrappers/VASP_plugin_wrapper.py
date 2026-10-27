@@ -134,6 +134,13 @@ class _Bridge:
 _bridge = None
 
 
+def _minimum_image_delta(target, current):
+    """Return the shortest fractional displacement from current to target."""
+    delta = target - current
+    delta -= np.round(delta)
+    return delta
+
+
 def structure(constants, additions):
     """Update VASP-owned additions in place, then publish real results.
 
@@ -155,11 +162,16 @@ def structure(constants, additions):
                 _bridge.close()
                 return
             generation, has_cell = _bridge.pending
-            positions_match = np.allclose(
-                constants.positions,
+            # VASP may wrap coordinates into any periodic image after an SCF.
+            # Compare the minimum-image fractional displacement so two
+            # representations differing by an integer lattice vector match.
+            positions_delta = _minimum_image_delta(
                 _bridge.positions,
-                rtol=_bridge.tolerance,
-                atol=1.e-7,
+                constants.positions,
+            )
+            positions_match = np.all(
+                np.abs(positions_delta)
+                <= 1.e-7 + _bridge.tolerance * np.abs(constants.positions)
             )
             cell_match = True
             if has_cell:
@@ -174,7 +186,8 @@ def structure(constants, additions):
                     raise RuntimeError("VASP initial coordinates differ from the requested structure")
                 if _bridge.awaiting_update:
                     raise RuntimeError("VASP coordinates did not reach the requested structure")
-                np.subtract(_bridge.positions, constants.positions, out=additions.positions)
+                # Apply the shortest periodic displacement, not a full-cell jump.
+                np.copyto(additions.positions, positions_delta)
             if has_cell and not cell_match:
                 if generation == 1:
                     raise RuntimeError("VASP initial cell differs from the requested structure")
@@ -260,9 +273,48 @@ def _read_poscar(path: str) -> tuple[np.ndarray, np.ndarray]:
     coordinates = np.asarray(coordinate_rows, dtype=np.float64)
     if coordinate_mode == "c":
         coordinates *= scale
-    else:
+    else:  # else direct/fractional
         coordinates = coordinates @ lattice
     return coordinates, lattice
+
+
+def _minimum_image_cartesian_delta(
+        positions: np.ndarray,
+        reference: np.ndarray,
+        lattice: np.ndarray,
+) -> np.ndarray:
+    """Return the shortest Cartesian displacement from reference to positions.
+
+    Args:
+        positions: Cartesian coordinates shaped ``(n_atom, 3)``.
+        reference: Cartesian reference coordinates with the same shape.
+        lattice: Lattice vectors with one vector per row, shaped ``(3, 3)``.
+
+    Returns:
+        Cartesian displacements with the same shape as ``positions``. Each
+        component is reduced to the shortest periodic image.
+    """
+    fractional_delta = np.linalg.solve(
+        lattice.T,
+        (positions - reference).T,
+    ).T
+    fractional_delta -= np.round(fractional_delta)
+    return fractional_delta @ lattice
+
+
+def _wrap_cartesian(positions: np.ndarray, lattice: np.ndarray) -> np.ndarray:
+    """Fold Cartesian positions into the first unit cell of ``lattice``.
+
+    Args:
+        positions: Cartesian coordinates shaped ``(n_atom, 3)``.
+        lattice: Lattice vectors with one vector per row, shaped ``(3, 3)``.
+
+    Returns:
+        Cartesian coordinates with fractional components in ``[0, 1)``.
+    """
+    fractional = np.linalg.solve(lattice.T, positions.T).T
+    fractional = np.mod(fractional, 1.0)
+    return fractional @ lattice
 
 
 class _Transport(ABC):
@@ -620,13 +672,17 @@ class VASP_PluginModel(_BaseWrapper):
     be relative to it or an absolute shared script; both are launched with
     ``cwd=input_path``.
 
+    Cartesian coordinates are folded into the first unit cell only at the VASP
+    IPC boundary, and structure comparisons use the shortest periodic image.
+    Caller-side coordinates remain continuous and are not wrapped.
+
     Args:
         input_path: Directory containing INCAR, POSCAR, KPOINTS and POTCAR.
         submit_script: Relative script in ``input_path`` or absolute shared script.
         use_slurm: Select Slurm+mmap instead of local process+shared memory.
         evaluation_timeout: Seconds between liveness checks while waiting for
             plugin startup or an SCF evaluation result.
-        position_tolerance: Relative tolerance for structure matching.
+        position_tolerance: Relative tolerance for periodic structure matching.
 
     Returns:
         An object implementing BUCToolkit's Energy/Grad wrapper protocol.
@@ -642,7 +698,7 @@ class VASP_PluginModel(_BaseWrapper):
             direct child process. ``command`` is invalid in this mode.
             evaluation_timeout: Seconds between liveness checks while waiting
                 for plugin startup or an SCF evaluation result.
-            position_tolerance: Relative tolerance for structure matching.
+            position_tolerance: Relative tolerance for periodic structure matching.
             command: Optional command string or argv list, such as
                 ``"mpirun -n N vasp_std"``. It is only used for local launches.
 
@@ -776,6 +832,68 @@ class VASP_PluginModel(_BaseWrapper):
             raise ValueError("cell must have shape (3, 3) or (1, 3, 3)")
         return pos, cell_np, shape, X.device, X.dtype
 
+    def _effective_cell(self, cell: np.ndarray | None) -> np.ndarray | None:
+        """Return the lattice actually used by one evaluation.
+
+        Args:
+            cell: Optional lattice vectors for this request.
+
+        Returns:
+            The requested cell, or the POSCAR reference cell when ``cell`` is
+            ``None``.
+        """
+        return cell if cell is not None else self._reference_cell
+
+    def _cache_positions(self, positions: np.ndarray, cell: np.ndarray | None) -> np.ndarray:
+        """Return the periodic Cartesian key used by the result cache.
+
+        Args:
+            positions: Cartesian coordinates in shared-array precision.
+            cell: Optional lattice vectors for this request.
+
+        Returns:
+            Cartesian coordinates folded into the first unit cell when a
+            lattice is available, otherwise a copy of ``positions``.
+        """
+        lattice = self._effective_cell(cell)
+        if lattice is None:
+            return positions.copy()
+        return _wrap_cartesian(positions, lattice)
+
+    def _cache_matches(self, positions: np.ndarray, cell: np.ndarray | None) -> bool:
+        """Check whether the result cache holds this periodic structure.
+
+        Args:
+            positions: Cartesian coordinates in shared-array precision.
+            cell: Optional lattice vectors for this request.
+
+        Returns:
+            ``True`` when the cached coordinates and effective lattice match.
+        """
+        if self.cache is None:
+            return False
+        try:
+            cache_positions = self._cache_positions(positions, cell)
+        except np.linalg.LinAlgError:
+            # Let _evaluate report the singular lattice with its own error.
+            return False
+        if self.cache[0].shape != cache_positions.shape:
+            return False
+        # Periodic folding introduces round-off at the 1e-15 level.  A tight
+        # absolute tolerance absorbs that round-off without treating a
+        # meaningful structural change as a cache hit.
+        if not np.allclose(
+                self.cache[0],
+                cache_positions,
+                rtol=0.0,
+                atol=1.e-12,
+        ):
+            return False
+        effective_cell = self._effective_cell(cell)
+        if effective_cell is None or self.cache[1] is None:
+            return effective_cell is None and self.cache[1] is None
+        return np.array_equal(effective_cell, self.cache[1])
+
     @staticmethod
     def _cell_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Extract optional cell context without imposing an argument type.
@@ -811,6 +929,10 @@ class VASP_PluginModel(_BaseWrapper):
         initial geometry from the working directory.  Refusing a mismatch here
         prevents silently evaluating a different structure and avoids starting
         a long-running process for an invalid request.
+
+        Coordinates are compared through their shortest periodic images, so a
+        POSCAR and an API structure that differ by an integer lattice vector are
+        treated as the same structure.  Cell vectors are compared directly.
         """
         poscar_positions, poscar_cell = _read_poscar(os.path.join(self.input_path, "POSCAR"))
         self._reference_cell = poscar_cell
@@ -819,15 +941,23 @@ class VASP_PluginModel(_BaseWrapper):
                 "The initial coordinate shape does not match VASP POSCAR: "
                 f"{positions.shape} != {poscar_positions.shape}"
             )
-        if not np.allclose(
+        try:
+            displacement = _minimum_image_cartesian_delta(
                 positions,
                 poscar_positions,
-                rtol=self.position_tolerance,
-                atol=1.e-7,
-        ):
+                poscar_cell,
+            )
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(
+                "The POSCAR lattice is singular, so periodic coordinate "
+                "comparison is impossible."
+            ) from exc
+        tolerances = 1.e-7 + self.position_tolerance * np.abs(poscar_positions)
+        if not np.all(np.abs(displacement) <= tolerances):
             raise ValueError(
                 "The initial coordinates do not match VASP POSCAR within "
-                f"a relative tolerance of {self.position_tolerance:g}"
+                f"a relative tolerance of {self.position_tolerance:g} after "
+                "periodic wrapping"
             )
         if cell is not None and not np.allclose(
                 cell,
@@ -919,10 +1049,15 @@ class VASP_PluginModel(_BaseWrapper):
         # whereas BUCToolkit's public func/grad protocol uses Cartesian ones.
         # Convert only at the IPC boundary and retain Cartesian values in the
         # cache and in the returned tensors.
-        lattice = cell if cell is not None else self._reference_cell
+        lattice = self._effective_cell(cell)
         if lattice is None:
             raise RuntimeError("A lattice is required to convert Cartesian positions for VASP.")
         fractional_positions = np.linalg.solve(lattice.T, positions.T).T
+        # VASP wraps coordinates into the first unit cell after an SCF. Send
+        # the same canonical representation so the plugin's structure check
+        # does not mistake a periodic image for a different structure.
+        fractional_positions = np.mod(fractional_positions, 1.0)
+        wrapped_positions = fractional_positions @ lattice
         np.copyto(views["positions"], fractional_positions)
         if cell is not None:
             # Both interfaces expose one lattice vector per row.  Only the
@@ -954,7 +1089,12 @@ class VASP_PluginModel(_BaseWrapper):
                 raise RuntimeError(f"Unexpected plugin event: {event!r}")
             energy = float(views["energy"][0])
             forces = np.array(views["forces"], copy=True)
-            self.cache = (positions.copy(), None if cell is None else cell.copy(), energy, forces)
+            self.cache = (
+                wrapped_positions,
+                lattice.copy(),
+                energy,
+                forces,
+            )
             return energy, forces
         except BaseException as exc:
             self.failed = exc
@@ -967,7 +1107,7 @@ class VASP_PluginModel(_BaseWrapper):
         positions, cell, _, device, dtype = self._normalize(X, self._cell_from_call(args, kwargs))
         if self.closed or self.failed is not None:
             raise RuntimeError("VASP_PluginModel is unavailable")
-        if self.cache is not None and np.array_equal(self.cache[0], positions) and ((cell is None and self.cache[1] is None) or np.array_equal(cell, self.cache[1])):
+        if self._cache_matches(positions, cell):
             energy = self.cache[2]
         else:
             energy, _ = self._evaluate(positions, cell)
@@ -987,7 +1127,7 @@ class VASP_PluginModel(_BaseWrapper):
         positions, cell, shape, device, dtype = self._normalize(X, self._cell_from_call(args, kwargs))
         if not self.is_init:
             self.Energy(X, *args, **kwargs)
-        if self.cache is not None and np.array_equal(self.cache[0], positions) and ((cell is None and self.cache[1] is None) or np.array_equal(cell, self.cache[1])):
+        if self._cache_matches(positions, cell):
             forces = self.cache[3]
         else:
             _, forces = self._evaluate(positions, cell)
