@@ -4,7 +4,7 @@ Contiguous dumping and reading arrays data by memory mapping.
 """
 #  Copyright (c) 2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: MemMapTensorsIO.py
 #  Environment: Python 3.12
 from typing import Dict, List, Literal, Tuple, ByteString

@@ -3,7 +3,7 @@ Universal simulation-state container for MD, MC, Structure-Optimization, etc.
 """
 #  Copyright (c) 2026.7.10, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: StdContainer.py
 #  Environment: Python 3.12
 

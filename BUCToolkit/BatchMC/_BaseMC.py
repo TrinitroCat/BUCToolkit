@@ -1,6 +1,6 @@
 #  Copyright (c) 2024-2026.7.20, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0a
+#  Version: 1.0.1
 #  File: _BaseMC.py
 #  Environment: Python 3.12
 

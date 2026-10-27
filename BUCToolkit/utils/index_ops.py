@@ -1,7 +1,7 @@
 """ Indexed operations with given batch_indices """
 #  Copyright (c) 2026.1.22, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: index_ops.py
 #  Environment: Python 3.12
 

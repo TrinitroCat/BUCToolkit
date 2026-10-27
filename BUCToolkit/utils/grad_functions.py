@@ -1,7 +1,7 @@
 """ functions of gradient-related calculations. """
 #  Copyright (c) 2025.10.17, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: jac_and_hvp.py
 #  Environment: Python 3.12
 

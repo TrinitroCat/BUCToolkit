@@ -2,7 +2,7 @@
 
 #  Copyright (c) 2026, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: test_apis.py
 #  Environment: Python 3.12
 

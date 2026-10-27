@@ -1,6 +1,6 @@
 #  Copyright (c) 2026.5.18, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: model_wrappers.py
 #  Environment: Python 3.12
 

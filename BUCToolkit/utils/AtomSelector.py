@@ -1,7 +1,7 @@
 """ Selecting atoms by given conditions """
 #  Copyright (c) 2025.11.26, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: AtomSelector.py
 #  Environment: Python 3.12
 

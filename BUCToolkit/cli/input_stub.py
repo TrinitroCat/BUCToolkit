@@ -1,6 +1,6 @@
 #  Copyright (c) 2026.4.1, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: input_stub.py
 #  Environment: Python 3.12
 from typing import Any

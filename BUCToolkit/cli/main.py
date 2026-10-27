@@ -4,7 +4,7 @@ input files and args.
 """
 #  Copyright (c) 2026.3.27, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: main.py
 #  Environment: Python 3.12
 

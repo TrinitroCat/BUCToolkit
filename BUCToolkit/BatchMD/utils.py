@@ -7,7 +7,7 @@ initialization of an optional :class:`BaseConstr` component.
 
 #  Copyright (c) 2024-2026, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: utils.py
 #  Environment: Python 3.12
 

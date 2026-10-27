@@ -14,7 +14,7 @@ Run with ``python fused_md_test.py`` (CUDA and Triton are required).
 
 #  Copyright (c) 2026, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: fused_md_test.py
 #  Environment: Python 3.12
 

@@ -3,7 +3,7 @@ A standard container class to store properties of the chemical systems
 """
 #  Copyright (c) 2026.4.27, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: PropertiesContainer.py
 #  Environment: Python 3.12
 

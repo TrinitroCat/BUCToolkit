@@ -3,7 +3,7 @@ Model wrappers for ab initio calculations.
 """
 #  Copyright (c) 2026.4.23, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: ab_initio_wrappers.py
 #  Environment: Python 3.12
 
