@@ -16,7 +16,7 @@ from torch import nn
 
 from BUCToolkit import BatchOptim
 from BUCToolkit.BatchOptim.minimize import CG, QN, FIRE
-from BUCToolkit.BatchOptim.TS.Dimer import Dimer
+from BUCToolkit.BatchOptim.TS import Dimer, KrylovNewton, KrylovDynamics
 from BUCToolkit.api._io import _BaseAPI, _Model_Wrapper_dgl, PygBatchUpdater
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
 from BUCToolkit.utils._Element_info import ATOMIC_NUMBER
@@ -27,8 +27,9 @@ from BUCToolkit.utils.setup_loggers import has_any_handler
 
 class StructureOptimization(_BaseAPI):
     """
-    The class of structure optimization for relaxation and transition state (only for single-point TS search, e.g. DIMER).
-    Users need to set the dataset and dataloader manually.
+    The class of structure optimization for relaxation and transition-state
+    searches (DIMER, KRYLOV, and KRYDYN). Users need to set the dataset and
+    dataloader manually.
 
     Args:
         config_file: the path of input file.
@@ -62,24 +63,50 @@ class StructureOptimization(_BaseAPI):
 
         # For transition state tasks:
         TRANSITION_STATE:
-            ALGO: Literal[DIMER, DIMER_LS], the optimization algo.
-            X_DIFF_ATTR: str, the name of the attribute of dimer direction guess for initial coordinate X in data.
-                the dimer direction `X_diff` will be set by `X_diff = data.X_DIFF_ATTR`.
-                If `X_DIFF_ATTR` not a data's attribute, a random vector will be generated.
-            E_THRES: float, threshold of Energy difference (eV). Default: 1e-4.
-            TORQ_THRES: float, the threshold of max torque of Dimer. Default: 1e-2.
-            CURVATURE_THRES: float, the threshold of curvature for rotation convergence. Once the curvatures less than `CURVATURE_THRES`,
-                convergence will be viewed as reached. Default: - 0.1.
-            F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
-            MAXITER_TRANS: int, the maximum iteration numbers of transition steps. Default: 300.
-            MAXITER_ROT: int, the maximum iteration numbers of rotation steps. Default: 10.
-            MAX_STEPLENGTH: float, the maximum step length for dimer transitions. Default: 0.5.
-            DX: float, the step length of finite difference. Default: 1.e-2.
+            ALGO: Literal[DIMER, KRYLOV, KRYDYN], the transition-state algorithm.
+                DIMER uses the modified Dimer method, KRYLOV uses KrylovNewton, and
+                KRYDYN uses KrylovDynamics.
 
-            # Following parameters are only for ALGO=DIMER_LS
-            LINESEARCH_MAXITER: int, the maximum iteration numbers of line search, only used for CG, BFGS and MIX. Default: 10.
-            STEPLENGTH: float, the initial step length for line search of transition steps. Default: 0.5.
-            MOMENTA_COEFF: float, the coefficient of momentum in transition steps. Default: 0.
+            # Parameters shared by DIMER, KRYLOV, and KRYDYN:
+            X_DIFF_ATTR: str, the name of the data attribute that seeds the initial
+                direction guess, i.e., `X_diff = data.X_DIFF_ATTR`. If the attribute is
+                absent or has an incompatible shape, a random direction is generated.
+                An explicitly registered direction from `set_dimer_init_direction`
+                takes precedence over this attribute.
+            E_THRES: float, threshold of Energy difference (eV). Default: 1e-4 for
+                DIMER, and 1e-3 for KRYLOV and KRYDYN.
+            TORQ_THRES: float, the threshold of max torque (i.e., the eigenvector residual). Default: 1e-2.
+            F_THRES: float, threshold of max Force (eV/Ang). Default: 5e-2.
+            MAXITER_TRANS: int, the maximum iteration numbers of translation steps. Default: 300.
+            DX: float, the step length of finite difference for Hessian-vector products. Default: 1.e-2.
+            DUMP_QUANTITIES: tuple/list of str, quantities written to the optimizer dump.
+                Default: ('Energy', 'X', 'Force').
+            LOG_QUANTITIES: tuple/list of str, quantities printed by the logger.
+                Default: ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad').
+            REQUIRE_GRAD: bool, if True, autograd will be turned on for the energy
+                function. Default: False.
+
+            # Parameters only for ALGO=DIMER:
+            CURVATURE_THRES: float, the threshold of curvature for rotation convergence.
+                Once the curvatures are less than `CURVATURE_THRES`, convergence will be
+                viewed as reached. Default: -0.1.
+            MAXITER_ROT: int, the maximum iteration numbers of rotation steps. Default: 10.
+            MAX_STEPLENGTH: float, the maximum step length for dimer translations. Default: 0.5.
+
+            # Parameters only for ALGO=KRYLOV or ALGO=KRYDYN:
+            EIGEN_THRES: float, the residual threshold of the eigen solver. Default: 1e-2.
+            MAXITER_EIG: int, the maximum iteration numbers of the eigen solver. It must be
+                greater than 1 and greater than MORSE_INDEX. Default: 10.
+            STEPLENGTH: float, the initial translation step length. KRYDYN also uses it as
+                the initial FIRE-like time step. Default: 0.5.
+            MORSE_INDEX: int, the number of unstable modes to follow. Default: 1.
+            NEG_SPECTRA_CUTOFF: float, the cutoff used to clamp negative spectral modes.
+                Default: 1e-2.
+            POS_SPECTRA_CUTOFF: float, the cutoff used to clamp positive spectral modes.
+                Default: 1e-2.
+
+            # KRYLOV fixes `steplength_sheme` to 'trust_region' internally. The other
+            # schemes are not exposed because they remain experimental.
 
     """
 
@@ -93,6 +120,7 @@ class StructureOptimization(_BaseAPI):
         super().__init__(config_file)
 
         self.dX = None
+        self._dimer_init_direction: th.Tensor | None = None
         self.config_file = config_file
         self._set_data_type(data_type)
         #if data_type == 'pyg':
@@ -104,7 +132,10 @@ class StructureOptimization(_BaseAPI):
         self._has_load_data = False
         self._data_loader = None
 
-        __relax_dict = {'CG': CG, 'BFGS': QN, 'FIRE': FIRE, 'DIMER': Dimer}
+        __optimiser_dict = {
+            'CG': CG, 'BFGS': QN, 'FIRE': FIRE,
+            'DIMER': Dimer, 'KRYLOV': KrylovNewton, 'KRYDYN': KrylovDynamics
+        }
         if self.RELAXATION is not None:
             if self.TRANSITION_STATE is not None:
                 self.logger.warning(
@@ -123,7 +154,7 @@ class StructureOptimization(_BaseAPI):
             else:
                 _iterschem = 'FIRE'
                 iterschem = 'iter_scheme'
-            self.Stru_Opt = __relax_dict[self.RELAXATION['ALGO']]
+            self.Stru_Opt = __optimiser_dict[self.RELAXATION['ALGO']]
             # judge whether ALGO is minimization algo.
             self.require_grad = self.RELAXATION.get('REQUIRE_GRAD', False)
             if self.RELAXATION['ALGO'] not in {'CG', 'BFGS', 'FIRE'}:
@@ -156,28 +187,65 @@ class StructureOptimization(_BaseAPI):
                                         'device': self.DEVICE,
                                         'verbose': self.VERBOSE}
         elif self.TRANSITION_STATE is not None:
-            self.Stru_Opt = __relax_dict[self.TRANSITION_STATE['ALGO']]
+            self.Stru_Opt = __optimiser_dict[self.TRANSITION_STATE['ALGO']]
             self.require_grad = self.TRANSITION_STATE.get('REQUIRE_GRAD', False)
             self.x_diff_attr = self.TRANSITION_STATE.get('X_DIFF_ATTR', 'x_dimer')
-            self.Stru_Opt_config = {'E_threshold': self.TRANSITION_STATE.get('E_THRES', 1.e-4),
-                                    'Torque_thres': self.TRANSITION_STATE.get('TORQ_THRES', 1e-2),
-                                    'Curvature_thres': self.TRANSITION_STATE.get('CURVATURE_THRES', -0.1),
-                                    'F_threshold': self.TRANSITION_STATE.get('F_THRES', 0.05),
-                                    'maxiter_trans': int(self.TRANSITION_STATE.get('MAXITER_TRANS', 300)),
-                                    'maxiter_rot': int(self.TRANSITION_STATE.get('MAXITER_ROT', 10)),
-                                    'max_steplength': self.TRANSITION_STATE.get('MAX_STEPLENGTH', 0.5),
-                                    'dx': self.TRANSITION_STATE.get('DX', 1.e-2),
-                                    'device': self.DEVICE,
-                                    'verbose': self.VERBOSE}
+            if self.TRANSITION_STATE['ALGO'] == 'DIMER':
+                self.Stru_Opt_config = {
+                    'E_threshold': self.TRANSITION_STATE.get('E_THRES', 1.e-4),
+                    'Torque_thres': self.TRANSITION_STATE.get('TORQ_THRES', 1e-2),
+                    'Curvature_thres': self.TRANSITION_STATE.get('CURVATURE_THRES', -0.1),
+                    'F_threshold': self.TRANSITION_STATE.get('F_THRES', 0.05),
+                    'maxiter_trans': int(self.TRANSITION_STATE.get('MAXITER_TRANS', 300)),
+                    'maxiter_rot': int(self.TRANSITION_STATE.get('MAXITER_ROT', 10)),
+                    'max_steplength': self.TRANSITION_STATE.get('MAX_STEPLENGTH', 0.5),
+                    'dx': self.TRANSITION_STATE.get('DX', 1.e-2),
+                    'device': self.DEVICE,
+                    'verbose': self.VERBOSE,
+                    'dump_quantities': self.TRANSITION_STATE.get('DUMP_QUANTITIES', ('Energy', 'X', 'Force')),
+                    'log_quantities': self.TRANSITION_STATE.get('LOG_QUANTITIES', ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad')),
+                }
 
-            if self.TRANSITION_STATE['ALGO'] == 'DIMER_LS':
-                self.Stru_Opt_config.update(
-                    {
-                        'maxiter_linsearch': int(self.TRANSITION_STATE.get('LINESEARCH_MAXITER', 10)),
-                        'steplength': float(self.TRANSITION_STATE.get('STEPLENGTH', 0.5)),
-                        'momenta_coeff': float(self.TRANSITION_STATE.get('MOMENTA_COEFF', 0.)),
-                    }
-                )
+            elif self.TRANSITION_STATE['ALGO'] == 'KRYLOV':
+                # KrylovNewton hardcodes its iteration scheme in `__init__`.
+                self.Stru_Opt_config = {
+                    'E_threshold': float(self.TRANSITION_STATE.get('E_THRES', 1.e-3)),
+                    'Torque_thres': float(self.TRANSITION_STATE.get('TORQ_THRES', 1.e-2)),
+                    'Eigen_thres': float(self.TRANSITION_STATE.get('EIGEN_THRES', 1.e-2)),
+                    'F_threshold': float(self.TRANSITION_STATE.get('F_THRES', 0.05)),
+                    'maxiter_trans': int(self.TRANSITION_STATE.get('MAXITER_TRANS', 300)),
+                    'maxiter_eig': int(self.TRANSITION_STATE.get('MAXITER_EIG', 10)),
+                    'steplength': float(self.TRANSITION_STATE.get('STEPLENGTH', 0.5)),
+                    'steplength_sheme': 'trust_region',  # This method is the fully tested, others are experimental
+                    'dx': float(self.TRANSITION_STATE.get('DX', 1.e-2)),
+                    'device': self.DEVICE,
+                    'verbose': self.VERBOSE,
+                    'morse_index': int(self.TRANSITION_STATE.get('MORSE_INDEX', 1)),
+                    'neg_spectra_cutoff': float(self.TRANSITION_STATE.get('NEG_SPECTRA_CUTOFF', 1.e-2)),
+                    'pos_spectra_cutoff': float(self.TRANSITION_STATE.get('POS_SPECTRA_CUTOFF', 1.e-2)),
+                    'dump_quantities': self.TRANSITION_STATE.get('DUMP_QUANTITIES', ('Energy', 'X', 'Force')),
+                    'log_quantities': self.TRANSITION_STATE.get('LOG_QUANTITIES', ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad')),
+                }
+
+            elif self.TRANSITION_STATE['ALGO'] == 'KRYDYN':
+                # KrylovDynamics hardcodes its iteration scheme in `__init__`.
+                self.Stru_Opt_config = {
+                    'E_threshold': float(self.TRANSITION_STATE.get('E_THRES', 1.e-3)),
+                    'Torque_thres': float(self.TRANSITION_STATE.get('TORQ_THRES', 1.e-2)),
+                    'Eigen_thres': float(self.TRANSITION_STATE.get('EIGEN_THRES', 1.e-2)),
+                    'F_threshold': float(self.TRANSITION_STATE.get('F_THRES', 0.05)),
+                    'maxiter_trans': int(self.TRANSITION_STATE.get('MAXITER_TRANS', 300)),
+                    'maxiter_eig': int(self.TRANSITION_STATE.get('MAXITER_EIG', 10)),
+                    'steplength': float(self.TRANSITION_STATE.get('STEPLENGTH', 0.5)),
+                    'dx': float(self.TRANSITION_STATE.get('DX', 1.e-2)),
+                    'device': self.DEVICE,
+                    'verbose': self.VERBOSE,
+                    'morse_index': int(self.TRANSITION_STATE.get('MORSE_INDEX', 1)),
+                    'neg_spectra_cutoff': float(self.TRANSITION_STATE.get('NEG_SPECTRA_CUTOFF', 1.e-2)),
+                    'pos_spectra_cutoff': float(self.TRANSITION_STATE.get('POS_SPECTRA_CUTOFF', 1.e-2)),
+                    'dump_quantities': self.TRANSITION_STATE.get('DUMP_QUANTITIES', ('Energy', 'X', 'Force')),
+                    'log_quantities': self.TRANSITION_STATE.get('LOG_QUANTITIES', ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad')),
+                }
 
         if (self.RELAXATION is None) and (self.TRANSITION_STATE is None):
             self.logger.error('** ERROR: Both `RELAXATION` and `TRANSITION_STATE` were NOT set. NO TASK HERE, BYE!!! **')
@@ -187,10 +255,33 @@ class StructureOptimization(_BaseAPI):
 
     def set_dimer_init_direction(self, directions: th.Tensor):
         """
-        Set the initial direction guess for the dimer algorithm.
+        Set the initial direction guess for transition-state searches.
+
+        The registered direction is used by DIMER, KRYLOV, and KRYDYN, and takes
+        precedence over the data attribute named by `X_DIFF_ATTR`.
+
+        Args:
+            directions: initial direction with shape (n_atom, 3) or
+                (1, n_atom, 3). A batch whose coordinate shape differs from
+                `directions` falls back to a random direction with a warning.
+
         Returns: None
 
+        Raise:
+            TypeError: if `directions` is not a torch.Tensor.
+            ValueError: if `directions` is not 2D or 3D.
+
         """
+        if not isinstance(directions, th.Tensor):
+            raise TypeError(
+                f'`directions` must be a torch.Tensor, but occurred {type(directions)}.'
+            )
+        if directions.ndim == 2:
+            directions = directions.unsqueeze(0)
+        elif directions.ndim != 3:
+            raise ValueError(
+                f'`directions` must be 2D or 3D, but got shape {directions.shape}.'
+            )
         self._dimer_init_direction = directions
 
     def run(self, model, mode: Literal['minimize', 'ts']='minimize'):
@@ -354,25 +445,29 @@ class StructureOptimization(_BaseAPI):
                         del _
                     # initialize X_diff
                     if mode == 'ts':
-                        X_diff = get_init_dX(val_data)
+                        # An explicitly registered direction takes precedence over
+                        # the data attribute named by `X_DIFF_ATTR`.
+                        X_diff = self._dimer_init_direction
+                        if X_diff is None:
+                            X_diff = get_init_dX(val_data)
                         if X_diff is None:
                             self.logger.warning(
-                                f'WARNING: No initial dimer direction given. A random direction will be used.'
+                                f'WARNING: No initial transition-state direction given. A random direction will be used.'
                             )
                         elif not isinstance(X_diff, th.Tensor):
                             X_diff = None
                             self.logger.warning(
-                                f'WARNING: The dimer direction `X_diff` is expected to be a torch.Tensor, but got {type(X_diff)}, '
+                                f'WARNING: The transition-state direction `X_diff` is expected to be a torch.Tensor, but got {type(X_diff)}, '
                                 f'so it will be reset randomly.'
                             )
                         else:
                             if X_diff.dim() == 2:
                                 X_diff = X_diff.unsqueeze(0)
-                            X_diff = X_diff.to(X_init.dtype)
+                            X_diff = X_diff.to(device=X_init.device, dtype=X_init.dtype)
                             if X_diff.shape != X_init.shape:
-                                X_diff = None  # TS (Dimer) method will automatically create a random X_diff when input `X_diff = None`.
+                                X_diff = None  # TS methods automatically create a random X_diff when input `X_diff = None`.
                                 self.logger.warning(
-                                    f'WARNING: The dimer direction X_diff has different shape from `X_init`, so it will be reset randomly.'
+                                    f'WARNING: The transition-state direction X_diff has different shape from `X_init`, so it will be reset randomly.'
                                 )
                     else:
                         X_diff = None  # placeholder
@@ -419,7 +514,11 @@ class StructureOptimization(_BaseAPI):
                                 fixed_atom_tensor=fixed_mask,
                             )
                         else:  # i.e., mode == 'ts'
-                            optimizer: BatchOptim.Dimer
+                            optimizer: (
+                                BatchOptim.Dimer
+                                | BatchOptim.KrylovNewton
+                                | BatchOptim.KrylovDynamics
+                            )
                             optimizer.set_batch_updater(update_batch, update_batch_rot)
                             fin_ener, fin_x, fin_grad = optimizer.run(
                                 func=model_wrap.Energy,
@@ -433,10 +532,12 @@ class StructureOptimization(_BaseAPI):
                                 require_grad=self.require_grad,
                                 batch_indices=batch_indx,
                                 fixed_atom_tensor=fixed_mask,
+                                # There is an arg of `extra_krylov_dim` for Krylov based method,
+                                # but here set the default (i.e., 1) for simple.
                             )
-                        fin_ener = fin_ener.detach()#.squeeze(0)
-                        fin_x = fin_x.detach().squeeze(0)
-                        fin_grad = fin_grad.detach().squeeze(0)
+                        #fin_ener = fin_ener.detach()#.squeeze(0)
+                        #fin_x = fin_x.detach().squeeze(0)
+                        #fin_grad = fin_grad.detach().squeeze(0)
 
                     # Print info
                     if self.VERBOSE > 0:
@@ -477,7 +578,8 @@ class StructureOptimization(_BaseAPI):
 
     def transition_state(self, model):
         """
-        Use single-point methods (e.g., Dimer) to search the transition states.
+        Use single-point methods (DIMER, KRYLOV, or KRYDYN, selected by
+        `TRANSITION_STATE.ALGO`) to search the transition states.
         Alias of `self.run(model, mode='ts')`.
         Args:
             model: the input model which is `uninstantiated` nn.Module class.

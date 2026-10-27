@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.1 (2026-10-27)
+
+- Added `KRYLOV` (`KrylovNewton`) and `KRYDYN` (`KrylovDynamics`) as
+  `TRANSITION_STATE.ALGO` choices in `StructureOptimization`, including their
+  eigen-solver, step-length, Morse-index, and spectral-cutoff parameters.
+- Removed the unused `steplength_sheme` argument from `KrylovDynamics`, whose
+  dynamics update does not use a Newton step-length scheme.
+- Fixed `StructureOptimization.set_dimer_init_direction`, which now supplies the
+  initial direction used by DIMER, KRYLOV, and KRYDYN runs.
+- Exported `KrylovDynamics` from `BUCToolkit.BatchOptim` and synchronized the
+  CLI input stub with the transition-state parameters.
+- Updated the English and Chinese README, manual, examples, and the
+  `StructureOptimization` docstring.
+- Added transition-state API smoke tests under `testsuite/regression_test`,
+  covering config construction and short DIMER/KRYLOV/KRYDYN runs.
+
 ## 1.0.0 (2026-10-20)
 
 The first stable release.

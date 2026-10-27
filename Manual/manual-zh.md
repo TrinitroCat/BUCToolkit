@@ -50,7 +50,7 @@ CLI 使用 `buctoolkit -i input.yml` 或 `buctoolkit input.yml` 读取 YAML。�
 | `DATA_NAME_SELECTOR` | 正则表达式 | 按样本名筛选结构。 |
 | `DATA_READER_KWARGS` | 映射 | `{}` | 传给对应结构读取器的额外关键字参数。 |
 | `FSDATA_PATH` | 路径 | NEB、Blue-Moon CMD 等成对任务的终态数据。[Blue-Moon CMD](examples-zh.md#blue-moon-cmd) |
-| `DISPDATA_PATH` | 路径 | Dimer 过渡态搜索的初始位移/方向数据。 |
+| `DISPDATA_PATH` | 路径 | DIMER、KRYLOV、KRYDYN 过渡态搜索的初始位移/方向数据。 |
 | `VAL_SET_PATH` | 路径 | 训练时显式指定验证集。 |
 | `VAL_SPLIT_RATIO` | `[0, 1)` 的浮点数 | 未指定 `VAL_SET_PATH` 时的验证集比例。 |
 | `DATA_LOADER_KWARGS` | 映射 | `{}` | 传给 API DataLoader 的额外关键字参数。旧输入仅有此字段而没有 `DATA_READER_KWARGS` 时，为兼容性也会传给结构读取器并发出弃用警告。 |
@@ -93,10 +93,34 @@ CLI 使用 `buctoolkit -i input.yml` 或 `buctoolkit input.yml` 读取 YAML。�
 
 ### `TRANSITION_STATE`
 
-当前 `ALGO` 为 `DIMER`，`X_DIFF_ATTR` 指定初始 dimer 方向属性。
-`E_THRES`、`TORQ_THRES`、`F_THRES`、`MAXITER_TRANS`、`MAXITER_ROT`、
-`MAX_STEPLENGTH` 和 `DX` 分别控制能量、扭矩、力、平移/旋转迭代、步长和
-有限差分参数。参见[过渡态搜索](examples-zh.md#transition-state-search)。
+`ALGO` 可选 `DIMER`（改进 Dimer）、`KRYLOV`（`KrylovNewton`）或 `KRYDYN`
+（`KrylovDynamics`）。`X_DIFF_ATTR` 指定用于初始化方向猜测的数据属性；若该
+属性缺失或形状不兼容，则使用随机方向。
+`StructureOptimization.set_dimer_init_direction(...)` 注册的显式方向优先于
+该属性。
+
+| 参数 | 适用算法 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `ALGO` | 全部 | `DIMER` | 过渡态算法。 |
+| `X_DIFF_ATTR` | 全部 | `x_dimer` | 用于初始化方向猜测的数据属性。 |
+| `E_THRES` | 全部 | DIMER 为 `1e-4`，KRYLOV/KRYDYN 为 `1e-3` | 能量差阈值。 |
+| `TORQ_THRES` | 全部 | `1e-2` | 最大扭矩 / 特征向量残差。 |
+| `F_THRES` | 全部 | `0.05` | 最大力阈值。 |
+| `MAXITER_TRANS` | 全部 | `300` | 平移步最大迭代次数。 |
+| `DX` | 全部 | `1e-2` | 有限差分计算 Hessian-向量积的步长。 |
+| `DUMP_QUANTITIES`、`LOG_QUANTITIES` | 全部 | 见 API docstring | 优化器 dump 与 logger 输出选择。 |
+| `REQUIRE_GRAD` | 全部 | `false` | 是否对能量函数启用自动梯度。 |
+| `CURVATURE_THRES` | DIMER | `-0.1` | 旋转收敛的曲率阈值。 |
+| `MAXITER_ROT` | DIMER | `10` | 每个平移步的最大旋转次数。 |
+| `MAX_STEPLENGTH` | DIMER | `0.5` | 最大平移步长。 |
+| `EIGEN_THRES` | KRYLOV、KRYDYN | `1e-2` | 特征求解器残差阈值。 |
+| `MAXITER_EIG` | KRYLOV、KRYDYN | `10` | 特征求解器最大迭代次数；必须大于 `MORSE_INDEX`。 |
+| `STEPLENGTH` | KRYLOV、KRYDYN | `0.5` | 初始平移步长；KRYDYN 亦用作初始时间步长。 |
+| `MORSE_INDEX` | KRYLOV、KRYDYN | `1` | 需要跟踪的不稳定模式数。 |
+| `NEG_SPECTRA_CUTOFF`、`POS_SPECTRA_CUTOFF` | KRYLOV、KRYDYN | `1e-2` | 负/正谱模式截断阈值。 |
+
+`KRYLOV` 内部将 `steplength_sheme` 固定为 `trust_region`；low-level 类中的其余
+scheme 仍属实验路径，API 不暴露。参见[过渡态搜索](examples-zh.md#transition-state-search)。
 
 ### `VIBRATION`
 
@@ -234,7 +258,10 @@ PyTorch 自动梯度上下文。
 `CI_NEB` 接受 `N_images`、`spring_const`、`optimizer`、`optimizer_configs`、
 `steplength`、收敛阈值、`maxiter`、`device` 和 `verbose`。`KrylovNewton` 与
 `KrylovDynamics` 还接受 `Torque_thres`、`Eigen_thres`、`maxiter_trans`、
-`maxiter_eig`、`dx`、`morse_index` 及谱截断参数。参见[low-level 过渡态搜索](examples-zh.md#low-level-transition-state-search)。
+`maxiter_eig`、`steplength`、`dx`、`morse_index` 及谱截断参数；两者在 `run`
+中通过 `X_diff` 初始化第一次特征求解，并接受 `extra_krylov_dim`。
+`KrylovNewton` 另外接受 `steplength_sheme`，其中 `trust_region` 是经过测试的
+选项。参见[low-level 过渡态搜索](examples-zh.md#low-level-transition-state-search)。
 
 low-level `Frequency` 计算器接受 `method`、可选 `block_size`、有限差分
 `delta`、可选 `output_file` 和 `dump_hessian`；`normal_mode` 调用还需要能量

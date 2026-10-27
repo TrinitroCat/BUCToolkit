@@ -53,7 +53,7 @@ file are resolved relative to that file.
 | `DATA_NAME_SELECTOR` | regular-expression string | Selects structures by sample name. |
 | `DATA_READER_KWARGS` | mapping | `{}` | Extra keyword arguments passed to the selected structure reader. |
 | `FSDATA_PATH` | path | Final-state data for paired tasks such as NEB and Blue-Moon CMD. [Blue-Moon CMD](examples.md#blue-moon-cmd) |
-| `DISPDATA_PATH` | path | Initial dimer displacement/direction data for TS searches. |
+| `DISPDATA_PATH` | path | Initial direction/displacement data for DIMER, KRYLOV, and KRYDYN TS searches. |
 | `VAL_SET_PATH` | path | Explicit training validation set. |
 | `VAL_SPLIT_RATIO` | float in `[0, 1)` | Validation fraction when `VAL_SET_PATH` is absent. |
 | `DATA_LOADER_KWARGS` | mapping | `{}` | Extra keyword arguments for the selected API DataLoader. When reading an older input with this field but no `DATA_READER_KWARGS`, the same mapping is also passed to the structure reader with a deprecation warning. |
@@ -105,10 +105,34 @@ file are resolved relative to that file.
 
 ### `TRANSITION_STATE`
 
-`ALGO` is currently `DIMER`; `X_DIFF_ATTR` names the initial dimer direction
-attribute. `E_THRES`, `TORQ_THRES`, `F_THRES`, `MAXITER_TRANS`, `MAXITER_ROT`,
-`MAX_STEPLENGTH`, and `DX` control convergence, rotation, translation, and
-finite-difference settings. `REQUIRE_GRAD` has the usual meaning. See
+`ALGO` selects `DIMER` (modified Dimer), `KRYLOV` (`KrylovNewton`), or
+`KRYDYN` (`KrylovDynamics`). `X_DIFF_ATTR` names the data attribute used to
+seed the initial direction; when it is absent or incompatible, a random
+direction is generated. `StructureOptimization.set_dimer_init_direction(...)`
+registers an explicit direction that takes precedence over this attribute.
+
+| Field | Applies to | Default | Meaning |
+| --- | --- | --- | --- |
+| `ALGO` | all | `DIMER` | Transition-state algorithm. |
+| `X_DIFF_ATTR` | all | `x_dimer` | Data attribute seeding the initial direction. |
+| `E_THRES` | all | `1e-4` DIMER, `1e-3` KRYLOV/KRYDYN | Energy-difference threshold. |
+| `TORQ_THRES` | all | `1e-2` | Maximum torque / eigenvector residual. |
+| `F_THRES` | all | `0.05` | Maximum-force threshold. |
+| `MAXITER_TRANS` | all | `300` | Maximum translation iterations. |
+| `DX` | all | `1e-2` | Finite-difference displacement for Hessian-vector products. |
+| `DUMP_QUANTITIES`, `LOG_QUANTITIES` | all | see API docstring | Optimizer-dump and logger selections. |
+| `REQUIRE_GRAD` | all | `false` | Enable autograd for the energy function. |
+| `CURVATURE_THRES` | DIMER | `-0.1` | Curvature threshold for rotation convergence. |
+| `MAXITER_ROT` | DIMER | `10` | Maximum rotations per translation step. |
+| `MAX_STEPLENGTH` | DIMER | `0.5` | Maximum translation step length. |
+| `EIGEN_THRES` | KRYLOV, KRYDYN | `1e-2` | Eigen-solver residual threshold. |
+| `MAXITER_EIG` | KRYLOV, KRYDYN | `10` | Maximum eigen-solver iterations; must exceed `MORSE_INDEX`. |
+| `STEPLENGTH` | KRYLOV, KRYDYN | `0.5` | Initial translation step length; KRYDYN also uses it as the initial time step. |
+| `MORSE_INDEX` | KRYLOV, KRYDYN | `1` | Number of unstable modes to follow. |
+| `NEG_SPECTRA_CUTOFF`, `POS_SPECTRA_CUTOFF` | KRYLOV, KRYDYN | `1e-2` | Negative/positive spectral clamping cutoffs. |
+
+`KRYLOV` fixes `steplength_sheme` to `trust_region`; the other schemes in the
+low-level class remain experimental and are not exposed through the API. See
 [transition-state search](examples.md#transition-state-search).
 
 ### `VIBRATION`
@@ -269,8 +293,11 @@ adds `Torque_thres`, `Curvature_thres`, `maxiter_trans`, `maxiter_rot`,
 `max_steplength`, and `dx`. `CI_NEB` takes `N_images`, `spring_const`,
 `optimizer`, `optimizer_configs`, `steplength`, convergence thresholds,
 `maxiter`, `device`, and `verbose`. `KrylovNewton` and `KrylovDynamics` add
-`Torque_thres`, `Eigen_thres`, `maxiter_trans`, `maxiter_eig`, `dx`,
-`morse_index`, and spectral cutoffs. See [low-level transition-state search](examples.md#low-level-transition-state-search).
+`Torque_thres`, `Eigen_thres`, `maxiter_trans`, `maxiter_eig`, `steplength`,
+`dx`, `morse_index`, and spectral cutoffs; both take `X_diff` in `run` to seed
+the first eigensolve and accept `extra_krylov_dim`. `KrylovNewton` also accepts
+`steplength_sheme`, where `trust_region` is the tested option. See [low-level
+transition-state search](examples.md#low-level-transition-state-search).
 
 The low-level `Frequency` calculator takes `method`, optional `block_size`,
 finite-difference `delta`, optional `output_file`, and `dump_hessian`. Its

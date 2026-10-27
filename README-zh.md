@@ -261,6 +261,8 @@ optimizer = StructureOptimization(inp_file_for_opt)
 optimizer.set_dataset(data_for_opt)
 optimizer.set_dataloader(dataloader)
 optimizer.relax(your_model_class)  # 仅传入模型类而不要实例化
+# 过渡态搜索：将输入文件中的 `TRANSITION_STATE.ALGO` 设为 DIMER、KRYLOV 或 KRYDYN，
+# 然后调用 `optimizer.run(your_model_class, mode='ts')`。
 
 # ----------------------------------
 #   分子动力学
@@ -450,7 +452,7 @@ SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出�
 ###DATA_PATH: !!str /your/data/path # 用于计算的数据路径；如果是训练，将被视为训练集
 ###DATA_NAME_SELECTOR: !!str ".*$"  # 用于选择数据名称的正则表达式，仅加载匹配的名称
 ###FSDATA_PATH: !!str your/final/state/data/path  # 用于需要初态和终态的计算，如 CI‑NEB
-###DISPDATA_PATH: !!str your/displacement/data/path  # 用于需要初始方向猜测的计算，如 Dimer
+###DISPDATA_PATH: !!str your/displacement/data/path  # 用于需要初始方向猜测的计算，如 DIMER/KRYLOV/KRYDYN 过渡态搜索
 ###VAL_SET_PATH: !!str your/validation/set/path  # 训练时需要的验证集路径
 ###VAL_SPLIT_RATIO: !!float 0.1  # 验证集占总数据集的比例；若指定了 VAL_SET_PATH，此参数被忽略
 ###DATA_READER_KWARGS: {}      # 结构读取器的关键字参数
@@ -514,16 +516,36 @@ RELAXATION:
 
 # 过渡态搜索
 TRANSITION_STATE:
-  ALGO: !!str DIMER  # 选项：DIMER
-  X_DIFF_ATTR: !!str x_dimer  # 初始 dimer 方向属性名
-  E_THRES: !!float 1.e-4    # 能量差阈值
-  TORQ_THRES: !!float 1.e-2  # 旋转过程中扭矩收敛阈值，即特征向量残差
+  ALGO: !!str DIMER  # 选项：DIMER（改进 Dimer）、KRYLOV（KrylovNewton）、KRYDYN（KrylovDynamics）
+  X_DIFF_ATTR: !!str x_dimer  # 用于初始化方向猜测的数据属性；缺失时使用随机方向
+  # DIMER、KRYLOV、KRYDYN 共用
+  E_THRES: !!float 1.e-4    # 能量差阈值（DIMER 默认值；KRYLOV/KRYDYN 默认值为 1.e-3）
+  TORQ_THRES: !!float 1.e-2  # 扭矩阈值，即特征向量残差
   F_THRES: !!float 5.e-2    # 最大力阈值
   MAXITER_TRANS: !!int 300  # 平移步最大迭代次数
-  MAXITER_ROT: !!int 5      # 旋转步最大迭代次数
+  DX: !!float 1.e-2         # 有限差分计算 Hessian‑向量积的步长
+  DUMP_QUANTITIES:  # 写入优化器 dump 的量
+    - !!str Energy
+    - !!str X
+    - !!str Force
+  LOG_QUANTITIES:   # 由 logger 打印的量
+    - !!str Energy
+    - !!str E_diff
+    - !!str F_eps
+    - !!str X
+    - !!str X_grad
+  REQUIRE_GRAD: !!bool False  # 是否在计算过程中启用自动梯度
+  # 仅 DIMER
+  CURVATURE_THRES: !!float -0.1  # 旋转收敛的曲率阈值
+  MAXITER_ROT: !!int 10      # 旋转步最大迭代次数
   MAX_STEPLENGTH: !!float 0.5  # 步长限制
-  DX: !!float 1.e-1         # 有限差分计算 Hessian‑向量积的步长
-  REQUIRE_GRAD: !!bool False  # 同上
+  # 仅 KRYLOV 和 KRYDYN
+  EIGEN_THRES: !!float 1.e-2  # 特征求解器的残差阈值
+  MAXITER_EIG: !!int 10       # 特征求解器最大迭代次数；必须大于 MORSE_INDEX
+  STEPLENGTH: !!float 0.5     # 初始平移步长（KRYDYN 亦用作初始时间步长）
+  MORSE_INDEX: !!int 1        # 需要跟踪的不稳定模式数
+  NEG_SPECTRA_CUTOFF: !!float 1.e-2  # 负谱模式截断阈值
+  POS_SPECTRA_CUTOFF: !!float 1.e-2  # 正谱模式截断阈值
 
 # 振动分析（简谐近似）
 VIBRATION:

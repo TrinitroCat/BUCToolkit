@@ -87,16 +87,25 @@ CONFIG_STUB = {
 
     # Transition state
     "TRANSITION_STATE": {
-        "ALGO": ("DIMER", str, "algorithm for transition state search. Options: DIMER"),
-        "X_DIFF_ATTR": ("x_dimer", str, "attribute name of initial dimer direction"),
-        "E_THRES": (1e-4, float, "energy difference threshold for convergence"),
-        "TORQ_THRES": (1e-2, float, "torque threshold during rotation process, i.e., residuals of eigen vector"),
+        "ALGO": ("DIMER", str, "algorithm for transition state search. Options: DIMER, KRYLOV, KRYDYN"),
+        "X_DIFF_ATTR": ("x_dimer", str, "attribute name of the initial direction guess"),
+        "E_THRES": (1e-4, float, "energy difference threshold for convergence (KRYLOV/KRYDYN default: 1e-3)"),
+        "TORQ_THRES": (1e-2, float, "torque threshold, i.e., residuals of the eigen vector"),
         "F_THRES": (5e-2, float, "force threshold for convergence"),
         "MAXITER_TRANS": (300, int, "maximum number of translation steps"),
-        "MAXITER_ROT": (5, int, "maximum number of rotation steps"),
-        "MAX_STEPLENGTH": (0.5, float, "maximum step length"),
-        "DX": (0.1, float, "finite difference length for Hessian-vector product"),
+        "DX": (1e-2, float, "finite difference length for Hessian-vector product"),
+        "DUMP_QUANTITIES": (["Energy", "X", "Force"], list, "quantities written to the optimizer dump"),
+        "LOG_QUANTITIES": (["Energy", "E_diff", "F_eps", "X", "X_grad"], list, "quantities printed by the logger"),
         "REQUIRE_GRAD": (False, bool, "whether to toggle on auto-gradient during calculation"),
+        "CURVATURE_THRES": (-0.1, float, "DIMER only: curvature threshold for rotation convergence"),
+        "MAXITER_ROT": (10, int, "DIMER only: maximum number of rotation steps"),
+        "MAX_STEPLENGTH": (0.5, float, "DIMER only: maximum translation step length"),
+        "EIGEN_THRES": (1e-2, float, "KRYLOV/KRYDYN only: residual threshold of the eigen solver"),
+        "MAXITER_EIG": (10, int, "KRYLOV/KRYDYN only: maximum number of eigen solver iterations"),
+        "STEPLENGTH": (0.5, float, "KRYLOV/KRYDYN only: initial step length (KRYDYN time step)"),
+        "MORSE_INDEX": (1, int, "KRYLOV/KRYDYN only: number of unstable modes to follow"),
+        "NEG_SPECTRA_CUTOFF": (1e-2, float, "KRYLOV/KRYDYN only: cutoff for negative spectral modes"),
+        "POS_SPECTRA_CUTOFF": (1e-2, float, "KRYLOV/KRYDYN only: cutoff for positive spectral modes"),
     },
 
     # Vibration analyses

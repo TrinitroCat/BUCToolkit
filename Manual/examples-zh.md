@@ -151,7 +151,9 @@ optimizer.set_dataloader(PyGDataLoader, {'shuffle': False})
 optimizer.run(MyModel, mode='minimize')
 ```
 
-使用 `mode='ts'` 和 `set_dimer_init_direction(...)` 可进行 dimer 搜索。
+过渡态搜索使用 `mode='ts'`；`TRANSITION_STATE.ALGO` 选择 `DIMER`、`KRYLOV`
+或 `KRYDYN`。初始方向可通过 `set_dimer_init_direction(...)` 或 `X_DIFF_ATTR`
+指定的数据属性提供。
 
 ### 通过API运行分子动力学模拟
 
@@ -284,8 +286,19 @@ runner.set_dataloader(ISFSPyGDataLoader)
 runner.run(MyModel)
 ```
 
-对于 dimer 搜索，使用 `StructureOptimization` 的 `mode='ts'`，并通过
-`set_dimer_init_direction` 或配置数据提供方向。
+使用 `StructureOptimization` 进行过渡态搜索时，设置 `mode='ts'`，并将
+`TRANSITION_STATE.ALGO` 设为 `DIMER`、`KRYLOV` 或 `KRYDYN`：
+
+```python
+from BUCToolkit.api.StructureOptimization import StructureOptimization
+from BUCToolkit.api.DataLoaders import PyGDataLoader
+
+runner = StructureOptimization('./ts.yml')
+runner.set_dataset({'data': data_list})
+runner.set_dataloader(PyGDataLoader, {'shuffle': False})
+runner.set_dimer_init_direction(X_diff)  # 可选；也可使用 X_DIFF_ATTR
+runner.run(MyModel, mode='ts')
+```
 
 ### 通过API运行 Metropolis 蒙特卡罗方法
 
@@ -389,7 +402,10 @@ dimer.run(
 
 `CI_NEB` 接收初态/终态坐标，并使用 `N_images`、`spring_const`、
 `optimizer_configs`、收敛阈值和 `maxiter`。`KrylovNewton` 与
-`KrylovDynamics` 还需要配置 eigen solver；完整的专用签名见源码 docstring。
+`KrylovDynamics` 还通过 `Eigen_thres`、`maxiter_eig`、`morse_index` 及谱截断
+参数配置 eigen solver；两者都在 `run` 中通过 `X_diff` 初始化第一次特征求解，
+并接受 `extra_krylov_dim`。`KrylovNewton` 另外接受 `steplength_sheme`，其中
+`trust_region` 是经过测试的选项。完整的专用签名见源码 docstring。
 
 ### Low-level 频率分析
 

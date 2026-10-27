@@ -269,6 +269,8 @@ optimizer = StructureOptimization(inp_file_for_opt)
 optimizer.set_dataset(data_for_opt)
 optimizer.set_dataloader(dataloader)
 optimizer.relax(your_model_class)  # Only input the class, DO NOT instantiate
+# For a transition-state search, set `TRANSITION_STATE.ALGO` in the input file
+# to DIMER, KRYLOV, or KRYDYN, then call `optimizer.run(your_model_class, mode='ts')`.
 
 # ----------------------------------
 #   FOR MOLECULAR DYNAMICS
@@ -470,7 +472,7 @@ SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output prediction
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
 ###FSDATA_PATH: !!str your/final/state/data/path  # used for calc. requiring both initial and final states, e.g., CI-NEB
-###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., Dimer
+###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., DIMER/KRYLOV/KRYDYN transition-state searches
 ###VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
 ###VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
 ###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader.
@@ -540,16 +542,36 @@ RELAXATION:
 
 # transition state
 TRANSITION_STATE:
-  ALGO: !!str DIMER  # options: DIMER
-  X_DIFF_ATTR: !!str x_dimer  # the attribute name of initial dimer direction
-  E_THRES: !!float 1.e-4    # see above
-  TORQ_THRES: !!float 1.e-2  # threshold of torque during rotation process, i.e., the residuals of eigen vec.
+  ALGO: !!str DIMER  # options: DIMER (modified Dimer), KRYLOV (KrylovNewton), KRYDYN (KrylovDynamics)
+  X_DIFF_ATTR: !!str x_dimer  # data attribute seeding the initial direction; a random direction is used if absent
+  # shared by DIMER, KRYLOV, and KRYDYN
+  E_THRES: !!float 1.e-4    # energy difference threshold (DIMER default; KRYLOV/KRYDYN default: 1.e-3)
+  TORQ_THRES: !!float 1.e-2  # torque threshold, i.e., the residuals of the eigen vector
   F_THRES: !!float 5.e-2    # see above
   MAXITER_TRANS: !!int 300  # maximum iteration number of translation steps
-  MAXITER_ROT: !!int 5      # maximum iteration number of rotation steps
-  MAX_STEPLENGTH: !!float 0.5  # limit of steplength
-  DX: !!float 1.e-1         # length for finite difference to calc. Hessian-vector prod.
+  DX: !!float 1.e-2         # length for finite difference to calc. Hessian-vector prod.
+  DUMP_QUANTITIES:  # quantities written to the optimizer dump
+    - !!str Energy
+    - !!str X
+    - !!str Force
+  LOG_QUANTITIES:   # quantities printed by the logger
+    - !!str Energy
+    - !!str E_diff
+    - !!str F_eps
+    - !!str X
+    - !!str X_grad
   REQUIRE_GRAD: !!bool False  # see above
+  # DIMER only
+  CURVATURE_THRES: !!float -0.1  # curvature threshold for rotation convergence
+  MAXITER_ROT: !!int 10      # maximum iteration number of rotation steps
+  MAX_STEPLENGTH: !!float 0.5  # limit of steplength
+  # KRYLOV and KRYDYN only
+  EIGEN_THRES: !!float 1.e-2  # residual threshold of the eigen solver
+  MAXITER_EIG: !!int 10       # maximum iteration number of the eigen solver; must exceed MORSE_INDEX
+  STEPLENGTH: !!float 0.5     # initial translation step length (KRYDYN also uses it as the initial time step)
+  MORSE_INDEX: !!int 1        # number of unstable modes to follow
+  NEG_SPECTRA_CUTOFF: !!float 1.e-2  # cutoff for clamping negative spectral modes
+  POS_SPECTRA_CUTOFF: !!float 1.e-2  # cutoff for clamping positive spectral modes
 
 # vibration analyses (harmonic)
 VIBRATION:

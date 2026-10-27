@@ -946,7 +946,6 @@ class KrylovDynamics(_KrylovBase):
             maxiter_trans: int = 300,
             maxiter_eig: int = 10,
             steplength: float = 0.5,
-            steplength_sheme: Literal['trust_region', 'line_newton', 'line_search'] = 'trust_region',
             dx: float = 1.e-2,
             output_file: str | None = None,
             device: str | th.device = 'cpu',
@@ -981,7 +980,6 @@ class KrylovDynamics(_KrylovBase):
             dump_quantities=dump_quantities,
             log_quantities=log_quantities
         )
-        self.steplength_sheme = steplength_sheme
         self.max_steplength = float(steplength) * 5.
         self.alpha = float(alpha)
         self.alpha_fac = float(alpha_fac)
