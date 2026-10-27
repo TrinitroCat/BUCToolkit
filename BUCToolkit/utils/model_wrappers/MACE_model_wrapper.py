@@ -380,6 +380,7 @@ class MACEWrapper(nn.Module):
         forward_config.setdefault('training', self.training)
         # MACE obtains forces with autograd even during evaluation, while BUCToolkit
         # deliberately evaluates validation batches inside a no-grad context.
+        forward_config.setdefault('compute_stress', True)
         with th.enable_grad():
             return self.mace_model(mace_input, **forward_config)
 

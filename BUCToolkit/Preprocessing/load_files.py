@@ -341,13 +341,18 @@ class OUTCAR2Feat(BatchStructures):
     Parameters:
         path: str, the path of batched OUTCAR-like files. The Sample ids would be labeled as its file names.
     """
-
-    def __init__(self, path: str, verbose: int = 1):
+    
+    _KB_TO_EV_A3 = 0.1 / 160.21766208  # VASP "in kB" -> eV/Å^3，stress相关单位转换
+    
+    def __init__(self, path: str, verbose: int = 1, stress_sign: float = -1.0, read_stress: bool = True):
         super().__init__()
         self.verbose = verbose
         self.path = path
         self.Energies = list()
         self.Forces = list()
+        self.Stresses = list()
+        self.stress_sign = float(stress_sign)
+        self.read_stress = bool(read_stress)
 
         self.__n_atom_partt = re.compile(r"(?<=NIONS =)\s+[0-9]+\n")
         self.__pos_force_partt = re.compile(
@@ -356,6 +361,8 @@ class OUTCAR2Feat(BatchStructures):
         self.__cell_partt = re.compile(r'VOLUME and BASIS-vectors are now.*\n.*\n.*\n.*\n.*direct lattice vectors.*\n(.*\n.*\n.*)')
         self.__is_converge_partt = re.compile(r'aborting loop .')
         self.__voltage_partt = re.compile(r"E-fermi\s+:\s*([-|0-9.]+)\s+XC")
+        _f = r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?"
+        self.__stress_partt = re.compile(rf"in kB\s+({_f}(?:\s+{_f}){{5}})")
 
     @staticmethod
     def _get_atom_info(data: str) -> Tuple[List, List]:
@@ -391,13 +398,14 @@ class OUTCAR2Feat(BatchStructures):
             if n_atom is None:
                 warnings.warn(f'No atoms matched in {file_name}, skipped.', RuntimeWarning)
                 if parallel:
-                    return [], [], [], [], [], [], [], [], []
+                    return [], [], [], [], [], [], [], [], [], []
                 else:
                     return None
             n_atom = int(n_atom.group())  #将输出的原子个数保存为整数形式
             position_iter = re.finditer(self.__pos_force_partt, data)  #通过re匹配的迭代器函数，找到原子坐标
             _energies = re.findall(self.__energy_partt, data)
             is_converged = re.findall(self.__is_converge_partt, data)
+            stress_matches = list(re.finditer(self.__stress_partt, data)) if self.read_stress else []
 
             # ATOM & Number
             atoms, numbers = self._get_atom_info(data)
@@ -409,6 +417,7 @@ class OUTCAR2Feat(BatchStructures):
             cells = list()
             _data = list()
             energies = list()
+            stresses = list()
             for i, match_for in enumerate(position_iter):  #循环的取每次迭代找到的一个结构的原子坐标与受力信息
                 # if SCF converged, content in OUTCAR would be 'aborting loop because ...' else 'aborting loop EDIFF was not reached ...'
                 if is_converged[i][-1] == 'b':
@@ -416,6 +425,20 @@ class OUTCAR2Feat(BatchStructures):
                     _dat = [re.split(r'[0-9][\n\s\t]+', dat_) for dat_ in _dat[:-2]]  #去除空字符或都是横线的行，然后循环的对每一行进行划分 <<< # TODO
                     _data.append(_dat)  #将原子坐标的列表添加进列表中
                     energies.append(float(_energies[i]))
+                    # NEW: stress 按离子步 index 对齐；缺失/解析失败写 None，长度始终与其它列表一致
+                    if self.read_stress and i < len(stress_matches):
+                        try:
+                            xx, yy, zz, xy, yz, zx = [float(v) for v in stress_matches[i].group(1).split()]
+                            stresses.append(
+                                np.array([[xx, xy, zx],
+                                          [xy, yy, yz],
+                                          [zx, yz, zz]], dtype=np.float32)
+                                * (self._KB_TO_EV_A3 * self.stress_sign)
+                            )
+                        except (ValueError, IndexError):
+                            stresses.append(None)
+                    else:
+                        stresses.append(None)
                     # sometimes the cell vector would not split by \s e.g., "0.000000000-10.955671660 20.223087260"
                     _cell_line: List[str] = cells_str[i].split()
                     if len(_cell_line) != 3:
@@ -436,13 +459,13 @@ class OUTCAR2Feat(BatchStructures):
                     RuntimeWarning
                 )
                 if parallel:
-                    return [], [], [], [], [], [], [], [], []
+                    return [], [], [], [], [], [], [], [], [], []
                 else:
                     return None
             if len(_data) == 0:
                 warnings.warn(f'Occurred empty data in file {file_name}, skipped.', RuntimeWarning)
                 if parallel:
-                    return [], [], [], [], [], [], [], [], []
+                    return [], [], [], [], [], [], [], [], [], []
                 else:
                     return None
 
@@ -459,7 +482,7 @@ class OUTCAR2Feat(BatchStructures):
             _id = [file_name + f'_{i}' for i in range(n_step)]
             # output
             if parallel:
-                return _id, atoms.tolist(), numbers.tolist(), cells, coords, energies, forces, fixed, ['C',] * n_step
+                return _id, atoms.tolist(), numbers.tolist(), cells, coords, energies, forces, stresses, fixed, ['C',] * n_step
             else:
                 self._Sample_ids.extend(_id)
                 self.Elements.extend(atoms.tolist())
@@ -468,12 +491,13 @@ class OUTCAR2Feat(BatchStructures):
                 self.Coords.extend(coords)
                 self.Energies.extend(energies)
                 self.Forces.extend(forces)
+                self.Stresses.extend(stresses)
                 self.Fixed.extend(fixed)
                 self.Coords_type.extend(["C"] * n_step)
         except Exception as err:
             warnings.warn(f'An Error occurred when reading file {file_name}, skipped.\nError: {err}.')
             if parallel:
-                return [], [], [], [], [], [], [], [], []
+                return [], [], [], [], [], [], [], [], [], []
             else:
                 return None
 
@@ -527,8 +551,9 @@ class OUTCAR2Feat(BatchStructures):
                 self.Coords.extend(temp[4])
                 self.Energies.extend(temp[5])
                 self.Forces.extend(temp[6])
-                self.Fixed.extend(temp[7])
-                self.Coords_type.extend(temp[8])
+                self.Stresses.extend(temp[7])
+                self.Fixed.extend(temp[8])
+                self.Coords_type.extend(temp[9])
         if not self._Sample_ids: raise RuntimeError('All data are empty.')
         self._update_indices()
         self._check_id()

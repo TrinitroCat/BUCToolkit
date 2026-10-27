@@ -434,6 +434,7 @@ class MACEDataLoader:
         if is_train:
             self.energy: Any = data['labels']['energy']
             self.forces: Any = data['labels'].get('forces', None)
+            self.stress: Any = data['labels'].get('stress', None)   # NEW
             if shuffle: self.shuffle()
             if not isinstance(self.energy, th.Tensor):
                 self.energy_ = th.from_numpy(np.array(self.energy, dtype=np.float32))
@@ -454,6 +455,9 @@ class MACEDataLoader:
         if self.forces is not None:
             random.seed(_seed)
             random.shuffle(self.forces)
+        if self.stress is not None:                                # NEW
+            random.seed(_seed)
+            random.shuffle(self.stress)
 
     def __iter__(self, ) -> Self:
         return self
@@ -484,6 +488,20 @@ class MACEDataLoader:
                     label: Dict[Literal['energy', 'forces'], th.Tensor] | None = {'energy': energy, 'forces': force}
                 else:
                     label: Dict[Literal['energy'], th.Tensor] | None = {'energy': energy}
+
+                # NEW: 若 labels 里带 'stress'，组装成 (B, 3, 3) 挂到 label 上
+                if self.stress is not None:
+                    _stress_batch = self.stress[
+                        self._index * self.batchsize: (self._index + 1) * self.batchsize
+                    ]
+                    if isinstance(_stress_batch, th.Tensor):
+                        stress = _stress_batch.to(self.device)
+                    else:
+                        stress = th.stack([
+                            th.as_tensor(s, dtype=th.float32).reshape(3, 3)
+                            for s in _stress_batch
+                        ]).to(self.device)
+                    label['stress'] = stress
 
             elif self.data_names is not None:
                 label: Sequence[str] = self.data_names[self._index * self.batchsize: (self._index + 1) * self.batchsize]

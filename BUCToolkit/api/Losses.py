@@ -15,6 +15,77 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
+class Energy_Force_Stress_Loss(nn.Module):
+    """
+    A loss function that evaluates predicted energy, forces and stress.
+    Energy & force losses are averaged over each atom.
+    The stress loss is averaged over ``n_struct * 9`` components.
+
+    Stress is mandatory: ``pred['stress']`` and ``label['stress']`` must both
+    be present and shaped ``(B, 3, 3)``.
+
+    Parameters:
+        loss_E: the loss function of energy.
+        loss_F: the loss function of forces.
+        loss_S: the loss function of stress.
+        coeff_E: the coefficient of energy.
+        coeff_F: the coefficient of forces.
+        coeff_S: the coefficient of stress.
+
+    forward:
+        pred: Dict[Literal['energy', 'forces', 'stress'], th.Tensor], output of models;
+        label: Dict[Literal['energy', 'forces', 'stress'], th.Tensor], labels.
+    """
+    def __init__(self,
+                 loss_E: Literal['MAE', 'MSE', 'SmoothMAE'] | nn.Module = 'MAE',
+                 loss_F: Literal['MAE', 'MSE'] | nn.Module = 'MAE',
+                 loss_S: Literal['MAE', 'MSE', 'SmoothMAE', 'Huber'] | nn.Module = 'MSE',
+                 coeff_E: float = 1.,
+                 coeff_F: float = 1.,
+                 coeff_S: float = 1.) -> None:
+        super().__init__()
+        if loss_E == 'MAE':
+            self.loss_E = nn.SmoothL1Loss(reduction='sum')
+        elif loss_E == 'MSE':
+            self.loss_E = nn.MSELoss(reduction='sum')
+        elif loss_E == 'SmoothMAE':
+            self.loss_E = nn.SmoothL1Loss(reduction='sum')
+        else:
+            self.loss_E = loss_E
+
+        if loss_F == 'MAE':
+            self.loss_F = nn.SmoothL1Loss(reduction='sum')
+        elif loss_F == 'MSE':
+            self.loss_F = nn.MSELoss(reduction='sum')
+        else:
+            self.loss_F = loss_F
+
+        if loss_S == 'MAE':
+            self.loss_S = nn.SmoothL1Loss(reduction='sum')
+        elif loss_S == 'SmoothMAE':
+            self.loss_S = nn.SmoothL1Loss(reduction='sum')
+        elif loss_S == 'MSE':
+            self.loss_S = nn.MSELoss(reduction='sum')
+        elif loss_S == 'Huber':
+            self.loss_S = nn.HuberLoss(reduction='sum')
+        else:
+            self.loss_S = loss_S
+
+        self.coeff_E = coeff_E
+        self.coeff_F = coeff_F
+        self.coeff_S = coeff_S
+
+    def forward(self,
+                pred: Dict[Literal['energy', 'forces', 'stress'], th.Tensor],
+                label: Dict[Literal['energy', 'forces', 'stress'], th.Tensor]):
+        n_atom = math.prod(pred['forces'].shape[:-1])
+        loss = (self.coeff_E * self.loss_E(pred['energy'], label['energy']) +
+                self.coeff_F * self.loss_F(pred['forces'], label['forces'])) / n_atom
+
+        n_struct = pred['stress'].shape[0]
+        loss = loss + self.coeff_S * self.loss_S(pred['stress'], label['stress']) / (n_struct * 9)
+        return loss
+
 class Energy_Force_Loss(nn.Module):
     """
     A loss function that evaluates both predicted energy and forces.
