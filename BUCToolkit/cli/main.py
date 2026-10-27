@@ -273,9 +273,19 @@ def parse_center_input_file(
         )
     if data_reader_kwargs is None:
         data_reader_kwargs = {}
+    fs_data_reader_kwargs = config.get('FSDATA_READER_KWARGS')
+    if fs_data_reader_kwargs is None:
+        fs_data_reader_kwargs = {}
+    disp_data_reader_kwargs = config.get('DISP_DATA_READER_KWARGS')
+    if disp_data_reader_kwargs is None:
+        disp_data_reader_kwargs = {}
     data_loader_kwargs = config.get('DATA_LOADER_KWARGS', {})
     if not isinstance(data_reader_kwargs, dict):
         raise TypeError('`DATA_READER_KWARGS` must be a mapping.')
+    if not isinstance(fs_data_reader_kwargs, dict):
+        raise TypeError('`FSDATA_READER_KWARGS` must be a mapping.')
+    if not isinstance(disp_data_reader_kwargs, dict):
+        raise TypeError('`DISP_DATA_READER_KWARGS` must be a mapping.')
     if not isinstance(data_loader_kwargs, dict):
         raise TypeError('`DATA_LOADER_KWARGS` must be a mapping.')
     source_data: bt.Structures = load_data(data_type, data_path, data_reader_kwargs)
@@ -326,7 +336,7 @@ def parse_center_input_file(
         # handle the final state configuration data
         fs_data_path = config.get('FSDATA_PATH', None)
         if fs_data_path is not None:
-            fs_data = load_data(data_type, fs_data_path, data_reader_kwargs)
+            fs_data = load_data(data_type, fs_data_path, fs_data_reader_kwargs)
         else:
             raise ValueError(f"`FSDATA_PATH` is not defined. For TASK `{task_type}`, "
                              f"you must specify the final-state-configuration data path by `FSDATA_PATH`.")
@@ -358,7 +368,7 @@ def parse_center_input_file(
 
         if displace_flag is not None:  # IF DISPDATA_PATH is given, canonically use data read from DISPDATA_PATH
             if disp_data_path is not None:
-                disp_data = load_data(data_type, disp_data_path, data_reader_kwargs)
+                disp_data = load_data(data_type, disp_data_path, disp_data_reader_kwargs)
                 _validate_paired_structures(source_data, disp_data, 'DISPDATA_PATH')
                 disp_data = disp_data[selected_indices]
                 for i, dat in enumerate(is_data_list):
@@ -367,7 +377,7 @@ def parse_center_input_file(
             else:
                 fs_data_path = config.get('FSDATA_PATH', None)  # ELIF FSDATA_PATH, use interpolated middle point of is/fs conf.
                 if fs_data_path is not None:
-                    fs_data = load_data(data_type, fs_data_path, data_reader_kwargs)
+                    fs_data = load_data(data_type, fs_data_path, fs_data_reader_kwargs)
                     _validate_paired_structures(source_data, fs_data, 'FSDATA_PATH')
                     fs_data = fs_data[selected_indices]
                     # convert to displacement by interpolation
@@ -446,14 +456,14 @@ def parse_center_input_file(
     return task_type, runner, udf_model
 
 
-def load_data(data_type, data_path, data_loader_kwargs):
+def load_data(data_type, data_path, reader_kwargs):
     """
     Load structures using a CLI data-type name.
 
     Args:
         data_type: External structure format or built-in trajectory type.
         data_path: File or directory passed to the selected reader.
-        data_loader_kwargs: Reader-specific keyword arguments.
+        reader_kwargs: Reader-specific keyword arguments.
 
     Returns:
         A populated ``BatchStructures``-compatible collection.
@@ -479,10 +489,10 @@ def load_data(data_type, data_path, data_loader_kwargs):
 
     if data_type in DATA_TYPE['external']:
         data = DATA_TYPE['external'][data_type](data_path)
-        data.read(**data_loader_kwargs)
+        data.read(**reader_kwargs)
     elif data_type in DATA_TYPE['buildin']:
         data_reader = DATA_TYPE['buildin'][data_type]
-        data = data_reader(data_path, **data_loader_kwargs)
+        data = data_reader(data_path, **reader_kwargs)
     else:
         raise ValueError(
             f'Data type "{data_type}" is invalid. '

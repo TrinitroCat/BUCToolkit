@@ -51,12 +51,14 @@ file are resolved relative to that file.
 | `DATA_TYPE` | `POSCAR`, `OUTCAR`, `CIF`, `ASE_TRAJ`, `BS`, `OPT`, `MD`, `MC` | CLI input format. `BS` is BUCToolkit's binary structure format. [Load data](examples.md#load-and-convert-structures) |
 | `DATA_PATH` | path | Initial or training data. |
 | `DATA_NAME_SELECTOR` | regular-expression string | Selects structures by sample name. |
-| `DATA_READER_KWARGS` | mapping | `{}` | Extra keyword arguments passed to the selected structure reader. |
+| `DATA_READER_KWARGS` | mapping | Extra keyword arguments for the reader of `DATA_PATH` and `VAL_SET_PATH`. It is not inherited by the other data paths. |
 | `FSDATA_PATH` | path | Final-state data for paired tasks such as NEB and Blue-Moon CMD. [Blue-Moon CMD](examples.md#blue-moon-cmd) |
+| `FSDATA_READER_KWARGS` | mapping | Extra keyword arguments for the reader of `FSDATA_PATH` only. |
 | `DISPDATA_PATH` | path | Initial direction/displacement data for DIMER, KRYLOV, and KRYDYN TS searches. |
+| `DISP_DATA_READER_KWARGS` | mapping | Extra keyword arguments for the reader of `DISPDATA_PATH` only. |
 | `VAL_SET_PATH` | path | Explicit training validation set. |
 | `VAL_SPLIT_RATIO` | float in `[0, 1)` | Validation fraction when `VAL_SET_PATH` is absent. |
-| `DATA_LOADER_KWARGS` | mapping | `{}` | Extra keyword arguments for the selected API DataLoader. When reading an older input with this field but no `DATA_READER_KWARGS`, the same mapping is also passed to the structure reader with a deprecation warning. |
+| `DATA_LOADER_KWARGS` | mapping | Extra keyword arguments for the selected API DataLoader. A legacy input with this field but no `DATA_READER_KWARGS` also passes it to the `DATA_PATH` reader with a deprecation warning. |
 | `IS_SHUFFLE` | boolean | Shuffle unpaired calculation data. Paired tasks and CMD use deterministic order. |
 
 ### `TRAIN`
@@ -132,7 +134,9 @@ registers an explicit direction that takes precedence over this attribute.
 | `NEG_SPECTRA_CUTOFF`, `POS_SPECTRA_CUTOFF` | KRYLOV, KRYDYN | `1e-2` | Negative/positive spectral clamping cutoffs. |
 
 `KRYLOV` fixes `steplength_sheme` to `trust_region`; the other schemes in the
-low-level class remain experimental and are not exposed through the API. See
+low-level class remain experimental and are not exposed through the API.
+For CLI TS inputs, `DISPDATA_PATH` is read with `DISP_DATA_READER_KWARGS`;
+when it is absent, `FSDATA_PATH` is read with `FSDATA_READER_KWARGS`. See
 [transition-state search](examples.md#transition-state-search).
 
 ### `VIBRATION`
@@ -180,9 +184,10 @@ low-level class remain experimental and are not exposed through the API. See
 | `REQUIRE_FIXMAN`         | boolean or "auto"                       | `"auto"`               | # `auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually.                                                                                                               |
 
 
-For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` and uses
-`ISFSPyGDataLoader`; `SLOW_GROWTH` reads only `DATA_PATH` and uses
-`PyGDataLoader`. Both current CMD paths require `BATCH_SIZE: 1`.
+For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` (with
+`DATA_READER_KWARGS`/`FSDATA_READER_KWARGS`) and uses `ISFSPyGDataLoader`;
+`SLOW_GROWTH` reads only `DATA_PATH` and uses `PyGDataLoader`. Both current CMD
+paths require `BATCH_SIZE: 1`.
 
 ### `MC`
 

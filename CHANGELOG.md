@@ -13,8 +13,10 @@
   CLI input stub with the transition-state parameters.
 - Updated the English and Chinese README, manual, examples, and the
   `StructureOptimization` docstring.
-- Added transition-state API smoke tests under `testsuite/regression_test`,
-  covering config construction and short DIMER/KRYLOV/KRYDYN runs.
+- Added `FSDATA_READER_KWARGS` and `DISP_DATA_READER_KWARGS` so the
+  `FSDATA_PATH` and `DISPDATA_PATH` readers can be configured independently.
+  `DATA_READER_KWARGS` now applies only to `DATA_PATH` and `VAL_SET_PATH` and
+  is not inherited by the other data paths.
 
 ## 1.0.0 (2026-10-20)
 

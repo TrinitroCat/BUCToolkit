@@ -371,10 +371,13 @@ buctoolkit --test fast     # 短步数 smoke 检查, 只检查代码通过性
   自定义 wrapper 必须继承 `_BaseWrapper`。模型文件仍与 wrapper 分离，必要时继续由
   `MODEL_FILE` 和 `MODEL_NAME` 指定。
 
-`DATA_READER_KWARGS` 传给结构读取器，`DATA_LOADER_KWARGS` 传给 API
-`DataLoader`。只有旧输入文件包含 `DATA_LOADER_KWARGS` 而没有
-`DATA_READER_KWARGS` 时，为保持兼容会同时将该映射传给读取器，并发出弃用警告。
-NEB、Blue-Moon CMD 等成对任务仍使用任务专用的 paired loader。
+`DATA_READER_KWARGS` 传给 `DATA_PATH`（以及训练验证集）的结构读取器。
+`FSDATA_READER_KWARGS` 和 `DISP_DATA_READER_KWARGS` 分别独立配置
+`FSDATA_PATH` 和 `DISPDATA_PATH` 的读取器，不会继承 `DATA_READER_KWARGS`。
+`DATA_LOADER_KWARGS` 传给 API `DataLoader`。只有旧输入文件包含
+`DATA_LOADER_KWARGS` 而没有 `DATA_READER_KWARGS` 时，为保持兼容会同时将该
+映射传给 `DATA_PATH` 的读取器，并发出弃用警告。NEB、Blue-Moon CMD 等成对
+任务仍使用任务专用的 paired loader。
 
 不带参数启动的交互式 CLI 是配置编辑器和关键词查询工具。`task` 创建的输入文件
 使用与 API 相同的运行时默认值；科学模型、数据和任务参数仍需用户根据实际研究任务填写，
@@ -452,10 +455,12 @@ SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出�
 ###DATA_PATH: !!str /your/data/path # 用于计算的数据路径；如果是训练，将被视为训练集
 ###DATA_NAME_SELECTOR: !!str ".*$"  # 用于选择数据名称的正则表达式，仅加载匹配的名称
 ###FSDATA_PATH: !!str your/final/state/data/path  # 用于需要初态和终态的计算，如 CI‑NEB
+###FSDATA_READER_KWARGS: {}     # 仅用于 FSDATA_PATH 的结构读取器关键字参数
 ###DISPDATA_PATH: !!str your/displacement/data/path  # 用于需要初始方向猜测的计算，如 DIMER/KRYLOV/KRYDYN 过渡态搜索
+###DISP_DATA_READER_KWARGS: {}  # 仅用于 DISPDATA_PATH 的结构读取器关键字参数
 ###VAL_SET_PATH: !!str your/validation/set/path  # 训练时需要的验证集路径
 ###VAL_SPLIT_RATIO: !!float 0.1  # 验证集占总数据集的比例；若指定了 VAL_SET_PATH，此参数被忽略
-###DATA_READER_KWARGS: {}      # 结构读取器的关键字参数
+###DATA_READER_KWARGS: {}      # 用于 DATA_PATH 和 VAL_SET_PATH 的结构读取器关键字参数
 ###DATA_LOADER_KWARGS: {}      # API DataLoader 的关键字参数
 ###IS_SHUFFLE: !!bool false    # 计算前是否随机打乱数据集
 

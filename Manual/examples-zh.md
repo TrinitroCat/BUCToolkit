@@ -238,7 +238,9 @@ Blue-Moon 将初态和终态配对，插值生成 `N_IMAGES` 个镜像，并使�
 TASK: CMD
 BATCH_SIZE: 1
 DATA_PATH: ./initial.bs
+DATA_READER_KWARGS: {}      # initial.bs 的读取器参数
 FSDATA_PATH: ./final.bs
+FSDATA_READER_KWARGS: {}    # final.bs 的读取器参数
 MD:
   ENSEMBLE: NVT
   CONSTR_MD_SCHEME: BLUE_MOON
@@ -299,6 +301,9 @@ runner.set_dataloader(PyGDataLoader, {'shuffle': False})
 runner.set_dimer_init_direction(X_diff)  # 可选；也可使用 X_DIFF_ATTR
 runner.run(MyModel, mode='ts')
 ```
+
+CLI 输入文件中，`DISPDATA_PATH` 使用 `DISP_DATA_READER_KWARGS` 读取；当它
+缺失时，`FSDATA_PATH` 使用 `FSDATA_READER_KWARGS` 读取。
 
 ### 通过API运行 Metropolis 蒙特卡罗方法
 

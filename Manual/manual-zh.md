@@ -48,12 +48,14 @@ CLI 使用 `buctoolkit -i input.yml` 或 `buctoolkit input.yml` 读取 YAML。�
 | `DATA_TYPE` | `POSCAR`、`OUTCAR`、`CIF`、`ASE_TRAJ`、`BS`、`OPT`、`MD`、`MC` | CLI 输入格式；`BS` 是 BUCToolkit 内置结构格式。[数据读取](examples-zh.md#load-and-convert-structures) |
 | `DATA_PATH` | 路径 | 初态或训练数据路径。 |
 | `DATA_NAME_SELECTOR` | 正则表达式 | 按样本名筛选结构。 |
-| `DATA_READER_KWARGS` | 映射 | `{}` | 传给对应结构读取器的额外关键字参数。 |
+| `DATA_READER_KWARGS` | 映射 | 传给 `DATA_PATH` 和 `VAL_SET_PATH` 对应结构读取器的额外关键字参数；不会被其他数据路径继承。 |
 | `FSDATA_PATH` | 路径 | NEB、Blue-Moon CMD 等成对任务的终态数据。[Blue-Moon CMD](examples-zh.md#blue-moon-cmd) |
+| `FSDATA_READER_KWARGS` | 映射 | 仅传给 `FSDATA_PATH` 对应结构读取器的额外关键字参数。 |
 | `DISPDATA_PATH` | 路径 | DIMER、KRYLOV、KRYDYN 过渡态搜索的初始位移/方向数据。 |
+| `DISP_DATA_READER_KWARGS` | 映射 | 仅传给 `DISPDATA_PATH` 对应结构读取器的额外关键字参数。 |
 | `VAL_SET_PATH` | 路径 | 训练时显式指定验证集。 |
 | `VAL_SPLIT_RATIO` | `[0, 1)` 的浮点数 | 未指定 `VAL_SET_PATH` 时的验证集比例。 |
-| `DATA_LOADER_KWARGS` | 映射 | `{}` | 传给 API DataLoader 的额外关键字参数。旧输入仅有此字段而没有 `DATA_READER_KWARGS` 时，为兼容性也会传给结构读取器并发出弃用警告。 |
+| `DATA_LOADER_KWARGS` | 映射 | 传给 API DataLoader 的额外关键字参数。旧输入仅有此字段而没有 `DATA_READER_KWARGS` 时，为兼容性也会传给 `DATA_PATH` 的结构读取器并发出弃用警告。 |
 | `IS_SHUFFLE` | 布尔值 | 是否打乱非成对计算数据；成对任务和 CMD 使用确定顺序。 |
 
 ### `TRAIN`
@@ -120,7 +122,9 @@ CLI 使用 `buctoolkit -i input.yml` 或 `buctoolkit input.yml` 读取 YAML。�
 | `NEG_SPECTRA_CUTOFF`、`POS_SPECTRA_CUTOFF` | KRYLOV、KRYDYN | `1e-2` | 负/正谱模式截断阈值。 |
 
 `KRYLOV` 内部将 `steplength_sheme` 固定为 `trust_region`；low-level 类中的其余
-scheme 仍属实验路径，API 不暴露。参见[过渡态搜索](examples-zh.md#transition-state-search)。
+scheme 仍属实验路径，API 不暴露。CLI 的 TS 输入中，`DISPDATA_PATH` 使用
+`DISP_DATA_READER_KWARGS` 读取；当它缺失时，`FSDATA_PATH` 使用
+`FSDATA_READER_KWARGS` 读取。参见[过渡态搜索](examples-zh.md#transition-state-search)。
 
 ### `VIBRATION`
 
@@ -160,9 +164,10 @@ scheme 仍属实验路径，API 不暴露。参见[过渡态搜索](examples-zh.
 | `REQUIRE_FIXMAN`         | 布尔值 or "auto"                        | `"auto"`           | `auto` 意为 `BLUE_MOON` 设为 True, `SLOW_GROWTH` 设为False. 可手动设置 True/False.                                                                                                                     |
 
 
-CLI 的 `BLUE_MOON` 从 `DATA_PATH`/`FSDATA_PATH` 读取成对结构并使用
-`ISFSPyGDataLoader`；`SLOW_GROWTH` 只读取 `DATA_PATH` 并使用
-`PyGDataLoader`。当前两种 CMD 都要求 `BATCH_SIZE: 1`。
+CLI 的 `BLUE_MOON` 从 `DATA_PATH`/`FSDATA_PATH` 读取成对结构（分别使用
+`DATA_READER_KWARGS`/`FSDATA_READER_KWARGS`）并使用 `ISFSPyGDataLoader`；
+`SLOW_GROWTH` 只读取 `DATA_PATH` 并使用 `PyGDataLoader`。当前两种 CMD 都要求
+`BATCH_SIZE: 1`。
 
 ### `MC`
 

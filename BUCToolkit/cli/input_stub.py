@@ -28,10 +28,12 @@ CONFIG_STUB = {
     "DATA_PATH": ("/your/data/path", str, "path of data used for calculation. If training, it is viewed as the training set"),
     "DATA_NAME_SELECTOR": (".*$", str, "regular expression to select data names. Only matched names will be loaded"),
     "FSDATA_PATH": ("your/final/state/data/path", str, "path for final state data, used for calculations requiring both initial and final states, e.g., CI-NEB"),
+    "FSDATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader of FSDATA_PATH"),
     "DISPDATA_PATH": ("your/displacement/data/path", str, "path for displacement data, used for calculations requiring initial guess of a direction, e.g., Dimer"),
+    "DISP_DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader of DISPDATA_PATH"),
     "VAL_SET_PATH": ("your/validation/set/path", str, "path for validation set, used for training that requires validation data"),
     "VAL_SPLIT_RATIO": (0.1, float, "ratio of validation set in the total dataset. Ignored if VAL_SET_PATH is provided"),
-    "DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader"),
+    "DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader of DATA_PATH and VAL_SET_PATH"),
     "DATA_LOADER_KWARGS": ({}, dict, "keyword arguments for the API DataLoader"),
     "IS_SHUFFLE": (False, bool, "whether to randomly shuffle dataset before calculating"),
 

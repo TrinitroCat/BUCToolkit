@@ -386,11 +386,15 @@ The executable path keeps model loading and model adaptation separate:
   The custom wrapper must inherit `_BaseWrapper`. The model file remains
   separate and is still selected by `MODEL_FILE` and `MODEL_NAME` when needed.
 
-`DATA_READER_KWARGS` is passed to the selected structure reader.
-`DATA_LOADER_KWARGS` is passed to the API `DataLoader`. Older input files that
-only contain `DATA_LOADER_KWARGS` remain readable: that mapping is also used
-for the reader and a deprecation warning is emitted. Paired tasks such as
-NEB and Blue-Moon CMD continue to use their task-specific paired loaders.
+`DATA_READER_KWARGS` is passed to the structure reader for `DATA_PATH` (and the
+training validation set). `FSDATA_READER_KWARGS` and
+`DISP_DATA_READER_KWARGS` independently configure the readers for
+`FSDATA_PATH` and `DISPDATA_PATH`; they do not inherit
+`DATA_READER_KWARGS`. `DATA_LOADER_KWARGS` is passed to the API `DataLoader`.
+Older input files that only contain `DATA_LOADER_KWARGS` remain readable: that
+mapping is also used for the `DATA_PATH` reader and a deprecation warning is
+emitted. Paired tasks such as NEB and Blue-Moon CMD continue to use their
+task-specific paired loaders.
 
 The no-argument interactive CLI is a configuration editor and keyword lookup
 tool. `task` creates a reference input file with the same runtime defaults as
@@ -472,10 +476,12 @@ SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output prediction
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
 ###FSDATA_PATH: !!str your/final/state/data/path  # used for calc. requiring both initial and final states, e.g., CI-NEB
+###FSDATA_READER_KWARGS: {}     # keyword arguments for the structure reader of FSDATA_PATH only.
 ###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., DIMER/KRYLOV/KRYDYN transition-state searches
+###DISP_DATA_READER_KWARGS: {}  # keyword arguments for the structure reader of DISPDATA_PATH only.
 ###VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
 ###VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
-###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader.
+###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader of DATA_PATH and VAL_SET_PATH.
 ###DATA_LOADER_KWARGS: {}      # keyword arguments for the API DataLoader.
 ###IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calculating.
 

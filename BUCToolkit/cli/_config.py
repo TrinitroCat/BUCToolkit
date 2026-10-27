@@ -118,7 +118,7 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
 
     Relative paths owned by the CLI configuration are resolved from the input
     file's directory. Strings inside user-defined mappings such as
-    ``MODEL_CONFIG`` and ``DATA_LOADER_KWARGS`` are left unchanged.
+    ``MODEL_CONFIG`` and the reader/loader keyword mappings are left unchanged.
 
     Args:
         input_path: YAML input file to load.
@@ -153,7 +153,13 @@ def load_input_config(input_path: str, require_output_root: bool = False) -> dic
 
     from BUCToolkit.api._io import CONFIG_DEFAULTS
     for key, value in CONFIG_DEFAULTS.items():
-        if key in {"OUTPUT_ROOT", "DATA_READER_KWARGS", "DATA_LOADER_KWARGS"}:
+        if key in {
+            "OUTPUT_ROOT",
+            "DATA_READER_KWARGS",
+            "FSDATA_READER_KWARGS",
+            "DISP_DATA_READER_KWARGS",
+            "DATA_LOADER_KWARGS",
+        }:
             continue
         config.setdefault(key, copy.deepcopy(value))
 

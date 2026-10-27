@@ -242,7 +242,9 @@ uses `ISFSPyGDataLoader`:
 TASK: CMD
 BATCH_SIZE: 1
 DATA_PATH: ./initial.bs
+DATA_READER_KWARGS: {}      # reader options for initial.bs
 FSDATA_PATH: ./final.bs
+FSDATA_READER_KWARGS: {}    # reader options for final.bs
 MD:
   ENSEMBLE: NVT
   CONSTR_MD_SCHEME: BLUE_MOON
@@ -303,6 +305,9 @@ runner.set_dataloader(PyGDataLoader, {'shuffle': False})
 runner.set_dimer_init_direction(X_diff)  # optional; X_DIFF_ATTR also works
 runner.run(MyModel, mode='ts')
 ```
+
+For CLI input files, `DISPDATA_PATH` uses `DISP_DATA_READER_KWARGS`; when it is
+absent, `FSDATA_PATH` uses `FSDATA_READER_KWARGS`.
 
 ## Metropolis Monte Carlo
 
