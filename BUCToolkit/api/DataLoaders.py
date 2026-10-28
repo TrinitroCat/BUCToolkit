@@ -8,6 +8,7 @@
 #  Environment: Python 3.12
 
 import random
+import warnings
 from typing import Any, Callable, Dict, List, Self, Tuple, Literal, Sequence
 from collections.abc import Mapping
 
@@ -67,6 +68,7 @@ class DglGraphLoader:
             data_names: Sequence[str] | None = None
     ) -> None:
         # check import
+        warnings.warn(f"dgl package is deprecated, and BUCToolkit would not support it anymore.", DeprecationWarning)
         if dgl is None:
             raise ImportError('`DglGraphLoader` requires package `dgl` which could not be imported.')
         self.data: List = data['data']
@@ -180,6 +182,9 @@ class PyGDataLoader:
             if shuffle: self.shuffle()
             if not isinstance(self.energy, th.Tensor):
                 self.energy_ = th.from_numpy(np.array(self.energy, dtype=np.float32))
+            else:
+                self.energy_ = self.energy
+
         self.data_names = data_names
         self.batchsize = batch_size
         self._n_samp = len(self.data)
@@ -190,13 +195,11 @@ class PyGDataLoader:
 
     def shuffle(self, ):
         _seed = random.randint(0, 2147483647)
-        random.seed(_seed)
-        random.shuffle(self.data)
-        random.seed(_seed)
-        random.shuffle(self.energy)
+        # use local seed instead
+        random.Random(_seed).shuffle(self.data)
+        random.Random(_seed).shuffle(self.energy)
         if self.forces is not None:
-            random.seed(_seed)
-            random.shuffle(self.forces)
+            random.Random(_seed).shuffle(self.forces)
 
     def __iter__(self, ) -> Self:
         return self
@@ -437,6 +440,8 @@ class MACEDataLoader:
             if shuffle: self.shuffle()
             if not isinstance(self.energy, th.Tensor):
                 self.energy_ = th.from_numpy(np.array(self.energy, dtype=np.float32))
+            else:
+                self.energy_ = self.energy
         self.data_names = data_names
         self.batchsize = batch_size
         self._n_samp = len(self.data)
@@ -447,13 +452,10 @@ class MACEDataLoader:
 
     def shuffle(self, ):
         _seed = random.randint(0, 2147483647)
-        random.seed(_seed)
-        random.shuffle(self.data)
-        random.seed(_seed)
-        random.shuffle(self.energy)
+        random.Random(_seed).shuffle(self.data)
+        random.Random(_seed).shuffle(self.energy)
         if self.forces is not None:
-            random.seed(_seed)
-            random.shuffle(self.forces)
+            random.Random(_seed).shuffle(self.forces)
 
     def __iter__(self, ) -> Self:
         return self

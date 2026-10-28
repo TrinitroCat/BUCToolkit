@@ -241,6 +241,7 @@ class MMC(_BaseMC):
             _energy,
             energies_old
         )
+        # that does not zeroise the `delta_E` has no matter, and show the raw/actual energy change.
         # delta_E = th.where(
         #    _x_mask,
         #    delta_E,

@@ -113,7 +113,7 @@ def fin_diff_hvp(
         f_kwargs = dict()
     #n_batch, n_atom, n_dim = X.shape
     if batch_indices is None:
-        v_norm = (th.sqrt(th.sum(v * v, dim=-1, keepdim=True)) + eps)
+        v_norm = (th.sqrt(th.sum(v * v, dim=(-1, -2), keepdim=True)) + eps)
         v = v / v_norm  # (B, A, D)
         dX_f = X + delta * v
         dX_b = X - delta * v

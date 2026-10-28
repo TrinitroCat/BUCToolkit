@@ -182,7 +182,7 @@ class StructureOptimization(_BaseAPI):
                                         'alpha_fac': float(self.RELAXATION.get('ALPHA_FAC', 0.99)),
                                         'fac_inc': float(self.RELAXATION.get('FAC_INC', 1.1)),
                                         'fac_dec': float(self.RELAXATION.get('FAC_DEC', 0.5)),
-                                        'N_min': int(self.RELAXATION.get('ALPHA_FAC', 5)),
+                                        'N_min': int(self.RELAXATION.get('N_MIN', 5)),
                                         'mass': float(self.RELAXATION.get('MASS', 20)),
                                         'device': self.DEVICE,
                                         'verbose': self.VERBOSE}
