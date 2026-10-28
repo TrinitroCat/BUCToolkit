@@ -8,7 +8,7 @@ Graph construction uses `indices_pairwise_dist` with periodic boundary condition
 
 #  Copyright (c) 2026, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: _toy_models.py
 #  Environment: Python 3.12
 

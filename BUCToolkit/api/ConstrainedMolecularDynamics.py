@@ -1,6 +1,6 @@
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: MolecularDynamics.py
 #  Environment: Python 3.12
 import logging
@@ -14,7 +14,7 @@ import numpy as np
 import torch as th
 from torch import nn
 
-from BUCToolkit.BatchMD import ConstrNVT, ConstrNVE
+from BUCToolkit.BatchMD import NVE, NVT
 from BUCToolkit.utils._CheckModules import check_module
 from ._io import _BaseAPI, _LoggingEnd, _Model_Wrapper_dgl
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT
@@ -75,7 +75,7 @@ class ConstrainedMolecularDynamics(_BaseAPI):
         self.constr_func = None
         self.constr_val = None
 
-        __ensembles = {'NVE': ConstrNVE, 'NVT': ConstrNVT}
+        __ensembles = {'NVE': NVE, 'NVT': NVT}
         if self.MD is None:
             raise RuntimeError('Molecular Dynamics Configs was NOT Set.')
         self.MD: Dict
@@ -90,12 +90,23 @@ class ConstrainedMolecularDynamics(_BaseAPI):
             'time_step': self.MD.get('TIME_STEP', 1),
             'max_step': self.MD.get('MAX_STEP'),
             'T_init': self.MD.get('T_INIT', 298.15),
-            'constr_threshold': self.MD.get('CONSTR_THRESHOLD', 1.e-5),
+            'constr_threshold': self.MD.get('CONSTR_THRESHOLD', 'auto'),
             'require_fixman': self.MD.get('REQUIRE_FIXMAN', 'auto'),  # 'auto' means True for blue-moon and False otherwise.
             'output_structures_per_step': self.MD.get('OUTPUT_COORDS_PER_STEP', 1),
             'device': self.DEVICE,
             'verbose': int(self.VERBOSE)
         }
+        constr_threshold = self.MD_config['constr_threshold']
+        if isinstance(constr_threshold, str) and constr_threshold != 'auto':
+            # YAML may parse an exponent-only literal such as ``1e-5`` as a
+            # string; accept it here so both input forms reach BaseConstr.
+            try:
+                self.MD_config['constr_threshold'] = float(constr_threshold)
+            except ValueError as error:
+                raise ValueError(
+                    "CONSTR_THRESHOLD must be a positive float or 'auto', but "
+                    f'got {constr_threshold!r}.'
+                ) from error
         if isinstance(self.MD_config['require_fixman'], str) and (self.MD_config['require_fixman']).lower() != 'auto':
             raise ValueError(
                 f"Invalid value of `require_fixman` of {self.MD_config['require_fixman']}. "

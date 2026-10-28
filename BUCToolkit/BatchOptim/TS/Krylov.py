@@ -48,6 +48,8 @@ class _KrylovBase(_BaseOpt):
             morse_index: int = 1,
             neg_spectra_cutoff: float = -0.1,
             pos_spectra_cutoff: float = 0.1,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
     ) -> None:
         self.Torque_thres = abs(float(Torque_thres))
         self.Eigen_thres = abs(float(Eigen_thres))
@@ -80,6 +82,8 @@ class _KrylovBase(_BaseOpt):
             use_bb=False,
             device=device,
             verbose=verbose,
+            dump_quantities = dump_quantities,
+            log_quantities = log_quantities
         )
         # A Krylov direction update also translates X and evaluates the model
         # at the accepted point. BaseOpt must therefore bypass its ordinary
@@ -385,6 +389,8 @@ class KrylovNewton(_KrylovBase):
             morse_index: int = 1,
             neg_spectra_cutoff: float = 0.01,
             pos_spectra_cutoff: float = 0.01,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
     ) -> None:
         super().__init__(
             'KrylovNewton',
@@ -402,6 +408,8 @@ class KrylovNewton(_KrylovBase):
             morse_index=morse_index,
             neg_spectra_cutoff=neg_spectra_cutoff,
             pos_spectra_cutoff=pos_spectra_cutoff,
+            dump_quantities=dump_quantities,
+            log_quantities=log_quantities
         )
         self.steplength_sheme = steplength_sheme
         self._trust_reg_rad_max = 5. * self.steplength
@@ -938,7 +946,6 @@ class KrylovDynamics(_KrylovBase):
             maxiter_trans: int = 300,
             maxiter_eig: int = 10,
             steplength: float = 0.5,
-            steplength_sheme: Literal['trust_region', 'line_newton', 'line_search'] = 'trust_region',
             dx: float = 1.e-2,
             output_file: str | None = None,
             device: str | th.device = 'cpu',
@@ -951,6 +958,8 @@ class KrylovDynamics(_KrylovBase):
             fac_inc: float = 1.1,
             fac_dec: float = 0.5,
             N_min: int = 5,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
     ) -> None:
         super().__init__(
             'KrylovDynamics',
@@ -968,8 +977,9 @@ class KrylovDynamics(_KrylovBase):
             morse_index=morse_index,
             neg_spectra_cutoff=neg_spectra_cutoff,
             pos_spectra_cutoff=pos_spectra_cutoff,
+            dump_quantities=dump_quantities,
+            log_quantities=log_quantities
         )
-        self.steplength_sheme = steplength_sheme
         self.max_steplength = float(steplength) * 5.
         self.alpha = float(alpha)
         self.alpha_fac = float(alpha_fac)

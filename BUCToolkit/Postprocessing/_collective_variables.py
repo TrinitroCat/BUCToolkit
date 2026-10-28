@@ -1,6 +1,6 @@
 #  Copyright (c) 2026.7.20, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: _collective_variables.py
 #  Environment: Python 3.12
 """Internal helpers shared by constrained-MD postprocessors."""

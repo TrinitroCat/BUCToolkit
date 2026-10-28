@@ -1,6 +1,6 @@
 #  Copyright (c) 2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: frequency.py
 #  Environment: Python 3.12
 """
@@ -36,7 +36,7 @@ class Frequency(BaseIO):
             self,
             method: Literal[
                 'EnergyDiff', 'GradDiff', 'Autograd', 'Coord', 'Grad'
-            ] = 'EnergyDiff',
+            ] = 'GradDiff',
             block_size: None | int = None,
             delta: float = 1e-2,
             output_file: str | None = None,
@@ -545,124 +545,3 @@ __all__ = [
     'vibrational_thermo',
     'extract_freq'
 ]
-
-# 示例用法
-if __name__ == "__main__":
-    # 创建示例频率张量 (包含正负频率和低频)
-    frequencies = th.tensor([
-        3083.953574,
-        3047.925383,
-        3027.645431,
-        3018.475192,
-        3012.926299,
-        2927.218652,
-        2799.844693,
-        1456.985281,
-        1446.552789,
-        1417.972562,
-        1406.900854,
-        1357.130821,
-        1294.452227,
-        1268.645944,
-        1210.800793,
-        1154.637385,
-        1082.020997,
-        993.746725,
-        969.939002,
-        913.057972,
-        871.097270,
-        818.914607,
-        756.614656,
-        552.091194,
-        414.467590,
-        250.240054,
-        185.291922,
-        116.075049,
-        77.272448,
-        63.180734,
-        39.135462,
-        - 99.207538,
-        - 1281.881665,
-    ])
-    freq2 = th.tensor([
-        -2677.8059082000, - 718.62634277000, - 515.33343506000,
-        -169.42842102000,   128.61962891000,   196.16116333000,
-        259.79168701000 ,  416.30462646000 ,  492.31179810000,
-        655.95141602000 ,  718.72033691000 ,  841.46276855000,
-        940.41229248000 ,  1146.7479248000 ,  1180.0986328100,
-        1234.0729980500 ,  1301.6352539100 ,  1432.3217773400,
-        1553.4138183600 ,  1575.9421386700 ,  1638.2396240200,
-        1678.4561767600 ,  1733.8581543000 ,  1804.6947021500,
-        1953.1727294900 ,  2313.4604492200 ,  2356.5280761700,
-        2467.3337402300 ,  2573.1855468800 ,  2679.1540527300,
-        2702.9921875000 ,  2840.1782226600 ,  3055.0336914100,
-    ])# 单位 cm⁻¹
-    T = 298.15  # 温度 (K)
-    frequencies = th.sort(frequencies).values
-    freq2= th.sort(freq2).values
-
-    S_vib, H_vib, C_vib, F_vib = vibrational_thermo(frequencies, T)
-    S_vib_ml, H_vib_ml, C_vib_ml, F_vib_ml = vibrational_thermo(freq2, T)
-
-    print("频率对比", frequencies - freq2)  # 原始正频率
-
-    print(f"\n振动熵: {S_vib.item():.6f}, {S_vib_ml.item():.6f} eV/K")
-    print(f"振动焓: {H_vib.item():.6f}, {H_vib_ml.item():.6f} eV")
-    print(f"振动热容: {C_vib.item():.6f}, {C_vib_ml.item():.6f} eV/K")
-    print(f"振动自由能: {F_vib.item():.6f}, {F_vib_ml.item():.6f} eV")
-    print(f"振动自由能差: {F_vib.item() - F_vib_ml.item():.6f} eV")
-
-
-if __name__ == '__main__' and False:
-    a = th.rand(6, 6)
-    a = a + a.mT
-
-    '''class fn(th.nn.Module):
-        def __init__(self):
-            super().__init__()
-            seed = th.manual_seed(114514)
-            self.layers = th.nn.Sequential(
-                th.nn.Linear(6, 100, bias=False),
-                th.nn.Tanh(),
-                th.nn.Linear(100, 100, bias=False),
-                th.nn.Tanh(),
-                th.nn.Linear(100, 1, bias=False),
-            )
-
-        def forward(self, x):
-            x = x.flatten(-2, -1)
-            return self.layers(x)**2'''
-
-    def f(x):
-        """
-
-        Args:
-            x:
-
-        Returns:
-
-        """
-        x = x.flatten(-2, -1).unsqueeze(-1)
-        y = th.exp(x).mT @ a @ th.cos(x)
-        return y.squeeze(-1, -2)
-
-    def grad_f(x:th.Tensor):
-        with th.enable_grad():
-            x.requires_grad_()
-            y = f(x)
-            g = th.autograd.grad(y, x, th.ones_like(y), create_graph=True)[0]
-        return g
-
-
-    x0 = th.ones(2, 3)
-    freq1 = Frequency('Coord')  # FIXME
-    ei1, ej1 = freq1.normal_mode(f, x0, grad_func=grad_f, save_hessian=True, fixed_atom_tensor=th.tensor([0, 1]))
-
-    x0.detach_()
-    freq0 = Frequency('Grad')
-    ei0, ej0 = freq0.normal_mode(f, x0, grad_func=grad_f, save_hessian=True, fixed_atom_tensor=th.tensor([1, 1]))
-
-    x0.detach_()
-    freq2 = Frequency('Grad')
-    ei2, ej2 = freq2.normal_mode(f, x0, grad_func=grad_f, save_hessian=True, fixed_atom_tensor=th.tensor([0, 1]))
-    pass

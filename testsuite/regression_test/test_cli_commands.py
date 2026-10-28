@@ -407,6 +407,23 @@ class NonInteractiveCLICommandTests(unittest.TestCase):
         )
         self._assert_basic_structure_data(result)
 
+    def test_constraint_threshold_accepts_auto(self) -> None:
+        """The CMD template defaults to the auto threshold literal."""
+        from BUCToolkit.cli.cli import _task_input_defaults
+        from BUCToolkit.cli.input_stub import CONFIG_STUB
+
+        self.assertEqual(
+            CONFIG_STUB['MD']['CONSTR_THRESHOLD'][0],
+            'auto',
+        )
+        self.assertEqual(
+            _task_input_defaults('CMD')['MD']['CONSTR_THRESHOLD'],
+            'auto',
+        )
+        # Both input forms are readable YAML values.
+        self.assertEqual(yaml.safe_load('auto'), 'auto')
+        self.assertIsInstance(yaml.safe_load('1.e-5'), float)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 #  Copyright (c) 2026.5.19, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: batch_updaters.py
 #  Environment: Python 3.12
 

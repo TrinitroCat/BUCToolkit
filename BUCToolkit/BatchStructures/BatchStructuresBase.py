@@ -3,7 +3,7 @@ BatchStructure base class.
 """
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: BatchStructuresBase.py
 #  Environment: Python 3.12
 
@@ -1142,8 +1142,8 @@ class BatchStructures(object):
         """
         # generate indices
         indx = list(range(len(self)))
-        random.seed(seed)
-        random.shuffle(indx)
+        #random.seed(seed)  # use local seed instead
+        random.Random(seed).shuffle(indx)
         self.rearrange(indx)
 
     def rearrange(self, indices: List[int]):

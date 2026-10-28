@@ -1,10 +1,12 @@
 #  Copyright (c) 2026.4.24, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: BaseConstraints.py
 #  Environment: Python 3.12
 import inspect
+import math
 import os
+import warnings
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
 
 import torch as th
@@ -19,6 +21,39 @@ from BUCToolkit.Bases.BaseMotion import BaseIO
 FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
 FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
+# Probe reference precision for the threshold estimate. Kept local to this
+# module: the map only decides which dtype is used to measure the round-off
+# of the user constraint function.
+_PROBE_DTYPE = {
+    th.float16: th.float32,
+    th.bfloat16: th.float32,
+    th.float32: th.float64,
+    th.float64: th.float64,
+}
+
+
+def _report_diagnostic(message: str, verbose: int, logger: Any) -> None:
+    """
+    Report a constraint diagnostic on the channel selected by verbosity.
+
+    Args:
+        message: Human-readable description of the diagnostic.
+        verbose: Diagnostic verbosity of the constraint component.
+        logger: Logger used when ``verbose > 0``.
+
+    Return: None.
+
+    Note:
+        At ``verbose == 0`` the message is emitted as a ``RuntimeWarning`` so
+        that it still reaches stderr after the standard logger has been
+        redirected to a file; at ``verbose > 0`` it goes to ``logger`` at
+        WARNING level. The default warning filter reports each call site once.
+    """
+    if verbose > 0:
+        logger.warning(message)
+    else:
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+
 
 class BaseConstr(BaseIO):
     """
@@ -26,16 +61,11 @@ class BaseConstr(BaseIO):
     It can be combined into any normal gradient-based algorithms by applying `project1` to gradient or any other tangent space vectors,
      and `project2` as a retraction mapping to coordinates or any other vectors on the manifold.
 
-     I strongly suggest that using combination with proxy instead of inheritance when it is applied in other class.
-     e.g., define following method in the class with aligning `self._constr = BaseConstr(...)` in the self.__init__ method.
-     ```python
-        def __getattr__(self, name):
-            if '_constr' in self.__dict__:
-                constr = self._constr
-                if hasattr(constr, name):
-                    return getattr(constr, name)
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-    ```
+     I strongly suggest composition instead of inheritance when BaseConstr is
+     embedded in another class: create the component as ``self._constr`` and
+     call its methods directly (for example ``self._constr._project2(...)``).
+     Do not reproduce a dynamic ``__getattr__`` proxy, which makes the host
+     class opaque to tooling and compilers.
 
     Args:
         constr_func: Callable, a tuple of Python functions as the constraint functions s_k(X) that map R^n -> R^k.
@@ -46,12 +76,24 @@ class BaseConstr(BaseIO):
             A time-dependent callback may be `constr_val(t)` or
             `constr_val(t, c0)`, where `t` is a scalar Tensor and `c0` is the
             value of `constr_func(X_init)` computed at initialization.
-        constr_threshold: float, the threshold of constraint convergence (error of manifold violation)
+        constr_threshold: float | Literal['auto'], the threshold of constraint convergence (error of manifold violation).
+            ``'auto'`` estimates the achievable floor at initialization and
+            uses three times that value; it requires threshold detection.
         require_fixman: bool, whether to calculate fixman
+        retraction_solver: Literal['newton', 'damped'], the position projection solver.
+            ``'newton'`` takes the default full Newton step; ``'damped'`` adds
+            a backtracking line search that is slower but can recover from an
+            ill-conditioned normal-space Jacobian. The solver is bound at
+            construction; reassign ``_retraction_map_solver`` to switch later.
         device: str|torch.device, device that program rum on.
         verbose: print level. 0 is silent, 1 permits scalar diagnostics only,
             and 2 or greater also permits array diagnostics.
             0 for silence, 1 for output Energy and Forces per step, 2 for output all structures.
+        _detect_dynamic_thres: Literal['None', 'Once'] | int, when to re-estimate
+            the achievable threshold floor. ``'Once'`` estimates it only during
+            initialization, ``'None'`` disables the estimate, and an ``int``
+            re-estimates it every that many projection calls. Each estimate
+            evaluates ``constr_func`` a few extra times for probing.
 
     Examples for constrains:
         def constr_func(X):
@@ -80,17 +122,38 @@ class BaseConstr(BaseIO):
             self,
             constr_func: Callable | None = None,
             constr_val: Callable[..., th.Tensor|Tuple[th.Tensor]] | th.Tensor | None = None,
-            constr_threshold: float = 1e-5,
+            constr_threshold: float | Literal['auto'] = 'auto',
             require_fixman: bool = False,
+            retraction_solver: Literal['newton', 'damped'] = 'newton',
             device: str | th.device = 'cpu',
             verbose: int = 0,
+            _detect_dynamic_thres: Literal['None', 'Once'] | int = 'Once',
     ):
+        # var check
+        if retraction_solver not in ('newton', 'damped'):
+            raise ValueError(
+                f"`retraction_solver` must be 'newton' or 'damped', but got {retraction_solver!r}."
+            )
+        if _detect_dynamic_thres not in ('None', 'Once'):
+            _detect_dynamic_thres = int(_detect_dynamic_thres)
+            if _detect_dynamic_thres <= 0:
+                raise ValueError(f"`int(_detect_dynamic_thres)` must be > 0, but got {_detect_dynamic_thres}")
+        if constr_threshold != 'auto':
+            constr_threshold = float(constr_threshold)
+            if constr_threshold <= 0:
+                raise ValueError(f"`constr_threshold` must be > 0, but got {constr_threshold}")
+        elif _detect_dynamic_thres == 'None':
+            raise ValueError(
+                "`constr_threshold='auto'` requires threshold detection, but "
+                "`_detect_dynamic_thres='None'`."
+            )
+
         if constr_func is None:
-            constr_func = lambda X: th.tensor(0.)
+            constr_func = lambda X: th.tensor(0., dtype=X.dtype, device=X.device)
         self._lazy_calc_constr_val = False  # use the value of constr_func(X_init) to determine constr_val (and fixed).
         self.device = th.device(device)
 
-        self.time_now = th.scalar_tensor(0., device=device)
+        self.time_now = th.scalar_tensor(0., device=device, dtype=FLOAT_TYPE)
         self.is_const_constr = False
         self.constr_val_func_raw = None
         self._constr_val_func = None
@@ -98,11 +161,12 @@ class BaseConstr(BaseIO):
         self._constr_val_c0 = None
         self.time_step = 1.
         self.require_fixman = require_fixman
+        self.retraction_solver = retraction_solver
 
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
             self.constr_val_func_raw = None
-            self.constr_val_now = constr_val.to(self.device)
+            self.constr_val_now = constr_val.to(self.device, dtype=FLOAT_TYPE)
         elif callable(constr_val):
             self.is_const_constr = False
             self.constr_val_func_raw = constr_val
@@ -126,6 +190,10 @@ class BaseConstr(BaseIO):
         self.max_proj_iter = 10
         self.retraction_stagnation_factor = 0.05
         self.constr_thres = constr_threshold
+        self._is_auto_thres = (constr_threshold == 'auto')
+        self._detect_dynamic_thres = _detect_dynamic_thres
+        self._proj2_call_number: int = 0  # the count of `project2` call. used for auto-detection sheme.
+        self._thres_below = False  # flag indices whether current constr thres lower than the estimated infimum.
         self.X_cache = None  # constr force, i.e., the mu of Lagrange multipler
         self._compiled_jac = None  # pre-compiled Jacobian for replay
 
@@ -134,10 +202,12 @@ class BaseConstr(BaseIO):
         super().__init__()
         self.init_logger('Main.Constraints')
         self.verbose = int(verbose)
-        # Bind the concrete retraction implementation once. Future solver
-        # variants can replace this binding during initialization without
-        # adding a dispatch branch to every projection call.
-        self._retraction_map_solver = self._retraction_newton
+        # Bind the concrete retraction implementation once. The solver is
+        # selected at construction; reassign this attribute to switch later.
+        if retraction_solver == 'newton':
+            self._retraction_map_solver = self._retraction_newton
+        else:
+            self._retraction_map_solver = self._retraction_damp_newton
 
     def initialize(
             self,
@@ -204,11 +274,19 @@ class BaseConstr(BaseIO):
             RuntimeError: If ``constr_val`` and ``constr_func(X)`` have
                 different shapes.
             ValueError: If the batched constraint residual is not two-dimensional.
+
+        Note:
+            ``X``, ``masses``, and a tensor constraint target are converted to
+            the module-level ``FLOAT_TYPE`` (``BT_FLOAT_TYPE`` environment
+            variable, default float32) before use.
         """
         if not isinstance(compile_jacobian, bool):
             raise TypeError(
                 f'`compile_jacobian` must be bool, but got {type(compile_jacobian)}.'
             )
+        X = X.to(device=self.device, dtype=FLOAT_TYPE)
+        if masses is not None:
+            masses = masses.to(device=self.device, dtype=FLOAT_TYPE)
         if masses is None: masses = th.ones_like(X)
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
@@ -251,16 +329,39 @@ class BaseConstr(BaseIO):
             raise RuntimeError(
                 f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
             )
+        self.constr_val_now = self.constr_val_now.to(self.device, dtype=FLOAT_TYPE)
         # A previous initialization may have compiled a different run shape or
         # constraint callable.  Perform validation through the eager path, then
         # build a fresh graph for the current inputs below.
         self._compiled_jac = None
+        self._proj2_call_number = 0
+        self._thres_below = False
         jac, y = self._jacobian(X)
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
         if compile_jacobian:
             self._build_compiled_jacobian(X)
         self._do_qr(jac)
+        if self._detect_dynamic_thres != 'None':
+            # Numerical rank deficiency is a one-off initialization diagnostic;
+            # it is not repeated in the projection loop.
+            weighted_jac = th.flatten(jac * self.negsqrtM.unsqueeze(1), -2, -1)
+            spectrum = th.linalg.svdvals(weighted_jac)
+            eps = th.finfo(X.dtype).eps
+            sigma_min = float(spectrum.min())
+            sigma_max = float(spectrum.max())
+            if sigma_max > 0. and sigma_min <= sigma_max * eps ** 0.5:
+                _report_diagnostic(
+                    'The constraint Jacobian is numerically rank-deficient at '
+                    f'the working precision (sigma_min={sigma_min:.3e}, '
+                    f'sigma_max={sigma_max:.3e}, 1/sqrt(eps)={eps ** -0.5:.3e}). '
+                    'The projection may not converge. Please ensure that your constraints have a full-rank Jacobian '
+                    '(almost everywhere). If so, try to set `retraction_solver=\'damped\'`.',
+                    self.verbose,
+                    self.logger,
+                )
+        if self._detect_dynamic_thres == 'Once' or isinstance(self._detect_dynamic_thres, int):
+            self._apply_thres_estimate(self._detect_thres_inf(X, jac), X)
         self.X_cache = th.empty_like(X)
 
     def _constr_func_wrapped(self, X, constr_val_now):
@@ -339,6 +440,9 @@ class BaseConstr(BaseIO):
                 self._constr_val_wrapped,
                 has_aux=True,
             )(t)  # d constr_val(t) / dt
+            # ensure the returns from udf function keeping the dtype and device.
+            self.d_constr = self.d_constr.to(self.device, dtype=FLOAT_TYPE)
+            self.constr_val_now = self.constr_val_now.to(self.device, dtype=FLOAT_TYPE)
 
     def _build_compiled_jacobian(self, X_sample: th.Tensor):
         """
@@ -446,6 +550,105 @@ class BaseConstr(BaseIO):
         _jac = th.flatten(jac * self.negsqrtM.unsqueeze(1), -2, -1)
         _jacT = _jac.mT.contiguous()
         self.Q, self.R = th.linalg.qr(_jacT)  # Q(n_batch, n_atoms * n_dim, n_constr) , R(n_batch, n_constr, n_constr)
+
+    def _detect_thres_inf(self, X: th.Tensor, jac: th.Tensor | None = None) -> float | None:
+        """
+        Estimate the smallest achievable constraint residual for this dtype.
+
+        The estimate combines the measured round-off of the user constraint
+        function with the coordinate round-off amplified by the normal-space
+        spectrum. The function is probed at a few deterministic ULP-scale
+        perturbations in the working dtype and, when possible, in the next
+        precision selected by the local ``_PROBE_DTYPE`` map.
+
+        Args:
+            X: Reference coordinates with shape ``(n_batch, n_atom, n_dim)``.
+            jac: Constraint Jacobian at ``X``. Recomputed when omitted.
+
+        Returns:
+            The estimated residual floor, or ``None`` when the constraint
+            function cannot be probed in the reference precision.
+        """
+        if jac is None:
+            jac, _ = self._jacobian(X)
+        work_dtype = X.dtype
+        reference_dtype = _PROBE_DTYPE.get(work_dtype, work_dtype)
+        with th.no_grad():
+            weighted_jac = th.flatten(jac * self.negsqrtM.unsqueeze(1), -2, -1)
+            sigma_max = float(th.linalg.svdvals(weighted_jac).max())
+            eps = th.finfo(work_dtype).eps
+            coordinate_scale = max(1., float(X.abs().max()))  # bound of input X, clamp to 1 to avoid too small values.
+            evaluation_floor = 0.
+            if reference_dtype != work_dtype:
+                try:
+                    rng = th.Generator(device=X.device).manual_seed(114514)  # the hard-code seed is only for reproduction
+                    noise = th.randn(X.shape, generator=rng, device=X.device, dtype=X.dtype)
+                    # 8 ULP of the largest coordinate; clamped to avoid underflow
+                    step = 8. * eps * X.abs().clamp_min(coordinate_scale)
+                    probes = (X, X + step * noise, X - step * noise)
+                    values_work = th.stack([th.vmap(self.constr_func)(p) for p in probes])
+                    values_reference = th.stack([
+                        th.vmap(self.constr_func)(p.to(reference_dtype)) for p in probes
+                    ])  # (3, batch, n_constr)
+
+                    if values_reference.dtype != reference_dtype:
+                        return None
+                    difference = (values_work.to(reference_dtype) - values_reference).abs()
+                    if not bool(th.isfinite(difference).all()):
+                        return None
+                    evaluation_floor = float(difference.max())
+                except Exception:
+                    return None
+            return float(
+                2. * evaluation_floor
+                + 2. * sigma_max * eps * coordinate_scale
+            )  # count both the inherent error from constr_function and the error from Jacobian
+
+    def _apply_thres_estimate(self, floor: float|None, X: th.Tensor) -> None:
+        """
+        Apply or warn about an estimated constraint-residual floor.
+
+        Args:
+            floor: Estimate from ``_detect_thres_inf``; ``None`` when it failed.
+            X: Coordinates used for the estimate.
+
+        Returns:
+            None. An ``'auto'`` threshold is replaced by three times the floor;
+            an explicit threshold is never changed and is only warned about
+            when it lies below half of the estimated floor.
+
+        Raises:
+            RuntimeError: If the threshold is ``'auto'`` and the estimate failed.
+        """
+        if floor is None:
+            if self._is_auto_thres:
+                raise RuntimeError(
+                    'Unable to estimate the constraint threshold floor for the '
+                    'given constraint function and dtype; set an explicit '
+                    '`constr_threshold` or make the constraint function '
+                    'evaluable in the probe precision.'
+                )
+            _report_diagnostic(
+                'Unable to estimate the constraint threshold floor for the '
+                'given constraint function; the user-supplied '
+                '`constr_threshold` is used unchanged.',
+                self.verbose,
+                self.logger,
+            )
+            return
+        if self._is_auto_thres:
+            self.constr_thres = max(3. * floor, th.finfo(X.dtype).eps)
+            return
+        is_below = float(self.constr_thres) < 0.5 * floor
+        if is_below and not self._thres_below:
+            _report_diagnostic(
+                f'`constr_threshold`={self.constr_thres} is below half of the '
+                f'estimated achievable floor ({floor:.3e} for dtype '
+                f'{X.dtype}); convergence may stagnate.',
+                self.verbose,
+                self.logger,
+            )
+        self._thres_below = is_below
 
     def _project1(self, V:th.Tensor, X:th.Tensor | None = None, out: th.Tensor | None = None) -> th.Tensor:
         """
@@ -562,6 +765,9 @@ class BaseConstr(BaseIO):
         constr_err_old = initial_constr_err
 
         def _final_calc_Fc():
+            """
+            Re-solve the constraints force by triangular solve.
+            """
             fc: th.Tensor = th.linalg.solve_triangular(
                 R,
                 aux_multiplier.unsqueeze(-1),
@@ -581,9 +787,11 @@ class BaseConstr(BaseIO):
             is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
             if is_converged or is_fixed:
                 if is_fixed and not is_converged:
-                    logger.warning(
+                    _report_diagnostic(
                         'Constraint errors are not converged yet, but it has '
-                        'been fixed. This loop will be skipped.'
+                        'been fixed. This loop will be skipped.',
+                        verbose,
+                        logger,
                     )
                 Fc = _final_calc_Fc()
                 return Fc, dX, is_converged
@@ -598,7 +806,9 @@ class BaseConstr(BaseIO):
             ).reshape(n_batch, n_atoms, n_dim)
             th.add(X, dX, out=X_work)
 
-        logger.warning("Projection of X to the manifold is not converged.")
+        _report_diagnostic(
+            "Projection of X to the manifold is not converged.", verbose, logger,
+        )
         is_converged = th.zeros((), device=X.device, dtype=th.bool)
         Fc = _final_calc_Fc()
         return Fc, dX, is_converged
@@ -657,6 +867,9 @@ class BaseConstr(BaseIO):
         is_converged = initial_constr_err <= constr_threshold
 
         def _final_calc_Fc():
+            """
+            Re-solve the constraints force by triangular solve.
+            """
             fc: th.Tensor = th.linalg.solve_triangular(
                 R,
                 aux_multiplier.unsqueeze(-1),
@@ -683,18 +896,22 @@ class BaseConstr(BaseIO):
             is_converged = constr_err <= constr_threshold
             is_fixed = th.abs(constr_err - constr_err_old) < stagnation_threshold
             if is_fixed or is_converged:
-                if is_fixed and not is_converged:
+                if is_fixed and (not is_converged):
                     if is_rank_deficient:
-                        logger.warning(
+                        _report_diagnostic(
                             'Constraint errors are not converged yet, but the '
                             'current normal-space Jacobian is degenerate. The '
-                            'remaining iterations will be skipped.'
+                            'remaining iterations will be skipped.',
+                            verbose,
+                            logger,
                         )
                     else:
-                        logger.warning(
+                        _report_diagnostic(
                             'Constraint errors are not converged yet, but the '
                             'residual improvement is below the stagnation '
-                            'threshold. The remaining iterations will be skipped.'
+                            'threshold. The remaining iterations will be skipped.',
+                            verbose,
+                            logger,
                         )
                 Fc = _final_calc_Fc()
                 return Fc, dX, is_converged
@@ -726,14 +943,20 @@ class BaseConstr(BaseIO):
                 step *= step_shrink
 
             if not accepted:
-                logger.warning('Damped Newton retraction step did not lower the constraint error.')
+                _report_diagnostic(
+                    'Damped Newton retraction step did not lower the constraint error.',
+                    verbose,
+                    logger,
+                )
                 Fc = _final_calc_Fc()
                 return Fc, dX, is_converged
 
             aux_multiplier.copy_(candidate_multiplier)
             dX.copy_(candidate_dX)
 
-        logger.warning("Projection of X to the manifold is not converged.")
+        _report_diagnostic(
+            "Projection of X to the manifold is not converged.", verbose, logger,
+        )
         Fc = _final_calc_Fc()
         return Fc, dX, is_converged
 
@@ -770,11 +993,15 @@ class BaseConstr(BaseIO):
                 ``None`` when ``require_fixman=False``.
         """
         n_batch, n_atoms, n_dim = X.shape
+        self._proj2_call_number += 1
         n_constr = self.R.shape[-1]
         aux_multipler = th.zeros(n_batch, n_constr, device=self.device, dtype=FLOAT_TYPE)
-        if X_orig is None: X_orig = X
+        if (X_orig is None) or (X_orig is X):
+            # A detached reference is required: the retraction rewrites ``X``
+            # in place at the end, which is illegal on a leaf that requires
+            # grad for the Fixman derivative.
+            X_orig = X.detach()
         time_step = self.time_step
-        constr_thres = self.constr_thres
 
         # The target value and its time derivative are constant throughout one
         # nonlinear position projection. Refresh them once at the end-of-step
@@ -788,6 +1015,12 @@ class BaseConstr(BaseIO):
         with th.set_grad_enabled(self.require_fixman):
             X_orig.requires_grad_(self.require_fixman)
             jac, y = self._jacobian(X_orig)
+            check_freq = self._detect_dynamic_thres
+            if isinstance(check_freq, int):
+                if self._proj2_call_number % check_freq == 0:
+                    self._apply_thres_estimate(self._detect_thres_inf(X_orig, jac), X_orig)
+
+            constr_thres = self.constr_thres
             self._do_qr(jac)
             Q, R = self.Q, self.R
             # Safeguard against degenerate constraint directions
@@ -798,23 +1031,25 @@ class BaseConstr(BaseIO):
             # the requested tolerance.  Five percent preserves
             # the cheap stagnation escape without cutting off useful Newton
             # progress too early.
-            degenerate_eps = self.retraction_stagnation_factor * self.constr_thres
+            degenerate_eps = self.retraction_stagnation_factor * constr_thres
             #degenerate_mask = th.abs(R.diagonal(dim1=-2, dim2=-1)) < degenerate_eps  # (n_batch, n_constr)
             #R.diagonal(dim1=-2, dim2=-1).clamp_min_(degenerate_eps)
             sqrtM_Q = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (b, an, c)
             if self.require_fixman:
-                sqrt_det_Z = th.prod(th.diagonal(R, dim1=-2, dim2=-1), dim=-1).abs()
-                half_logdetZ = th.log(sqrt_det_Z).sum()
+                # (n_batch, n_constr, n_constr) -> (n_batch, n_constr)
+                abs_diag_R = th.diagonal(R, dim1=-2, dim2=-1).abs()
+                log_sqrt_det_Z = abs_diag_R.log_().sum(dim=-1)  # (n_batch), "sqrt" is due to Z=R^T R, R is triangular
+                half_logdet_Z = log_sqrt_det_Z.sum() # scalar
                 # A linear constraint has a coordinate-independent Jacobian,
                 # hence a constant Fixman determinant and an exactly zero
-                # derivative. In that case ``half_logdetZ`` contains no
+                # derivative. In that case ``half_logdet_Z`` contains no
                 # autograd graph and calling ``autograd.grad`` would raise even
                 # though the required result is well-defined. ``allow_unused``
                 # also covers CV implementations whose Jacobian graph is
                 # present but independent of some/all coordinate inputs.
-                if half_logdetZ.requires_grad:
+                if half_logdet_Z.requires_grad:
                     half_dlnz_dx = th.autograd.grad(
-                        half_logdetZ,
+                        half_logdet_Z,
                         X_orig,
                         allow_unused=True,
                     )[0]
@@ -825,7 +1060,7 @@ class BaseConstr(BaseIO):
                 half_dlnz_dx = half_dlnz_dx.reshape(n_batch, -1)
                 RG = th.einsum('bnc, bn -> bc', sqrtM_Q, half_dlnz_dx)
                 G = th.linalg.solve_triangular(R, RG.unsqueeze(-1), upper=True).squeeze(-1)
-                w = sqrt_det_Z.reciprocal_()
+                w = log_sqrt_det_Z.neg_().exp_()
             else:
                 G = None
                 w = None

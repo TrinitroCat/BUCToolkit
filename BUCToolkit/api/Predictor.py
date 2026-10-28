@@ -1,6 +1,6 @@
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: Predictor.py
 #  Environment: Python 3.12
 import logging
@@ -73,7 +73,9 @@ class Predictor(_BaseAPI):
                 name for name in sorted(data)
                 if isinstance(data[name], th.Tensor)
             ]
-            arrays = [data[name].numpy() for name in tensor_names]
+            # Predicted tensors may still carry a grad_fn; detach before the
+            # host-side NumPy conversion used by the asynchronous dumper.
+            arrays = [data[name].detach().numpy() for name in tensor_names]
             dumper.start_from_arrays(
                 1,
                 *arrays,

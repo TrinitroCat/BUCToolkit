@@ -8,7 +8,7 @@ Check whether the structures in `BatchStructures` have abnormalities which conta
 """
 #  Copyright (c) 2025.7.30, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: check_if_converge.py
 #  Environment: Python 3.12
 import warnings

@@ -44,7 +44,7 @@ Various tools capable of handling catalyst structure files and data formats for 
 
 Manuals will be completed soon. The current manuals can be found in [Manual](Manual/).
 
-Please note that the project is still a beta version and may change in the future.
+BUCToolkit 1.0.0 is the first stable release. See [CHANGELOG.md](CHANGELOG.md) for the main changes since the beta series.
 
 ## Installation
 ### Requirements
@@ -269,6 +269,8 @@ optimizer = StructureOptimization(inp_file_for_opt)
 optimizer.set_dataset(data_for_opt)
 optimizer.set_dataloader(dataloader)
 optimizer.relax(your_model_class)  # Only input the class, DO NOT instantiate
+# For a transition-state search, set `TRANSITION_STATE.ALGO` in the input file
+# to DIMER, KRYLOV, or KRYDYN, then call `optimizer.run(your_model_class, mode='ts')`.
 
 # ----------------------------------
 #   FOR MOLECULAR DYNAMICS
@@ -338,6 +340,7 @@ buctoolkit -i './input_file.inp'
 # or
 buctoolkit './input_file.inp'
 ```
+`bct` is a short alias of `buctoolkit` and launches the same command-line interface.
 Paths inside YAML input files are resolved relative to the input file's
 directory. Command-line paths passed to `-i`, `-o`, or `--convert` remain
 relative to the directory where the command is invoked.
@@ -347,8 +350,10 @@ The central source-checkout tests are available through the same CLI:
 ```shell
 buctoolkit --test main     # strict scientific checks
 buctoolkit --test fast     # short smoke checks
-buctoolkit --test profile  # fast checks with torch profiler reports
 ```
+
+The `profile` test mode is temporarily unavailable because `torch.profiler`
+perturbs CUDA-graph replay and the asynchronous custom kernels.
 
 Iteration counts and convergence tolerances are maintained in
 `testsuite/configs/main_test.yaml`; fast-mode overrides are in
@@ -381,11 +386,15 @@ The executable path keeps model loading and model adaptation separate:
   The custom wrapper must inherit `_BaseWrapper`. The model file remains
   separate and is still selected by `MODEL_FILE` and `MODEL_NAME` when needed.
 
-`DATA_READER_KWARGS` is passed to the selected structure reader.
-`DATA_LOADER_KWARGS` is passed to the API `DataLoader`. Older input files that
-only contain `DATA_LOADER_KWARGS` remain readable: that mapping is also used
-for the reader and a deprecation warning is emitted. Paired tasks such as
-NEB and Blue-Moon CMD continue to use their task-specific paired loaders.
+`DATA_READER_KWARGS` is passed to the structure reader for `DATA_PATH` (and the
+training validation set). `FSDATA_READER_KWARGS` and
+`DISP_DATA_READER_KWARGS` independently configure the readers for
+`FSDATA_PATH` and `DISPDATA_PATH`; they do not inherit
+`DATA_READER_KWARGS`. `DATA_LOADER_KWARGS` is passed to the API `DataLoader`.
+Older input files that only contain `DATA_LOADER_KWARGS` remain readable: that
+mapping is also used for the `DATA_PATH` reader and a deprecation warning is
+emitted. Paired tasks such as NEB and Blue-Moon CMD continue to use their
+task-specific paired loaders.
 
 The no-argument interactive CLI is a configuration editor and keyword lookup
 tool. `task` creates a reference input file with the same runtime defaults as
@@ -407,7 +416,7 @@ user@host:/some/path$ buctoolkit
 |    BBBBBB   UUUUU   CCCCC     T     OOOOO   OOOOO  LLLLLLL K     K    II      T       |
 |                                                                                       |
 |                                                                                       |
-|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.          |
+|  BUCToolkit 1.0.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.        |
 +=======================================================================================+
    |_________________________________________________________________________________| 
   |___________________________________________________________________________________|
@@ -467,10 +476,12 @@ SAVE_PREDICTIONS: !!bool true  # only for predictions. Whether output prediction
 ###DATA_PATH: !!str /your/data/path # the path of data used for calculation. if training, it will be viewed as the training set.
 ###DATA_NAME_SELECTOR: !!str ".*$"  # regular express to select data names. Only matched name will be finally load.
 ###FSDATA_PATH: !!str your/final/state/data/path  # used for calc. requiring both initial and final states, e.g., CI-NEB
-###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., Dimer
+###FSDATA_READER_KWARGS: {}     # keyword arguments for the structure reader of FSDATA_PATH only.
+###DISPDATA_PATH: !!str your/displacement/data/path  # used for calc. requiring initial guess of a direction, e.g., DIMER/KRYLOV/KRYDYN transition-state searches
+###DISP_DATA_READER_KWARGS: {}  # keyword arguments for the structure reader of DISPDATA_PATH only.
 ###VAL_SET_PATH: !!str your/validation/set/path  # used for training that requires validation data
 ###VAL_SPLIT_RATIO: !!float 0.1  # the ratio of validation set in the total dataset. if `VAL_SET` is given, this arg will be ignored.
-###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader.
+###DATA_READER_KWARGS: {}      # keyword arguments for the structure reader of DATA_PATH and VAL_SET_PATH.
 ###DATA_LOADER_KWARGS: {}      # keyword arguments for the API DataLoader.
 ###IS_SHUFFLE: !!bool false    # whether to randomly shuffle dataset before calculating.
 
@@ -537,16 +548,36 @@ RELAXATION:
 
 # transition state
 TRANSITION_STATE:
-  ALGO: !!str DIMER  # options: DIMER
-  X_DIFF_ATTR: !!str x_dimer  # the attribute name of initial dimer direction
-  E_THRES: !!float 1.e-4    # see above
-  TORQ_THRES: !!float 1.e-2  # threshold of torque during rotation process, i.e., the residuals of eigen vec.
+  ALGO: !!str DIMER  # options: DIMER (modified Dimer), KRYLOV (KrylovNewton), KRYDYN (KrylovDynamics)
+  X_DIFF_ATTR: !!str x_dimer  # data attribute seeding the initial direction; a random direction is used if absent
+  # shared by DIMER, KRYLOV, and KRYDYN
+  E_THRES: !!float 1.e-4    # energy difference threshold (DIMER default; KRYLOV/KRYDYN default: 1.e-3)
+  TORQ_THRES: !!float 1.e-2  # torque threshold, i.e., the residuals of the eigen vector
   F_THRES: !!float 5.e-2    # see above
   MAXITER_TRANS: !!int 300  # maximum iteration number of translation steps
-  MAXITER_ROT: !!int 5      # maximum iteration number of rotation steps
-  MAX_STEPLENGTH: !!float 0.5  # limit of steplength
-  DX: !!float 1.e-1         # length for finite difference to calc. Hessian-vector prod.
+  DX: !!float 1.e-2         # length for finite difference to calc. Hessian-vector prod.
+  DUMP_QUANTITIES:  # quantities written to the optimizer dump
+    - !!str Energy
+    - !!str X
+    - !!str Force
+  LOG_QUANTITIES:   # quantities printed by the logger
+    - !!str Energy
+    - !!str E_diff
+    - !!str F_eps
+    - !!str X
+    - !!str X_grad
   REQUIRE_GRAD: !!bool False  # see above
+  # DIMER only
+  CURVATURE_THRES: !!float -0.1  # curvature threshold for rotation convergence
+  MAXITER_ROT: !!int 10      # maximum iteration number of rotation steps
+  MAX_STEPLENGTH: !!float 0.5  # limit of steplength
+  # KRYLOV and KRYDYN only
+  EIGEN_THRES: !!float 1.e-2  # residual threshold of the eigen solver
+  MAXITER_EIG: !!int 10       # maximum iteration number of the eigen solver; must exceed MORSE_INDEX
+  STEPLENGTH: !!float 0.5     # initial translation step length (KRYDYN also uses it as the initial time step)
+  MORSE_INDEX: !!int 1        # number of unstable modes to follow
+  NEG_SPECTRA_CUTOFF: !!float 1.e-2  # cutoff for clamping negative spectral modes
+  POS_SPECTRA_CUTOFF: !!float 1.e-2  # cutoff for clamping positive spectral modes
 
 # vibration analyses (harmonic)
 VIBRATION:

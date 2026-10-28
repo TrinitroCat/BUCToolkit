@@ -1,4 +1,5 @@
 import unittest
+from importlib.util import find_spec
 
 import numpy as np
 import torch as th
@@ -11,6 +12,10 @@ from BUCToolkit.utils.model_wrappers import (
 from BUCToolkit.api.DataLoaders import MACEDataLoader
 
 
+HAS_MACE = find_spec('mace') is not None and find_spec('e3nn') is not None
+
+
+@unittest.skipUnless(HAS_MACE, 'MACE and e3nn are required')
 class MACEModelWrapperTest(unittest.TestCase):
     @staticmethod
     def _structure(offset: float = 0.0) -> Data:

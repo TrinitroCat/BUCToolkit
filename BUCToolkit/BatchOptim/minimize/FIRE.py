@@ -4,7 +4,7 @@ FIRE Optimization Algorithm. Phys. Rev. Lett., 2006, 97:170201.
 import copy
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: FIRE.py
 #  Environment: Python 3.12
 
@@ -39,6 +39,8 @@ class FIRE(_BaseOpt):
             device: str | th.device = 'cpu',
             verbose: int = 2,
             _hold_samples: bool = False,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
             **kwargs
     ):
         r"""
@@ -76,7 +78,9 @@ class FIRE(_BaseOpt):
             output_file=output_file,
             device = device,
             verbose = verbose,
-            _hold_samples=_hold_samples
+            _hold_samples=_hold_samples,
+            dump_quantities =  dump_quantities,
+            log_quantities =  log_quantities
         )
         self.MAX_STEPLENGTH = th.scalar_tensor(10 * steplength, device=self.device)
         self.FIRE_t_init = steplength
@@ -355,7 +359,7 @@ class ConstrFIRE(FIRE):
             steplength: float = 1.,
             constr_func: Callable | None = None,
             constr_val: th.Tensor | None = None,
-            constr_threshold: float = 1e-5,
+            constr_threshold: float | Literal['auto'] = 'auto',
             alpha: float = 0.1,
             alpha_fac: float = 0.99,
             fac_inc: float = 1.1,
@@ -377,12 +381,12 @@ class ConstrFIRE(FIRE):
                 )
 
         self._constr = BaseConstr(
-            constr_func,
-            constr_val,
-            constr_threshold,
-            False,
-            device,
-            verbose
+            constr_func=constr_func,
+            constr_val=constr_val,
+            constr_threshold=constr_threshold,
+            require_fixman=False,
+            device=device,
+            verbose=verbose,
         )
         super().__init__(
             E_threshold,

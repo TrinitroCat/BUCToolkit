@@ -1,6 +1,6 @@
 #  Copyright (c) 2026.7.20, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: blue_moon.py
 #  Environment: Python 3.12
 """Blue-Moon mean forces and free-energy path integration."""

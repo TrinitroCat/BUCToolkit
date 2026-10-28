@@ -1,7 +1,7 @@
 """ Calculating Normal Mode Vibration Frequencies """
 #  Copyright (c) 2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: VibrationAnalysis.py
 #  Environment: Python 3.12
 
@@ -59,7 +59,7 @@ class VibrationAnalysis(_BaseAPI):
         self._data_loader = None
 
         self.Vib_config = {
-            'method': self.VIBRATION.get('METHOD', 'EnergyDiff'),
+            'method': self.VIBRATION.get('METHOD', 'GradDiff'),
             'block_size': int(self.VIBRATION.get('BLOCK_SIZE', 1)),
             'delta': float(self.VIBRATION.get('DELTA', 1e-2)),
         }
@@ -170,7 +170,7 @@ class VibrationAnalysis(_BaseAPI):
             n_c = 1  # number of cycles. each for-loop += 1.
             n_s = 0  # number of calculated samples. each sample in batches in each for-loop += 1.
             if (self.VERBOSE < 1) and (not self.SAVE_PREDICTIONS):
-                warnings.warn('WARNING: Neither`verbose` nor `self.SAVE_PREDICTIONS` was turn on.'
+                warnings.warn('WARNING: Neither `verbose` nor `self.SAVE_PREDICTIONS` was turn on.'
                               ' Hence NOTHING WILL BE OUTPUT. I HOPE YOU KNOW WHAT YOU ARE DOING!')
                 if self.VERBOSE: self.logger.info(f'An empty batch occurred. Skipped.')
             for val_data, val_label in val_set:

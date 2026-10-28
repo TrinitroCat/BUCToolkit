@@ -40,7 +40,7 @@ Python 函数（返回能量及其梯度，即力的相反数）。
 
 完整文档将陆续完成。当前手册可在 [Manual](Manual) 目录下找到。
 
-请注意，本项目目前仍处于测试版，未来可能发生变化。
+BUCToolkit 1.0.0 是首个正式版本。主要变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 安装
 
@@ -261,6 +261,8 @@ optimizer = StructureOptimization(inp_file_for_opt)
 optimizer.set_dataset(data_for_opt)
 optimizer.set_dataloader(dataloader)
 optimizer.relax(your_model_class)  # 仅传入模型类而不要实例化
+# 过渡态搜索：将输入文件中的 `TRANSITION_STATE.ALGO` 设为 DIMER、KRYLOV 或 KRYDYN，
+# 然后调用 `optimizer.run(your_model_class, mode='ts')`。
 
 # ----------------------------------
 #   分子动力学
@@ -328,6 +330,8 @@ buctoolkit -i './input_file.inp'
 buctoolkit './input_file.inp'
 ```
 
+`bct` 是 `buctoolkit` 的短别名，启动相同的命令行界面。
+
 YAML 输入文件中的路径统一相对于输入文件所在目录解析；命令行参数 `-i`、
 `-o` 和 `--convert` 中的路径仍相对于命令执行时的当前目录解析。
 
@@ -336,8 +340,9 @@ YAML 输入文件中的路径统一相对于输入文件所在目录解析；命
 ```shell
 buctoolkit --test main     # 长时间测试, 严格科学正确性检查, 通过Virial定理检查MD/MC的统计力学性质
 buctoolkit --test fast     # 短步数 smoke 检查, 只检查代码通过性
-buctoolkit --test profile  # fast 测试并生成 torch profiler 报告
 ```
+
+`profile` 测试模式暂时不可用，因为 `torch.profiler` 会干扰 CUDA Graph 重放和异步自定义内核。
 
 迭代步数和收敛限统一维护在
 `testsuite/configs/main_test.yaml`，fast 模式的覆盖值在
@@ -366,10 +371,13 @@ buctoolkit --test profile  # fast 测试并生成 torch profiler 报告
   自定义 wrapper 必须继承 `_BaseWrapper`。模型文件仍与 wrapper 分离，必要时继续由
   `MODEL_FILE` 和 `MODEL_NAME` 指定。
 
-`DATA_READER_KWARGS` 传给结构读取器，`DATA_LOADER_KWARGS` 传给 API
-`DataLoader`。只有旧输入文件包含 `DATA_LOADER_KWARGS` 而没有
-`DATA_READER_KWARGS` 时，为保持兼容会同时将该映射传给读取器，并发出弃用警告。
-NEB、Blue-Moon CMD 等成对任务仍使用任务专用的 paired loader。
+`DATA_READER_KWARGS` 传给 `DATA_PATH`（以及训练验证集）的结构读取器。
+`FSDATA_READER_KWARGS` 和 `DISP_DATA_READER_KWARGS` 分别独立配置
+`FSDATA_PATH` 和 `DISPDATA_PATH` 的读取器，不会继承 `DATA_READER_KWARGS`。
+`DATA_LOADER_KWARGS` 传给 API `DataLoader`。只有旧输入文件包含
+`DATA_LOADER_KWARGS` 而没有 `DATA_READER_KWARGS` 时，为保持兼容会同时将该
+映射传给 `DATA_PATH` 的读取器，并发出弃用警告。NEB、Blue-Moon CMD 等成对
+任务仍使用任务专用的 paired loader。
 
 不带参数启动的交互式 CLI 是配置编辑器和关键词查询工具。`task` 创建的输入文件
 使用与 API 相同的运行时默认值；科学模型、数据和任务参数仍需用户根据实际研究任务填写，
@@ -391,7 +399,7 @@ user@host:/some/path$ buctoolkit
 |    BBBBBB   UUUUU   CCCCC     T     OOOOO   OOOOO  LLLLLLL K     K    II      T       |
 |                                                                                       |
 |                                                                                       |
-|  BUCToolkit 1.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.          |
+|  BUCToolkit 1.0.0. Copyright (c) 2024-2026 Authors: Pu Pengxin, Song Xin, etc.        |
 +=======================================================================================+
    |_________________________________________________________________________________| 
   |___________________________________________________________________________________|
@@ -447,10 +455,12 @@ SAVE_PREDICTIONS: !!bool true  # 仅用于预测。是否将预测结果输出�
 ###DATA_PATH: !!str /your/data/path # 用于计算的数据路径；如果是训练，将被视为训练集
 ###DATA_NAME_SELECTOR: !!str ".*$"  # 用于选择数据名称的正则表达式，仅加载匹配的名称
 ###FSDATA_PATH: !!str your/final/state/data/path  # 用于需要初态和终态的计算，如 CI‑NEB
-###DISPDATA_PATH: !!str your/displacement/data/path  # 用于需要初始方向猜测的计算，如 Dimer
+###FSDATA_READER_KWARGS: {}     # 仅用于 FSDATA_PATH 的结构读取器关键字参数
+###DISPDATA_PATH: !!str your/displacement/data/path  # 用于需要初始方向猜测的计算，如 DIMER/KRYLOV/KRYDYN 过渡态搜索
+###DISP_DATA_READER_KWARGS: {}  # 仅用于 DISPDATA_PATH 的结构读取器关键字参数
 ###VAL_SET_PATH: !!str your/validation/set/path  # 训练时需要的验证集路径
 ###VAL_SPLIT_RATIO: !!float 0.1  # 验证集占总数据集的比例；若指定了 VAL_SET_PATH，此参数被忽略
-###DATA_READER_KWARGS: {}      # 结构读取器的关键字参数
+###DATA_READER_KWARGS: {}      # 用于 DATA_PATH 和 VAL_SET_PATH 的结构读取器关键字参数
 ###DATA_LOADER_KWARGS: {}      # API DataLoader 的关键字参数
 ###IS_SHUFFLE: !!bool false    # 计算前是否随机打乱数据集
 
@@ -511,16 +521,36 @@ RELAXATION:
 
 # 过渡态搜索
 TRANSITION_STATE:
-  ALGO: !!str DIMER  # 选项：DIMER
-  X_DIFF_ATTR: !!str x_dimer  # 初始 dimer 方向属性名
-  E_THRES: !!float 1.e-4    # 能量差阈值
-  TORQ_THRES: !!float 1.e-2  # 旋转过程中扭矩收敛阈值，即特征向量残差
+  ALGO: !!str DIMER  # 选项：DIMER（改进 Dimer）、KRYLOV（KrylovNewton）、KRYDYN（KrylovDynamics）
+  X_DIFF_ATTR: !!str x_dimer  # 用于初始化方向猜测的数据属性；缺失时使用随机方向
+  # DIMER、KRYLOV、KRYDYN 共用
+  E_THRES: !!float 1.e-4    # 能量差阈值（DIMER 默认值；KRYLOV/KRYDYN 默认值为 1.e-3）
+  TORQ_THRES: !!float 1.e-2  # 扭矩阈值，即特征向量残差
   F_THRES: !!float 5.e-2    # 最大力阈值
   MAXITER_TRANS: !!int 300  # 平移步最大迭代次数
-  MAXITER_ROT: !!int 5      # 旋转步最大迭代次数
+  DX: !!float 1.e-2         # 有限差分计算 Hessian‑向量积的步长
+  DUMP_QUANTITIES:  # 写入优化器 dump 的量
+    - !!str Energy
+    - !!str X
+    - !!str Force
+  LOG_QUANTITIES:   # 由 logger 打印的量
+    - !!str Energy
+    - !!str E_diff
+    - !!str F_eps
+    - !!str X
+    - !!str X_grad
+  REQUIRE_GRAD: !!bool False  # 是否在计算过程中启用自动梯度
+  # 仅 DIMER
+  CURVATURE_THRES: !!float -0.1  # 旋转收敛的曲率阈值
+  MAXITER_ROT: !!int 10      # 旋转步最大迭代次数
   MAX_STEPLENGTH: !!float 0.5  # 步长限制
-  DX: !!float 1.e-1         # 有限差分计算 Hessian‑向量积的步长
-  REQUIRE_GRAD: !!bool False  # 同上
+  # 仅 KRYLOV 和 KRYDYN
+  EIGEN_THRES: !!float 1.e-2  # 特征求解器的残差阈值
+  MAXITER_EIG: !!int 10       # 特征求解器最大迭代次数；必须大于 MORSE_INDEX
+  STEPLENGTH: !!float 0.5     # 初始平移步长（KRYDYN 亦用作初始时间步长）
+  MORSE_INDEX: !!int 1        # 需要跟踪的不稳定模式数
+  NEG_SPECTRA_CUTOFF: !!float 1.e-2  # 负谱模式截断阈值
+  POS_SPECTRA_CUTOFF: !!float 1.e-2  # 正谱模式截断阈值
 
 # 振动分析（简谐近似）
 VIBRATION:

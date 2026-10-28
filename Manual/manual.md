@@ -51,12 +51,14 @@ file are resolved relative to that file.
 | `DATA_TYPE` | `POSCAR`, `OUTCAR`, `CIF`, `ASE_TRAJ`, `BS`, `OPT`, `MD`, `MC` | CLI input format. `BS` is BUCToolkit's binary structure format. [Load data](examples.md#load-and-convert-structures) |
 | `DATA_PATH` | path | Initial or training data. |
 | `DATA_NAME_SELECTOR` | regular-expression string | Selects structures by sample name. |
-| `DATA_READER_KWARGS` | mapping | `{}` | Extra keyword arguments passed to the selected structure reader. |
+| `DATA_READER_KWARGS` | mapping | Extra keyword arguments for the reader of `DATA_PATH` and `VAL_SET_PATH`. It is not inherited by the other data paths. |
 | `FSDATA_PATH` | path | Final-state data for paired tasks such as NEB and Blue-Moon CMD. [Blue-Moon CMD](examples.md#blue-moon-cmd) |
-| `DISPDATA_PATH` | path | Initial dimer displacement/direction data for TS searches. |
+| `FSDATA_READER_KWARGS` | mapping | Extra keyword arguments for the reader of `FSDATA_PATH` only. |
+| `DISPDATA_PATH` | path | Initial direction/displacement data for DIMER, KRYLOV, and KRYDYN TS searches. |
+| `DISP_DATA_READER_KWARGS` | mapping | Extra keyword arguments for the reader of `DISPDATA_PATH` only. |
 | `VAL_SET_PATH` | path | Explicit training validation set. |
 | `VAL_SPLIT_RATIO` | float in `[0, 1)` | Validation fraction when `VAL_SET_PATH` is absent. |
-| `DATA_LOADER_KWARGS` | mapping | `{}` | Extra keyword arguments for the selected API DataLoader. When reading an older input with this field but no `DATA_READER_KWARGS`, the same mapping is also passed to the structure reader with a deprecation warning. |
+| `DATA_LOADER_KWARGS` | mapping | Extra keyword arguments for the selected API DataLoader. A legacy input with this field but no `DATA_READER_KWARGS` also passes it to the `DATA_PATH` reader with a deprecation warning. |
 | `IS_SHUFFLE` | boolean | Shuffle unpaired calculation data. Paired tasks and CMD use deterministic order. |
 
 ### `TRAIN`
@@ -105,10 +107,36 @@ file are resolved relative to that file.
 
 ### `TRANSITION_STATE`
 
-`ALGO` is currently `DIMER`; `X_DIFF_ATTR` names the initial dimer direction
-attribute. `E_THRES`, `TORQ_THRES`, `F_THRES`, `MAXITER_TRANS`, `MAXITER_ROT`,
-`MAX_STEPLENGTH`, and `DX` control convergence, rotation, translation, and
-finite-difference settings. `REQUIRE_GRAD` has the usual meaning. See
+`ALGO` selects `DIMER` (modified Dimer), `KRYLOV` (`KrylovNewton`), or
+`KRYDYN` (`KrylovDynamics`). `X_DIFF_ATTR` names the data attribute used to
+seed the initial direction; when it is absent or incompatible, a random
+direction is generated. `StructureOptimization.set_dimer_init_direction(...)`
+registers an explicit direction that takes precedence over this attribute.
+
+| Field | Applies to | Default | Meaning |
+| --- | --- | --- | --- |
+| `ALGO` | all | `DIMER` | Transition-state algorithm. |
+| `X_DIFF_ATTR` | all | `x_dimer` | Data attribute seeding the initial direction. |
+| `E_THRES` | all | `1e-4` DIMER, `1e-3` KRYLOV/KRYDYN | Energy-difference threshold. |
+| `TORQ_THRES` | all | `1e-2` | Maximum torque / eigenvector residual. |
+| `F_THRES` | all | `0.05` | Maximum-force threshold. |
+| `MAXITER_TRANS` | all | `300` | Maximum translation iterations. |
+| `DX` | all | `1e-2` | Finite-difference displacement for Hessian-vector products. |
+| `DUMP_QUANTITIES`, `LOG_QUANTITIES` | all | see API docstring | Optimizer-dump and logger selections. |
+| `REQUIRE_GRAD` | all | `false` | Enable autograd for the energy function. |
+| `CURVATURE_THRES` | DIMER | `-0.1` | Curvature threshold for rotation convergence. |
+| `MAXITER_ROT` | DIMER | `10` | Maximum rotations per translation step. |
+| `MAX_STEPLENGTH` | DIMER | `0.5` | Maximum translation step length. |
+| `EIGEN_THRES` | KRYLOV, KRYDYN | `1e-2` | Eigen-solver residual threshold. |
+| `MAXITER_EIG` | KRYLOV, KRYDYN | `10` | Maximum eigen-solver iterations; must exceed `MORSE_INDEX`. |
+| `STEPLENGTH` | KRYLOV, KRYDYN | `0.5` | Initial translation step length; KRYDYN also uses it as the initial time step. |
+| `MORSE_INDEX` | KRYLOV, KRYDYN | `1` | Number of unstable modes to follow. |
+| `NEG_SPECTRA_CUTOFF`, `POS_SPECTRA_CUTOFF` | KRYLOV, KRYDYN | `1e-2` | Negative/positive spectral clamping cutoffs. |
+
+`KRYLOV` fixes `steplength_sheme` to `trust_region`; the other schemes in the
+low-level class remain experimental and are not exposed through the API.
+For CLI TS inputs, `DISPDATA_PATH` is read with `DISP_DATA_READER_KWARGS`;
+when it is absent, `FSDATA_PATH` is read with `FSDATA_READER_KWARGS`. See
 [transition-state search](examples.md#transition-state-search).
 
 ### `VIBRATION`
@@ -152,13 +180,14 @@ finite-difference settings. `REQUIRE_GRAD` has the usual meaning. See
 | `REQUIRE_GRAD`           | boolean                                 | `false`                | Enable autograd.                                                                                                                                                                                                       |
 | `CONSTR_MD_SCHEME`       | `SLOW_GROWTH`, `BLUE_MOON`              | template value         | CMD scheme.                                                                                                                                                                                                            |
 | `N_IMAGES`               | positive integer                        | `1` or template value  | Blue-Moon interpolation images; Slow-growth parallel copies. Use `1` for one trajectory. [Slow growth](examples.md#slow-growth-cmd)                                                                                    |
-| `CONSTR_THRESHOLD`       | positive float                          | `1.e-5`                | Constraints convergence threshold. Units are determined by specific constraints formulae                                                                                                                               |
+| `CONSTR_THRESHOLD`       | positive float or `'auto'`              | `'auto'`               | Constraints convergence threshold. Units are determined by specific constraints formulae. `'auto'` estimates the achievable floor at initialization.                                                                   |
 | `REQUIRE_FIXMAN`         | boolean or "auto"                       | `"auto"`               | # `auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually.                                                                                                               |
 
 
-For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` and uses
-`ISFSPyGDataLoader`; `SLOW_GROWTH` reads only `DATA_PATH` and uses
-`PyGDataLoader`. Both current CMD paths require `BATCH_SIZE: 1`.
+For CLI CMD, `BLUE_MOON` reads paired `DATA_PATH`/`FSDATA_PATH` (with
+`DATA_READER_KWARGS`/`FSDATA_READER_KWARGS`) and uses `ISFSPyGDataLoader`;
+`SLOW_GROWTH` reads only `DATA_PATH` and uses `PyGDataLoader`. Both current CMD
+paths require `BATCH_SIZE: 1`.
 
 ### `MC`
 
@@ -236,6 +265,19 @@ Shared constructor parameters are `time_step`, `max_step`, `T_init`,
 takes `thermostat` and `thermostat_config`. Constrained MD additionally takes
 `constr_func`, `constr_val`, `constr_threshold`, and `require_fixman`.
 
+The projection itself is implemented by `BaseConstr`, which can also be
+constructed directly. `BaseConstr` additionally accepts `retraction_solver`,
+either `'newton'` (default) or `'damped'`. The default Newton solver takes a
+full step and is the cheapest option. The damped solver adds a backtracking
+line search; it is more stable but computationally more expensive, and is meant
+for constraints that are difficult to converge.
+
+`constr_threshold` defaults to `'auto'`, which estimates the achievable
+residual floor of the current floating-point type at initialization and uses
+three times that value. The estimate is a guide, not a guarantee. An explicit
+threshold is never replaced; a warning is emitted when it lies below half of
+the estimated floor.
+
 The common `run` parameters are `func`, `X`, `Element_list`, optional
 `Cell_vector`, `V_init`, `grad_func`, function argument/keyword collections,
 `is_grad_func_contain_y`, `require_grad`, `batch_indices`,
@@ -256,8 +298,11 @@ adds `Torque_thres`, `Curvature_thres`, `maxiter_trans`, `maxiter_rot`,
 `max_steplength`, and `dx`. `CI_NEB` takes `N_images`, `spring_const`,
 `optimizer`, `optimizer_configs`, `steplength`, convergence thresholds,
 `maxiter`, `device`, and `verbose`. `KrylovNewton` and `KrylovDynamics` add
-`Torque_thres`, `Eigen_thres`, `maxiter_trans`, `maxiter_eig`, `dx`,
-`morse_index`, and spectral cutoffs. See [low-level transition-state search](examples.md#low-level-transition-state-search).
+`Torque_thres`, `Eigen_thres`, `maxiter_trans`, `maxiter_eig`, `steplength`,
+`dx`, `morse_index`, and spectral cutoffs; both take `X_diff` in `run` to seed
+the first eigensolve and accept `extra_krylov_dim`. `KrylovNewton` also accepts
+`steplength_sheme`, where `trust_region` is the tested option. See [low-level
+transition-state search](examples.md#low-level-transition-state-search).
 
 The low-level `Frequency` calculator takes `method`, optional `block_size`,
 finite-difference `delta`, optional `output_file`, and `dump_hessian`. Its

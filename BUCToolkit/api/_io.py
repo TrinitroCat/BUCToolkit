@@ -2,7 +2,7 @@
 
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: _io.py
 #  Environment: Python 3.12
 
@@ -63,6 +63,8 @@ CONFIG_DEFAULTS = {
     'DATA_TYPE': 'BS',
     'DATA_NAME_SELECTOR': '.*$',
     'DATA_READER_KWARGS': {},
+    'FSDATA_READER_KWARGS': {},
+    'DISP_DATA_READER_KWARGS': {},
     'DATA_LOADER_KWARGS': {},
     'VAL_SPLIT_RATIO': 0.1,
     'IS_SHUFFLE': False,

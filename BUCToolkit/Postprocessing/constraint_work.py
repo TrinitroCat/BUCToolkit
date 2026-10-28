@@ -1,6 +1,6 @@
 #  Copyright (c) 2026.7.20, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: constraint_work.py
 #  Environment: Python 3.12
 """Ideal-constraint work and Jarzynski exponential averages."""

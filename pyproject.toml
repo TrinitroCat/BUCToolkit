@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "BUCToolkit"
-version = "1.0b5"
+version = "1.0.1"
 description = """
 BUCToolkit is a PyTorch-based high-performance AI4Science software package of computational chemistry,
 which can perform structural optimizations (both minimization and transition state search),
@@ -13,17 +13,18 @@ The input functions of energy and forces have very flexible interfaces, and
 the most typical input functions are PyTorch-based **deep-learning models** (of molecular or crystal potentials).
 For these nn.Module objects, BUCToolkit also provided training and prediction APIs.
 """
+readme = "README.md"
 license = {text = "MIT"}
 authors = [
     {name = "Pu Pengxin", email = "buctoolkit@163.com"},
     {name = "Song Xin"}
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "joblib>=1.4.2",
     "numpy>=1.26.4",
     "PyYAML>=6.0.1",
-    "torch>=2.4.1"
+    "torch>=2.5.1"
 ]
 
 [project.urls]
@@ -31,16 +32,19 @@ Homepage = "https://github.com/TrinitroCat/BUCToolkit"
 
 [project.scripts]
 buctoolkit = "BUCToolkit.cli.main:main"
-bckt = "BUCToolkit.cli.main:main"
+bct = "BUCToolkit.cli.main:main"
 btvasp = "BUCToolkit.cli.main:main_btvasp"
 
 [project.entry-points."buctoolkit.cli"]
 bckt_cli = "BUCToolkit.cli.__init__:run_base_cli"
 
 [project.optional-dependencies]
-dgl = ["dgl"]
+#dgl = ["dgl"]  # deprecated
 pyg = ["torch_geometric>=2.6.1"]
 prompt-toolkit = ["prompt-toolkit>=3.0.43"]
+mace = ["mace-torch", "e3nn"]
+triton = ["triton"]
+test = ["pytest>=7.4"]
 
 [tool.setuptools]
 include-package-data = true
@@ -51,3 +55,8 @@ exclude = ["tests*", "dist*", "Manual*", "build*", "*.egg-info*"]
 
 [tool.setuptools.package-data]
 "*" = ["README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["testsuite/regression_test"]
+pythonpath = ["."]
+addopts = "-ra"

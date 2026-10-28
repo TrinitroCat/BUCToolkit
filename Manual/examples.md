@@ -153,7 +153,9 @@ optimizer.set_dataloader(PyGDataLoader, {'shuffle': False})
 optimizer.run(MyModel, mode='minimize')
 ```
 
-Use `mode='ts'` and `set_dimer_init_direction(...)` for a dimer search.
+Transition-state searches use `mode='ts'`; `TRANSITION_STATE.ALGO` selects
+`DIMER`, `KRYLOV`, or `KRYDYN`. Provide the initial direction with
+`set_dimer_init_direction(...)` or an `X_DIFF_ATTR` data attribute.
 
 ## Molecular Dynamics with the API
 
@@ -240,7 +242,9 @@ uses `ISFSPyGDataLoader`:
 TASK: CMD
 BATCH_SIZE: 1
 DATA_PATH: ./initial.bs
+DATA_READER_KWARGS: {}      # reader options for initial.bs
 FSDATA_PATH: ./final.bs
+FSDATA_READER_KWARGS: {}    # reader options for final.bs
 MD:
   ENSEMBLE: NVT
   CONSTR_MD_SCHEME: BLUE_MOON
@@ -288,8 +292,22 @@ runner.set_dataloader(ISFSPyGDataLoader)
 runner.run(MyModel)
 ```
 
-For a dimer search, use `StructureOptimization` with `mode='ts'` and provide
-a direction through `set_dimer_init_direction` or configured data.
+For a transition-state search with `StructureOptimization`, use `mode='ts'` and
+set `TRANSITION_STATE.ALGO` to `DIMER`, `KRYLOV`, or `KRYDYN`:
+
+```python
+from BUCToolkit.api.StructureOptimization import StructureOptimization
+from BUCToolkit.api.DataLoaders import PyGDataLoader
+
+runner = StructureOptimization('./ts.yml')
+runner.set_dataset({'data': data_list})
+runner.set_dataloader(PyGDataLoader, {'shuffle': False})
+runner.set_dimer_init_direction(X_diff)  # optional; X_DIFF_ATTR also works
+runner.run(MyModel, mode='ts')
+```
+
+For CLI input files, `DISPDATA_PATH` uses `DISP_DATA_READER_KWARGS`; when it is
+absent, `FSDATA_PATH` uses `FSDATA_READER_KWARGS`.
 
 ## Metropolis Monte Carlo
 
@@ -394,8 +412,12 @@ dimer.run(
 
 `CI_NEB` receives initial/final coordinates and uses `N_images`, `spring_const`,
 `optimizer_configs`, convergence thresholds, and `maxiter`. `KrylovNewton` and
-`KrylovDynamics` additionally configure the eigen solver; their complete
-method-specific signatures are in the source docstrings.
+`KrylovDynamics` additionally configure the eigen solver with `Eigen_thres`,
+`maxiter_eig`, `morse_index`, and the spectral cutoffs; both take `X_diff` to
+seed the first eigensolve and accept `extra_krylov_dim` in `run`.
+`KrylovNewton` also accepts `steplength_sheme`, where `trust_region` is the
+tested option. Their complete method-specific signatures are in the source
+docstrings.
 
 ## Low-level Frequency Analysis
 

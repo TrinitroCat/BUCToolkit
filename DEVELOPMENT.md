@@ -207,9 +207,33 @@ nontrivial methods.
   round-trip reconstruction.
 - Cover regular and irregular batches where layout behavior differs.
 - Cover CPU and CUDA paths in proportion to the change.
-- Run focused smoke tests during development. Do not run the complete suite
-  unless the maintainer explicitly requests it.
+- Run focused smoke tests during development.
+- Before pushing a complete change, run the regression suite. When a GPU is
+  available, also run `buctoolkit --test fast`. Run `buctoolkit --test main`
+  when the maintainer requests it or before a release.
+- Remote GitHub Actions is a lightweight gate only: it runs the CPU regression
+  suite, the I/O/API/vibration smoke tests, and package-build checks. It does
+  not replace local GPU or strict scientific validation.
+- The `fast` and `main` suites use soft numerical diagnostics: statistical or
+  convergence checks may print their values and continue. A green run means no
+  hard exception, not that every printed deviation is acceptable. Review the
+  printed OPT/TS/MD/MC values before declaring a change scientifically correct.
+- `buctoolkit --test profile` is temporarily unavailable because
+  `torch.profiler` perturbs CUDA-graph replay and the asynchronous custom
+  kernels. Do not use its reports for release decisions.
+- CPU-only installations do not require Triton. Install the optional extras
+  required by the work, for example `pip install -e ".[test,mace,triton]"`.
+  Tests for missing optional dependencies are skipped.
 - Run relevant `py_compile` checks and `git diff --check` before handoff.
+
+Local validation commands:
+
+```shell
+python -m pytest
+cd testsuite && python -m unittest fast_test.FastTest.test_IO fast_test.FastTest.test_APIS fast_test.FastTest.test_VIB
+buctoolkit --test fast   # GPU machine; short scientific checks
+buctoolkit --test main   # strict suite; maintainer request or release
+```
 
 ## 14. Change management
 

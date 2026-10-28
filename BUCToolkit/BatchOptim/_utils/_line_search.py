@@ -4,7 +4,7 @@ Line Search for optimizations.
 
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: _line_search.py
 #  Environment: Python 3.12
 

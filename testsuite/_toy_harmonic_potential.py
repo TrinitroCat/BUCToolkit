@@ -1,33 +1,8 @@
 import torch as th
 import torch.nn as nn
-from functools import wraps
 from typing import List, Union, Tuple
 import itertools
 from BUCToolkit.BatchStructures.batch import Data, Batch
-
-
-class _ProfilerDisabled:
-    """Temporarily enter Torch's disabled profiler context for toy models."""
-
-    def __enter__(self):
-        try:
-            self._context = th.profiler.profile(enabled=False)
-        except TypeError:
-            self._context = th.autograd.profiler.profile(enabled=False)
-        self._context.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        return self._context.__exit__(exc_type, exc_value, traceback)
-
-
-def _without_profiler(function):
-    """Exclude a toy potential call from the surrounding profiler."""
-    @wraps(function)
-    def wrapped(*args, **kwargs):
-        with _ProfilerDisabled():
-            return function(*args, **kwargs)
-    return wrapped
 
 
 class HarmonicLatticePotential(nn.Module):
@@ -56,7 +31,6 @@ class HarmonicLatticePotential(nn.Module):
         self.r0 = r0
         self.eps = eps
 
-    @_without_profiler
     def forward(self, data) -> dict:
         r"""
         Compute total potential energy and forces.
@@ -118,7 +92,6 @@ class SimpleSpringPotential(nn.Module):
         self.register_buffer('pos_init', pos_init)
         self.k = k
 
-    @_without_profiler
     def forward(self, data):
         dr = data.pos - data.pos0  # (N,3)
         # pot：0.5 * k * sum(dr^2)
@@ -143,7 +116,6 @@ class FreeParticles(nn.Module):
         self.energy = None
         self.forces = None
 
-    @_without_profiler
     def forward(self, data):
         if self.energy is None:
             num_graphs = data.batch.max().item() + 1
@@ -166,7 +138,6 @@ class LennardJonesCluster(nn.Module):
         self.sigma = sigma
         self.cutoff = cutoff
 
-    @_without_profiler
     def forward(self, data):
         with th.enable_grad():
             pos = data.pos
@@ -223,7 +194,6 @@ class MullerBrownPotential(nn.Module):
         self.register_buffer('y0', th.tensor([0.0, 0.5, 1.5, 1.0]))
         self.center_at = center_at   # 势能面上期望与 pos0 平均位置重合的点
 
-    @_without_profiler
     def forward(self, data):
         pos = data.pos
         pos0 = data.pos0
@@ -284,7 +254,6 @@ class DoubleWellPotential(nn.Module):
         self.k_y = k_y
         self.k_z = k_z
 
-    @_without_profiler
     def forward(self, data):
         pos = data.pos
         pos0 = data.pos0

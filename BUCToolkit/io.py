@@ -3,7 +3,7 @@ A fast API for all i/o operations
 """
 #  Copyright (c) 2026.4.13, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: io.py
 #  Environment: Python 3.12
 

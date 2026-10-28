@@ -1,7 +1,7 @@
 """ Indexed operations with given batch_indices """
 #  Copyright (c) 2026.1.22, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: index_ops.py
 #  Environment: Python 3.12
 
@@ -88,6 +88,45 @@ def index_reduce(
     else:
         out.index_reduce_(dim, batch_indices, src, ops, include_self=include_self)
     return out
+
+def segment_reduce(
+        src: th.Tensor,
+        batch_size_tensor: th.Tensor,
+        dim: int = 0,
+        ops: Literal['sum', 'mean', 'max', 'min', 'prod'] = 'sum',
+        init_value: float | None = None,
+        unsafe: bool = True,
+) -> th.Tensor:
+    """
+    segment_reduce method that reduces element in each segment in `src` with the sizes in `batch_size_tensor` by `ops`.
+    Args:
+        src: source tensor
+        batch_size_tensor: tensor of 1D that recorded each segment length
+        dim: reduce dimension
+        ops: reduce operation
+        init_value: default value of the output tensor that reduced values filled in.
+        unsafe: whether to check the bound.
+
+    Returns:
+
+    """
+    if not batch_size_tensor.dim() == 1:
+        raise ValueError(f'Invalid dimension of batch indices: {batch_size_tensor.shape}. It must be 1D.')
+    # handle the dimension issue
+    _shape = (1, ) * dim
+    _batch_sizes = batch_size_tensor.reshape(*_shape, -1)
+
+    out = th.segment_reduce(
+        src,
+        ops,
+        lengths=_batch_sizes,
+        axis=dim,
+        unsafe=unsafe,
+        initial=init_value,
+    )
+
+    return out
+
 
 def index_inner_product(
         u: th.Tensor,

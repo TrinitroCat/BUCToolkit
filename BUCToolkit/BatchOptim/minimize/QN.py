@@ -3,11 +3,11 @@ Quasi-Newton Algorithm for optimization.
 """
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: QN.py
 #  Environment: Python 3.12
 
-from typing import Literal
+from typing import Literal, Tuple, List
 import os
 
 import torch as th
@@ -57,7 +57,9 @@ class QN(_BaseOpt):
             external_Hessian: th.Tensor|None = None,
             output_file: str | None = None,
             device: str | th.device = 'cpu',
-            verbose: int = 2
+            verbose: int = 2,
+            dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'Force'),
+            log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'E_diff', 'F_eps', 'X', 'X_grad'),
     ):
         super().__init__(
             iter_scheme,
@@ -72,7 +74,10 @@ class QN(_BaseOpt):
             use_bb,
             output_file,
             device,
-            verbose
+            verbose,
+            _hold_samples=False,
+            dump_quantities = dump_quantities,
+            log_quantities = log_quantities
         )
         self.external_Hessian = external_Hessian
 

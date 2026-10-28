@@ -1,7 +1,7 @@
 """ Molecular Dynamics via Verlet algo. """
 #  Copyright (c) 2024-2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: _BaseMD.py
 #  Environment: Python 3.12
 
@@ -21,7 +21,7 @@ import numpy as np
 
 from BUCToolkit.utils._Element_info import MASS, N_MASS, ATOMIC_NUMBER, ATOMIC_SYMBOL, DTYPE
 from BUCToolkit.utils._print_formatter import FLOAT_ARRAY_FORMAT, SCIENTIFIC_ARRAY_FORMAT
-from BUCToolkit.utils.index_ops import index_reduce
+from BUCToolkit.utils.index_ops import index_reduce, segment_reduce
 from BUCToolkit.utils.function_utils import preload_func
 from BUCToolkit.Bases.BaseMotion import BaseMotion
 from BUCToolkit.Bases.StdContainer import StdContainer
@@ -35,7 +35,7 @@ class _BaseMD(BaseMotion):
 
     #: Quantities known to the MD framework that may appear in
     #: ``dump_quantities`` / ``log_quantities``.  Subclasses extend
-    #: this set (e.g. ``_BaseConstrMD`` adds ``'Fc'``, ``'G'``, ``'w'``).
+    #: this set (e.g. the constrained wrappers add ``'Fc'``, ``'G'``, ``'w'``).
     ALLOWED_QUANTITIES: Set[str] = {'Energy', 'Ek', 'temperature', 'X', 'V', 'Force'}
 
     __slots__ = [
@@ -49,6 +49,8 @@ class _BaseMD(BaseMotion):
         'Ek',
         'p_iota',
         'require_Ek_update',
+        '_constr',
+        '_has_constr',
         #'__dict__'
     ]
 
@@ -61,7 +63,7 @@ class _BaseMD(BaseMotion):
             output_structures_per_step: int = 1,
             device: str | th.device = 'cpu',
             verbose: int = 0,
-            is_compile: bool = False,
+            is_compile: Literal['full', 'partial', 'no'] | bool = False,
             compile_kwargs: dict | None = None,
             dump_quantities: Tuple[str, ...] | List[str] = ('Energy', 'X', 'V', 'Force'),
             log_quantities: Tuple[str, ...] | List[str] = ('Energy', 'Ek', 'temperature', 'X', 'V'),
@@ -97,8 +99,33 @@ class _BaseMD(BaseMotion):
         self.output_structures_per_step = int(output_structures_per_step)
         self.device = device if isinstance(device, th.device) else th.device(device)
         self.verbose = int(verbose)
-        self.is_compile = bool(is_compile)
+        # handle the compilation
+        if isinstance(is_compile, str):
+            if is_compile == 'full':
+                self.is_compile = True
+                self.is_compile_partial = True
+            elif is_compile == 'partial':
+                self.is_compile = False
+                self.is_compile_partial = True
+            elif is_compile == 'no':
+                self.is_compile = False
+                self.is_compile_partial = False
+            else:
+                raise ValueError(f'Unknown `is_compile`: {is_compile}')
+        elif isinstance(is_compile, bool):
+            if is_compile:
+                self.is_compile = True
+                self.is_compile_partial = True
+            else:
+                self.is_compile = False
+                self.is_compile_partial = False
+        else:
+            raise ValueError(f'Unknown `is_compile`: {is_compile}')
         self.compile_kwargs = compile_kwargs if compile_kwargs is not None else dict()
+        if self.is_compile_partial and not self.is_compile:
+            self._reduce_Ek_T = th.compile(self._reduce_Ek_T, **self.compile_kwargs)
+            self.reset_to_mass_center = th.compile(self.reset_to_mass_center, **self.compile_kwargs)
+            pass
 
         self.EK_TARGET = None  # target kinetic energy under set temperature.
         self.Ekt_vir = None    # virtual kinetic energy for _CSVR_ thermostat.
@@ -114,6 +141,12 @@ class _BaseMD(BaseMotion):
         self.free_degree = None  # (n_batch, ), freedom degree tensor
         self.require_grad = None
 
+        # Optional constraint component (a BaseConstr) and the boolean that
+        # guards its two projection points in every step body. Plain MD keeps
+        # both empty and never allocates a constraint solver.
+        self._constr = None
+        self._has_constr = False
+
         # An inner attr that lets the dumper do not close after `self.run`.
         # It is used to contiguously run within a loop.
         # Adv. API `MolecularDynamics` turns on it.
@@ -123,19 +156,19 @@ class _BaseMD(BaseMotion):
         super().__init__(output_file)
         self.init_logger('Main.MD')
         self._setup_register_vars(dump_quantities, log_quantities)
-        if (self.output_file is None) and self.output_structures_per_step < self.max_step + 1:
+        if (self.verbose > 0) and (self.output_file is None) and (self.output_structures_per_step < self.max_step + 1):
             self.logger.warning(
-                f"WARNING: Here is no output file while output structure per {self.output_structures_per_step} is required."
+                f"WARNING: Here is no output file "
+                f"while output structure per {self.output_structures_per_step} is required."
             )
 
-    def _reduce_Ek_T(self, batch_indices, masses, V):
-        if batch_indices is not None:
+    def _reduce_Ek_T(self, batch_size_tensor, masses, V):
+        if batch_size_tensor is not None:
             Ek = th.sum(
-                0.5 * index_reduce(
+                0.5 * segment_reduce(
                     masses * V * V,
-                    self.batch_scatter,
-                    1,
-                    out_size=self.scatter_dim_out_size
+                    batch_size_tensor,
+                    dim=1,
                 ) * 103.642696562621738,
                 dim=-1
             ).squeeze_(0)  # (n_batch, ), eV/atom. Faraday constant F = 96485.3321233100184.
@@ -165,11 +198,32 @@ class _BaseMD(BaseMotion):
             mass_center = th.sum(Xr * mass, dim=1, keepdim=True) / mass_sum  # (n_batch, 1, n_dim)
         else:
             # initialize topologie
-            mass_sum = index_reduce(mass_short, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size).unsqueeze(-1)  # (1, n_batch, 1)
-            mass_center = index_reduce(Xr * mass, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size) / mass_sum  # (1, n_batch, n_dim)
+            mass_sum = segment_reduce(mass_short, self.batch_tensor, dim=1,).unsqueeze(-1)  # (1, n_batch, 1)
+            mass_center = segment_reduce(Xr * mass, self.batch_tensor, dim=1,) / mass_sum  # (1, n_batch, n_dim)
+            #mass_sum = index_reduce(mass_short, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size).unsqueeze(-1)  # (1, n_batch, 1)
+            #mass_center = index_reduce(Xr * mass, self.batch_scatter, dim=1, out_size=self.scatter_dim_out_size) / mass_sum  # (1, n_batch, n_dim)
             mass_center = mass_center.index_select(1, self.batch_scatter)  # (1, sumN*A, n_dim)
 
         return mass_center
+
+    def reset_to_mass_center(
+            self,
+            mass_center: th.Tensor,
+            masses,
+            masses_short,
+            X,
+            V,
+    ):
+        """
+        Reset the coo and veloc. to the mass center.
+        Implicit update without returns.
+        Returns: None
+
+        """
+        _dX = mass_center - self.calc_mass_center(masses, masses_short, X)
+        _dV = - self.calc_mass_center(masses, masses_short, V)
+        X.add_(_dX)  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
+        V.add_(_dV)
 
     def _do_async_dump(self, q: queue.Queue):
         """Consumer thread: drain queue, call ``dumper.step()``, signal done.
@@ -675,11 +729,17 @@ class _BaseMD(BaseMotion):
                     names=dump_names,
                 )
 
+            # warm up if compile
+            if self.is_compile_partial and not self.is_compile:
+                self._reduce_Ek_T(self.batch_tensor, masses, s.V)
+                if is_fix_mass_center:
+                    self.reset_to_mass_center(MASS_CENTER, masses, masses_short, s.X, s.V)
+
             # Keep this generic graph available to subclasses such as CSVR,
             # which may replay it inside their own update implementation.
             Ek_T_graph = th.cuda.CUDAGraph()
             with th.cuda.graph(Ek_T_graph):
-                _e_tmp, _t_tmp = self._reduce_Ek_T(batch_indices, masses, s.V)
+                _e_tmp, _t_tmp = self._reduce_Ek_T(self.batch_tensor, masses, s.V)
                 s.Ek.copy_(_e_tmp)
                 s.temperature.copy_(_t_tmp)
             self.Ek_T_graph = Ek_T_graph
@@ -688,10 +748,7 @@ class _BaseMD(BaseMotion):
             if is_fix_mass_center:
                 mass_center_graph = th.cuda.CUDAGraph()
                 with th.cuda.graph(mass_center_graph):
-                    _dX = MASS_CENTER - self.calc_mass_center(masses, masses_short, s.X)
-                    _dV = - self.calc_mass_center(masses, masses_short, s.V)
-                    s.X.add_(_dX)  # (n_batch, n_atom, n_dim) - (n_batch, 1, n_dim)
-                    s.V.add_(_dV)
+                    self.reset_to_mass_center(MASS_CENTER, masses, masses_short, s.X, s.V)
             else:
                 mass_center_graph = None
 
@@ -806,6 +863,10 @@ class _BaseMD(BaseMotion):
             if is_fix_mass_center and (i % move_to_center_freq == 0):
                 mass_center_graph.replay()
             self.time_now += self.time_step
+            # Keep the constraint-stage clock identical to the MD clock. The
+            # projection then stages its target at ``time_now + time_step``.
+            if self._has_constr:
+                self._constr.time_now = self.time_now
 
     def __run_on_cpu(
             self,
@@ -1082,7 +1143,7 @@ class _BaseMD(BaseMotion):
                 for i in range(self.max_step):
                     is_output_step = i % self.output_structures_per_step == 0
                     if (is_output_step and has_Ek_T_output) or self.require_Ek_update:
-                        Ek, temperature = self._reduce_Ek_T(batch_indices, masses, s.V)
+                        Ek, temperature = self._reduce_Ek_T(self.batch_tensor, masses, s.V)
                         self.Ek = Ek
                         s.Ek.copy_(Ek)
                         s.temperature.copy_(temperature)
@@ -1116,6 +1177,9 @@ class _BaseMD(BaseMotion):
                         s.X.add_(dX)
                         s.V.add_(dV)
                     self.time_now += self.time_step
+                    # Keep the constraint-stage clock identical to the MD clock.
+                    if self._has_constr:
+                        self._constr.time_now = self.time_now
                 if self.verbose > 0:
                     self.logger.info(f'MAIN LOOP DONE. Elapsed time: {time.perf_counter() - t_main_loop:>5.4f} s')
             finally:

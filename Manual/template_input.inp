@@ -138,7 +138,7 @@ MD:
   # Followings are Constrained MD only  <<<
   CONSTR_MD_SCHEME: !!str BLUE_MOON  # CMD only: BLUE_MOON or SLOW_GROWTH. For SLOW_GROWTH, if not set the constr_val function, it will be a trivial CMD.
   N_IMAGES: !!int 3         # BLUE_MOON interpolation images; SLOW_GROWTH parallel copies (use 1 for one trajectory)
-  CONSTR_THRESHOLD: !!float 1.e-5
+  CONSTR_THRESHOLD: !!str auto  # positive float, or `auto` to estimate it at initialization
   REQUIRE_FIXMAN: !!str auto  # `auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually.
   # Optional: constraints
   CONSTRAINTS_FILE: !!str ./constraints.py  # function file path of constraints. This function should receive torch.Tensors and support auto-grad.

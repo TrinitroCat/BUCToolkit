@@ -1,6 +1,6 @@
 #  Copyright (c) 2025.7.4, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: MetropolisMC.py
 #  Environment: Python 3.12
 import math
@@ -241,6 +241,7 @@ class MMC(_BaseMC):
             _energy,
             energies_old
         )
+        # that does not zeroise the `delta_E` has no matter, and show the raw/actual energy change.
         # delta_E = th.where(
         #    _x_mask,
         #    delta_E,

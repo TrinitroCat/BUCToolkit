@@ -4,7 +4,7 @@ and Monte Carlo simulations.
 """
 #  Copyright (c) 2026.3.26, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: __init__.py
 #  Environment: Python 3.12
 
@@ -956,7 +956,9 @@ def _task_input_defaults(task: str) -> dict[str, Any]:
         'OUTPUT_ROOT', 'OUTPUT_POSTFIX',
         'STRICT_LOAD', 'REDIRECT', 'SAVE_PREDICTIONS', 'DATA_TYPE', 'DATA_PATH',
         'DATA_NAME_SELECTOR', 'DATA_READER_KWARGS', 'DATA_LOADER_KWARGS',
-        'FSDATA_PATH', 'DISPDATA_PATH', 'VAL_SET_PATH', 'VAL_SPLIT_RATIO',
+        'FSDATA_PATH', 'FSDATA_READER_KWARGS',
+        'DISPDATA_PATH', 'DISP_DATA_READER_KWARGS',
+        'VAL_SET_PATH', 'VAL_SPLIT_RATIO',
         'IS_SHUFFLE', 'MODEL_TYPE', 'MODEL_FILE', 'MODEL_NAME', 'MODEL_CONFIG',
         'MODEL_WRAPPER_CONFIG', 'MODEL_WRAPPER_FILE', 'MODEL_WRAPPER_NAME',
     )

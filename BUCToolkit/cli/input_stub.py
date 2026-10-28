@@ -1,6 +1,6 @@
 #  Copyright (c) 2026.4.1, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 1.0b
+#  Version: 1.0.1
 #  File: input_stub.py
 #  Environment: Python 3.12
 from typing import Any
@@ -28,10 +28,12 @@ CONFIG_STUB = {
     "DATA_PATH": ("/your/data/path", str, "path of data used for calculation. If training, it is viewed as the training set"),
     "DATA_NAME_SELECTOR": (".*$", str, "regular expression to select data names. Only matched names will be loaded"),
     "FSDATA_PATH": ("your/final/state/data/path", str, "path for final state data, used for calculations requiring both initial and final states, e.g., CI-NEB"),
+    "FSDATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader of FSDATA_PATH"),
     "DISPDATA_PATH": ("your/displacement/data/path", str, "path for displacement data, used for calculations requiring initial guess of a direction, e.g., Dimer"),
+    "DISP_DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader of DISPDATA_PATH"),
     "VAL_SET_PATH": ("your/validation/set/path", str, "path for validation set, used for training that requires validation data"),
     "VAL_SPLIT_RATIO": (0.1, float, "ratio of validation set in the total dataset. Ignored if VAL_SET_PATH is provided"),
-    "DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader"),
+    "DATA_READER_KWARGS": ({}, dict, "keyword arguments for the structure reader of DATA_PATH and VAL_SET_PATH"),
     "DATA_LOADER_KWARGS": ({}, dict, "keyword arguments for the API DataLoader"),
     "IS_SHUFFLE": (False, bool, "whether to randomly shuffle dataset before calculating"),
 
@@ -87,16 +89,25 @@ CONFIG_STUB = {
 
     # Transition state
     "TRANSITION_STATE": {
-        "ALGO": ("DIMER", str, "algorithm for transition state search. Options: DIMER"),
-        "X_DIFF_ATTR": ("x_dimer", str, "attribute name of initial dimer direction"),
-        "E_THRES": (1e-4, float, "energy difference threshold for convergence"),
-        "TORQ_THRES": (1e-2, float, "torque threshold during rotation process, i.e., residuals of eigen vector"),
+        "ALGO": ("DIMER", str, "algorithm for transition state search. Options: DIMER, KRYLOV, KRYDYN"),
+        "X_DIFF_ATTR": ("x_dimer", str, "attribute name of the initial direction guess"),
+        "E_THRES": (1e-4, float, "energy difference threshold for convergence (KRYLOV/KRYDYN default: 1e-3)"),
+        "TORQ_THRES": (1e-2, float, "torque threshold, i.e., residuals of the eigen vector"),
         "F_THRES": (5e-2, float, "force threshold for convergence"),
         "MAXITER_TRANS": (300, int, "maximum number of translation steps"),
-        "MAXITER_ROT": (5, int, "maximum number of rotation steps"),
-        "MAX_STEPLENGTH": (0.5, float, "maximum step length"),
-        "DX": (0.1, float, "finite difference length for Hessian-vector product"),
+        "DX": (1e-2, float, "finite difference length for Hessian-vector product"),
+        "DUMP_QUANTITIES": (["Energy", "X", "Force"], list, "quantities written to the optimizer dump"),
+        "LOG_QUANTITIES": (["Energy", "E_diff", "F_eps", "X", "X_grad"], list, "quantities printed by the logger"),
         "REQUIRE_GRAD": (False, bool, "whether to toggle on auto-gradient during calculation"),
+        "CURVATURE_THRES": (-0.1, float, "DIMER only: curvature threshold for rotation convergence"),
+        "MAXITER_ROT": (10, int, "DIMER only: maximum number of rotation steps"),
+        "MAX_STEPLENGTH": (0.5, float, "DIMER only: maximum translation step length"),
+        "EIGEN_THRES": (1e-2, float, "KRYLOV/KRYDYN only: residual threshold of the eigen solver"),
+        "MAXITER_EIG": (10, int, "KRYLOV/KRYDYN only: maximum number of eigen solver iterations"),
+        "STEPLENGTH": (0.5, float, "KRYLOV/KRYDYN only: initial step length (KRYDYN time step)"),
+        "MORSE_INDEX": (1, int, "KRYLOV/KRYDYN only: number of unstable modes to follow"),
+        "NEG_SPECTRA_CUTOFF": (1e-2, float, "KRYLOV/KRYDYN only: cutoff for negative spectral modes"),
+        "POS_SPECTRA_CUTOFF": (1e-2, float, "KRYLOV/KRYDYN only: cutoff for positive spectral modes"),
     },
 
     # Vibration analyses
@@ -135,7 +146,7 @@ CONFIG_STUB = {
 
         "CONSTR_MD_SCHEME": ("BLUE_MOON", str, "constrained MD scheme. Options: BLUE_MOON, SLOW_GROWTH"),
         "N_IMAGES": (3, int, "BLUE_MOON interpolation images; SLOW_GROWTH parallel copies"),
-        "CONSTR_THRESHOLD": (1.e-5, float, "The threshold of constraints violated"),
+        "CONSTR_THRESHOLD": ("auto", (str, float), "The threshold of constraints violated. A positive float, or 'auto' to estimate it at initialization"),
         "REQUIRE_FIXMAN": ("auto", str, "`auto` means `True` for `BLUE_MOON` and False for `SLOW_GROWTH`. One may also set True/False manually"),
         "CONSTRAINTS_FILE": ("./constraints.py", str, "path to constraints function file"),
         "CONSTRAINTS_FUNC": ("func", str, "name of constraints function in CONSTRAINTS_FILE"),

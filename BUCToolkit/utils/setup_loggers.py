@@ -1,7 +1,7 @@
 """ Setup logger for all modules """
 #  Copyright (c) 2026.3.26, BUCToolkit.
 #  Authors: Pu Pengxin, Song Xin
-#  Version: 0.9a
+#  Version: 1.0.1
 #  File: setup_loggers.py
 #  Environment: Python 3.12
 
