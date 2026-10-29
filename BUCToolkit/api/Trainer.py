@@ -768,7 +768,7 @@ class Trainer(_BaseAPI):
                         'buctoolkit_hyperparameters': self._build_checkpoint_hyperparameters(hyperparam),
                     }
                     if len(history['val_loss']) != 0:
-                        states['val_loss'] = history['val_loss'][-1],
+                        states['val_loss'] = history['val_loss'][-1]
                     if scheduler is not None: states['lr_scheduler_state_dict'] = scheduler.state_dict()
                     th.save(states, os.path.join(self.CHK_SAVE_PATH, f'stop_checkpoint{self.CHK_SAVE_POSTFIX}.pt'))
                     self.logger.info(

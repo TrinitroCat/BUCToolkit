@@ -524,7 +524,7 @@ the method of updating function arguments for a mask.
                     p_ = p[select_mask, ...]
                     X0_ = X0[select_mask, ...]
                     _steplength_ = _steplength[select_mask, ...]
-                    ori_steplength_ = steplength[:, select_mask, :]
+                    ori_steplength_ = steplength[select_mask, :]
                     batch_tensor_ = None
                     batch_scatter_ = None
             else:

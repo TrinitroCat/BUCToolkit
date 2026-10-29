@@ -364,14 +364,15 @@ class Frequency(BaseIO):
             grad_func_args: other input arguments of `grad_func`.
             grad_func_kwargs: other input keyword arguments of `grad_func`.
             fixed_atom_tensor: (N, ) or (N, 3), the indices of X that fixed, i.e., not performing vibration calculation.
+                               0 is for frozen, and 1 is for free.
                                Only the 1st dimension will be read. Fixing partial degrees of freedom for an atom is not supported.
             save_hessian: Whether to retain the calculated Hessian as an
                 attribute. Dumping is controlled independently by the
                 constructor's ``dump_hessian`` argument.
 
         Returns:
-            normal mode frequencies: (3N, ) shape Tensor
-            normal mode coordinates: (3N, N, 3) shape Tensor
+            normal mode frequencies: (3n, ) shape Tensor, where n is the degree of freedom (i.e., free atom number).
+            normal mode coordinates: (3n, n, 3) shape Tensor
 
         Notes:
             When ``output_file`` is configured, each call writes one
@@ -431,7 +432,9 @@ class Frequency(BaseIO):
             neg_indx = th.where(norm_freq_square < 0.)[0]
             norm_freq = th.sqrt(th.abs(norm_freq_square))
             norm_freq[neg_indx] = - norm_freq[neg_indx]
-            norm_mode = (weighted_norm_mode/flat_masses).reshape(norm_freq_square.size(-1), -1, 3)
+            norm_mode = (weighted_norm_mode.T / flat_masses.sqrt()).reshape(
+                norm_freq_square.size(-1), -1, 3
+            )
             if save_hessian:
                 self.hessian = hessian
 

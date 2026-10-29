@@ -75,7 +75,7 @@ class ModelWithUncertaintyWrapper(_BaseWrapper, ABC):
 
     def Grad(self, X: th.Tensor, *args: Any, **kwargs: Any) -> th.Tensor:
         """Return the mathematical energy gradient (negative physical force)."""
-        if (self._prediction_cache is not None) and compare_tensors(self._prediction_cache[0], X):
+        if not ((self._prediction_cache is not None) and compare_tensors(self._prediction_cache[0], X)):
             self.evaluate(X, *args, **kwargs)
         if self._prediction_cache is None: raise RuntimeError(f"BUG: prediction cache is None after evaluation.")
         forces = self._prediction_cache[2]
