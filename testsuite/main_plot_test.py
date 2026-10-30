@@ -586,8 +586,13 @@ class MainTestPlot(MainTest):
 
 
 if __name__ == "__main__":
-    import unittest
-
-    if plt is None:
-        raise SystemExit(0)
-    unittest.main()
+    import sys
+    import datetime
+    try:
+        with open(f'./testsuite.log', 'w') as f:
+            f.write(f'START TIME: {datetime.datetime.now()}\n\n')
+            sys.stdout = f
+            unittest.main()
+            #test.test_parallel()
+    finally:
+        sys.stdout = sys.__stdout__

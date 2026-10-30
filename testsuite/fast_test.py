@@ -1001,13 +1001,21 @@ class FastTest(unittest.TestCase):
                 def gradient(X):
                     return (X.reshape(X.size(0), -1) @ full_hessian).reshape_as(X)
 
+                masses = th.linspace(
+                    1., 4., n_atom, device=device, dtype=dtype
+                )
+                free_masses = masses[free_atom_mask.bool()].repeat_interleave(3)
+                hessian_weights = th.sqrt(
+                    free_masses.unsqueeze(-1) * free_masses.unsqueeze(0)
+                )
+                expected_weighted_hessian = expected_hessian / hessian_weights
                 expected_eigenvalues, expected_eigenvectors = th.linalg.eigh(
-                    expected_hessian
+                    expected_weighted_hessian
                 )
                 expected_frequencies = th.sqrt(expected_eigenvalues)
-                expected_modes = expected_eigenvectors.reshape(
-                    n_free_dof, n_free_atom, 3
-                )
+                expected_modes = (
+                    expected_eigenvectors.T / free_masses.sqrt()
+                ).reshape(n_free_dof, n_free_atom, 3)
                 tolerance = (
                     vib_float32_tolerance
                     if dtype == th.float32 else vib_float64_tolerance
@@ -1033,6 +1041,7 @@ class FastTest(unittest.TestCase):
                             frequencies, normal_mode = calculator.normal_mode(
                                 energy,
                                 coordinates.clone(),
+                                masses=masses,
                                 grad_func=gradient,
                                 fixed_atom_tensor=free_atom_mask,
                                 save_hessian=True,
