@@ -704,7 +704,15 @@ class CreateLoadableData(CreatePygData):
             adapter: Any,
             labels: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Return the mapping consumed by ``MACEDataLoader``."""
+        """Return a MACE loader mapping with every structure converted eagerly.
+
+        Notes:
+            ``MACEDataLoader`` also accepts the PyG list returned by
+            :meth:`to_pyg_loader` and converts structures lazily in a bounded
+            prefetch queue.  Prefer that path for large MACE training sets;
+            this method eagerly materializes every MACE neighbor graph and is
+            retained for direct callers that need pre-converted static data.
+        """
         return {
             'data': self._to_mace_list(data, adapter),
             'labels': self._labels(data) if labels is None else labels,

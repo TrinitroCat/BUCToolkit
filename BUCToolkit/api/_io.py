@@ -857,6 +857,22 @@ class _BaseAPI(_CONFIGS):
                 )
             return wrapper
         if model_type == 'mace':
+            from BUCToolkit.api.DataLoaders import MACEDataLoader
+            if self._data_loader is MACEDataLoader:
+                # MACEDataLoader builds the MACE neighbor graph lazily from the
+                # resolved model configuration.  Inject it here, where the
+                # checkpoint-merged hyperparameters are already available, so
+                # task APIs do not require users to pass the configuration to
+                # every DataLoader constructor.  PyGDataLoader-based tasks
+                # (Opt/MD/MC/Predictor/Vib) must not receive this keyword: the
+                # MACE model wrapper converts their PyG batches itself.
+                model_config = hyperparam.get('MODEL_CONFIG')
+                if model_config is None:
+                    model_config = getattr(self, 'MODEL_CONFIG', None)
+                self._data_loader_configs = {
+                    **(self._data_loader_configs or {}),
+                    'model_config': model_config,
+                }
             from BUCToolkit.utils.model_wrappers import MACEModelWrapper
             return MACEModelWrapper(model)
         if model_type == 'pyg_multi':

@@ -317,17 +317,14 @@ def parse_center_input_file(
             raise ValueError(f"THERE IS NO VALIDATION DATA SPECIFIED. TRAINING MAY BE MEANINGLESS.")
 
         converter = bt.preprocessing.CreateLoadableData(verbose=1)
+        # Keep PyG structures here.  For MACE training, MACEDataLoader converts
+        # them to AtomicData lazily in its bounded prefetch thread; eagerly
+        # calling `to_mace_loader` here would materialize every COO neighbor
+        # list before the loader can apply backpressure.  The resolved
+        # MODEL_CONFIG is injected into `_data_loader_configs` by
+        # `_BaseAPI._build_model_wrapper`.
         train_data = converter.to_pyg_loader(data)
         valid_data = converter.to_pyg_loader(val_data)
-        if model_type == 'mace':
-            adapter = bt.utils.model_wrappers.MACEDataAdapter(
-                atomic_numbers=config['MODEL_CONFIG']['atomic_numbers'],
-                r_max=config['MODEL_CONFIG']['r_max'],
-                heads=config['MODEL_CONFIG'].get('heads'),
-                default_head=config['MODEL_CONFIG'].get('default_head'),
-            )
-            train_data = converter.to_mace_loader(data, adapter)
-            valid_data = converter.to_mace_loader(val_data, adapter)
         dataset_args = (train_data, valid_data)
 
     elif task_type == 'NEB' or (task_type == 'CMD' and cmd_scheme == 'BLUE_MOON'):

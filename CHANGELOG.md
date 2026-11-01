@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Made `MACEDataLoader` build MACE neighbor graphs lazily in a bounded
+  background prefetch queue, so MACE training memory is bounded by the buffer
+  instead of the full data set. Task APIs inject the resolved `MODEL_CONFIG`
+  automatically, and CLI MACE training keeps PyG data instead of eagerly
+  converting every structure. `ISFSMACEDataLoader` remains for pre-converted
+  static paired data; dynamic NEB/CMD runs continue to use
+  `ISFSPyGDataLoader` so `MACEWrapper.forward` rebuilds graphs per batch.
+
 ## 1.0.1 (2026-10-27)
 
 - Added `KRYLOV` (`KrylovNewton`) and `KRYDYN` (`KrylovDynamics`) as
