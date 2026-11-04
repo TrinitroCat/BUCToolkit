@@ -6,6 +6,7 @@
 #  File: _io.py
 #  Environment: Python 3.12
 
+import inspect
 import logging
 import os
 import re
@@ -856,7 +857,9 @@ class _BaseAPI(_CONFIGS):
                     f'but got {type(wrapper)}.'
                 )
             return wrapper
-        if model_type == 'mace':
+        if model_type == 'mace' or (
+                getattr(self._data_loader, '__name__', None) == 'MACEDataLoader'
+        ):  # if one uses MACEDataloader, he must use MACE model
             from BUCToolkit.api.DataLoaders import MACEDataLoader
             if self._data_loader is MACEDataLoader:
                 # MACEDataLoader builds the MACE neighbor graph lazily from the
@@ -880,6 +883,7 @@ class _BaseAPI(_CONFIGS):
             return Model_Wrapper_pyg_MultiDevice(model, **model_wrapper_config)
         if regular_batch:
             return Model_Wrapper_regularBatch_pyg(model, **model_wrapper_config)
+        # otherwise, as the default, use pyg wrapper
         return Model_Wrapper_pyg(model, **model_wrapper_config)
 
     def _set_data_type(self, data_type: str) -> None:
