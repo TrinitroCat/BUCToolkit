@@ -476,7 +476,7 @@ class ConstrainedMolecularDynamics(_BaseAPI):
                 else:
                     X_is = dataIS.nodes['atom'].data['pos']
                 # For SLOW_GROWTH: copy the same structure N_Images times
-                X_init_ = X_is.unsqueeze(0).expand(self.N_IMAGES, *X_is.shape)
+                X_init_ = X_is.unsqueeze(0).expand(self.N_IMAGES, *X_is.shape).clone()
                 origin_elem_list = get_atomic_number(dataIS)
                 dataIS = rebatched_graph(dataIS, X_init_)
                 _init_V = get_init_veloc(dataIS)
