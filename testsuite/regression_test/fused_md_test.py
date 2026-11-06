@@ -51,6 +51,7 @@ class EagerNVT(FusedNVT):
         """Skip the fused scheme so ``update_scheme`` stays eager."""
         return None
 from BUCToolkit.BatchStructures import read_md_traj
+from BUCToolkit.Bases.StdContainer import StdContainer
 from BUCToolkit.utils._Element_info import MASS
 from BUCToolkit.api._io import _Model_Wrapper_pyg
 try:
@@ -172,6 +173,7 @@ class FusedMDTest(unittest.TestCase):
             layout: ``'regular'`` or ``'irregular'``.
             n_atom: atoms per batch (regular) or a size scale (irregular).
             n_batch: number of batches.
+            fixed_atom_tensor: optional selective-dynamics mask.
             seed: random seed of the initial state.
 
         Returns:
@@ -198,6 +200,7 @@ class FusedMDTest(unittest.TestCase):
             self, cls, thermostat, steps: int, layout: str, n_atom: int = 6,
             seed: int = 3, output: bool = True, tag: str = 'md',
             time_step: float = TIME_STEP, n_batch: int = 3,
+            fixed_atom_tensor: th.Tensor | None = None,
     ):
         """Run one MD trajectory and return the reader and elapsed time.
 
@@ -250,6 +253,7 @@ class FusedMDTest(unittest.TestCase):
         runner.run(
             model.Energy, X0, element_list, None, V0, model.Grad,
             (), None, (), None, False, False, batch_indices,
+            fixed_atom_tensor,
         )
         th.cuda.synchronize()
         elapsed = time.perf_counter() - t_start
@@ -293,6 +297,57 @@ class FusedMDTest(unittest.TestCase):
     # ------------------------------------------------------------------
     # Kernel-level checks against plain Torch references
     # ------------------------------------------------------------------
+
+    @unittest.skipUnless(FUSED_AVAILABLE, 'CUDA and Triton are required')
+    def test_motion_mask_normalization(self):
+        """``handle_motion_mask`` must materialize and cast the mask to X."""
+        X = th.zeros(2, 4, 3, device=DEVICE)
+        fixed = th.ones(1, 4, 3, dtype=th.int8, device=DEVICE)
+        fixed[0, 0, :] = 0
+        mask = FusedNVE.handle_motion_mask(X, fixed)
+        self.assertEqual(mask.dtype, X.dtype)
+        self.assertEqual(tuple(mask.shape), tuple(X.shape))
+        self.assertTrue(mask.is_contiguous())
+        th.testing.assert_close(mask, fixed.broadcast_to(X.shape).to(X.dtype))
+        free_mask = FusedNVE.handle_motion_mask(X, None)
+        self.assertEqual(free_mask.dtype, X.dtype)
+        self.assertTrue(th.equal(free_mask, th.ones_like(X)))
+
+    @unittest.skipUnless(FUSED_AVAILABLE, 'CUDA and Triton are required')
+    def test_fixed_mask_parity(self):
+        """An int8 broadcast fixed mask must follow both integrator paths."""
+        fixed = th.ones(1, 6, 3, dtype=th.int8, device=DEVICE)
+        fixed[0, 0, :] = 0
+        fixed[0, 3, :] = 0
+        fused = self._run(
+            FusedNVE, None, 20, 'regular', tag='fixed_mask_fused',
+            fixed_atom_tensor=fixed,
+        )[0]
+        eager = self._run(
+            EagerNVE, None, 20, 'regular', tag='fixed_mask_eager',
+            fixed_atom_tensor=fixed,
+        )[0]
+        self.assertTrajectoriesClose(fused, eager, msg='fixed mask NVE')
+
+    @unittest.skipUnless(FUSED_AVAILABLE, 'CUDA and Triton are required')
+    def test_run_state_validation(self):
+        """A non-contiguous state tensor must raise a friendly error."""
+        runner = FusedNVE(1.0, 5, 300., None, 1, device=DEVICE, verbose=0)
+        X = th.zeros(2, 4, 3, device=DEVICE)
+        V = th.zeros_like(X)
+        Force = th.zeros(2, 4, 6, device=DEVICE)[..., ::2]
+        Energy = th.zeros(2, device=DEVICE)
+        state = StdContainer(
+            X=X, V=V, Force=Force, Energy=Energy,
+            Ek=th.zeros_like(Energy), temperature=th.zeros_like(Energy),
+        )
+        with self.assertRaises(RuntimeError) as context:
+            runner._validate_run_state(
+                state, th.ones_like(X), th.ones_like(X), None,
+            )
+        message = str(context.exception)
+        self.assertIn('s.Force', message)
+        self.assertIn('contiguous', message)
 
     def _layout_tensors(self, layout: str):
         """Build the flat tensors shared by the kernel checks."""

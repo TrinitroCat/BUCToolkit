@@ -16,6 +16,7 @@ It deliberately contains no MD state and no kernel definitions.
 """
 
 import os
+from typing import Any
 
 import torch as th
 from triton.runtime import driver as _triton_driver
@@ -204,3 +205,147 @@ def autotune_block_size(
             best_time = elapsed
             best_block = block
     return best_block
+
+def validate_fused_run_state(
+        owner: Any,
+        s: Any,
+        masses: th.Tensor,
+        atom_masks: th.Tensor,
+        batch_indices: Any,
+) -> None:
+    """Validate the fused-kernel buffers and batch layout once per run.
+
+    The base :meth:`_BaseMD._validate_run_state` checks the common state
+    tensors.  This function adds the fused-only contract: the flat layout and
+    the per-batch buffers.  It runs once, before the main loop, so the hot
+    path never needs per-call checks.  NVE only uses elementwise kernels and
+    therefore checks just its inverse masses; NVT additionally checks the
+    batch layout and thermostat buffers.
+
+    Args:
+        owner: NVE or NVT instance whose fused scheme is bound.
+        s: state container holding ``X`` and ``Energy``.
+        masses: per-element masses with the shape of ``s.X``.
+        atom_masks: selective-dynamics mask with the shape of ``s.X``.
+        batch_indices: irregular-batch split sizes, or ``None``.
+
+    Returns:
+        None.
+
+    Raises:
+        RuntimeError: if a fused buffer or the batch layout violates the kernel
+            contract.  The message lists every violation.
+    """
+    issues: list[str] = []
+    X = s.X
+    device = X.device
+    dtype = X.dtype
+
+    def check(
+            name: str,
+            tensor: th.Tensor,
+            numel: int | None = None,
+            expected_dtype: th.dtype | None = None,
+            shape: tuple[int, ...] | None = None,
+            contiguous: bool = True,
+    ) -> None:
+        """Append a friendly violation for one fused tensor."""
+        if not th.is_tensor(tensor):
+            issues.append(f'`{name}` is not a torch.Tensor (got {type(tensor).__name__}).')
+            return
+        if tensor.device != device:
+            issues.append(f'`{name}.device` is {tensor.device}; expected {device}.')
+        if expected_dtype is not None and tensor.dtype != expected_dtype:
+            issues.append(f'`{name}.dtype` is {tensor.dtype}; expected {expected_dtype}.')
+        if shape is not None and tuple(tensor.shape) != tuple(shape):
+            issues.append(f'`{name}.shape` is {tuple(tensor.shape)}; expected {tuple(shape)}.')
+        if numel is not None and tensor.numel() != numel:
+            issues.append(f'`{name}.numel()` is {tensor.numel()}; expected {numel}.')
+        if contiguous and not tensor.is_contiguous():
+            issues.append(f'`{name}` is not contiguous.')
+
+    def fail() -> None:
+        """Raise the aggregated validation error."""
+        raise RuntimeError(
+            'Invalid fused-kernel state before the main loop:\n  - '
+            + '\n  - '.join(issues)
+            + '\nThe fused kernels expect a contiguous state of one dtype, a '
+              'consistent batch layout, and per-batch buffers with the exact '
+              'documented dtype/shape. Fix the listed inputs or fall back to '
+              'the eager engine.'
+        )
+
+    # Section: flat layout and run scalars common to NVE and NVT
+    if owner._n_elem != X.numel():
+        issues.append(f'`_n_elem` is {owner._n_elem}; expected {X.numel()} from `s.X`.')
+    if not isinstance(owner._block_size, int) or owner._block_size <= 0:
+        issues.append(f'`_block_size` is {owner._block_size}; expected a positive int.')
+    check('inv_m', owner.inv_m, shape=tuple(X.shape), expected_dtype=dtype)
+
+    # Section: NVE uses elementwise kernels only, so the layout checks end here
+    if not hasattr(owner, '_n_batch'):
+        if issues:
+            fail()
+        return
+
+    # Section: NVT batch layout
+    scalar_dtype = owner._scalar_dtype
+    n_batch = owner._n_batch
+    if n_batch != s.Energy.numel():
+        issues.append(f'`_n_batch` is {n_batch}; expected {s.Energy.numel()} from `s.Energy`.')
+    if not isinstance(owner._reduction_block, int) or owner._reduction_block <= 0:
+        issues.append(f'`_reduction_block` is {owner._reduction_block}; expected a positive int.')
+
+    if owner._is_irregular:
+        if X.shape[0] != 1:
+            issues.append(f'An irregular batch must have leading size 1, but `s.X.shape[0]` is {X.shape[0]}.')
+        if owner._n_elem % 3 != 0:
+            issues.append(f'An irregular flat buffer must contain whole atoms, but `_n_elem` is {owner._n_elem}.')
+        if owner._n_chunk != 0:
+            issues.append(f'`_n_chunk` must be 0 for an irregular batch, but it is {owner._n_chunk}.')
+        if batch_indices is None or len(batch_indices) != n_batch:
+            issues.append('`batch_indices` must contain one entry per irregular batch.')
+        starts = owner._batch_starts
+        check('_batch_starts', starts, numel=n_batch + 1, expected_dtype=th.int32)
+        if th.is_tensor(starts) and starts.numel() == n_batch + 1:
+            starts_list = [int(_v) for _v in starts.tolist()]
+            if starts_list[0] != 0:
+                issues.append(f'`_batch_starts[0]` is {starts_list[0]}; expected 0.')
+            if starts_list[-1] != owner._n_elem:
+                issues.append(f'`_batch_starts[-1]` is {starts_list[-1]}; expected {owner._n_elem}.')
+            if any(_b < _a for _a, _b in zip(starts_list, starts_list[1:])):
+                issues.append('`_batch_starts` must be non-decreasing.')
+        scatter = owner.batch_scatter
+        check('batch_scatter', scatter, numel=owner._n_elem // 3)
+        if th.is_tensor(scatter) and scatter.numel() > 0:
+            low, high = int(scatter.min()), int(scatter.max())
+            if low < 0 or high >= n_batch:
+                issues.append(
+                    f'`batch_scatter` spans [{low}, {high}]; expected values in [0, {n_batch}).'
+                )
+    else:
+        if owner._n_chunk != X.shape[1] * X.shape[2]:
+            issues.append(
+                f'`_n_chunk` is {owner._n_chunk}; expected {X.shape[1] * X.shape[2]} from `s.X`.'
+            )
+        if owner._n_chunk * n_batch != owner._n_elem:
+            issues.append('For a regular batch, `_n_chunk * _n_batch` must equal `_n_elem`.')
+        if owner._batch_starts is not None:
+            issues.append('`_batch_starts` must be None for a regular batch.')
+
+    # Section: NVT thermostat buffers
+    if getattr(owner, '_alpha', None) is not None:
+        check('_alpha', owner._alpha, numel=n_batch, expected_dtype=scalar_dtype)
+    if getattr(owner, '_sigma', None) is not None:
+        check('_sigma', owner._sigma, shape=tuple(X.shape), expected_dtype=dtype)
+    if getattr(owner, '_p_iota', None) is not None:
+        check('_p_iota', owner._p_iota, numel=n_batch, expected_dtype=dtype)
+    if getattr(owner, '_smass', None) is not None:
+        check('_smass', owner._smass, numel=n_batch, expected_dtype=scalar_dtype)
+    check('_free_degree', owner._free_degree, numel=n_batch, expected_dtype=scalar_dtype)
+    check('_ek_target', owner._ek_target, numel=n_batch, expected_dtype=scalar_dtype)
+    if owner.thermostat == "VR":
+        check('Ek', owner.Ek, numel=n_batch, expected_dtype=dtype)
+
+    if issues:
+        fail()

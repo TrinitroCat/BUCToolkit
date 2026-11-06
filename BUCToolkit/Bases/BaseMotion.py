@@ -478,24 +478,38 @@ class BaseMotion(BaseIO):
 
     @staticmethod
     def handle_motion_mask(
-            X,
-            fixed_atom_tensor,
-    ):
-        """
-        normalize format of atom_masks
-        Returns: the standardized atom_masks
+            X: th.Tensor,
+            fixed_atom_tensor: th.Tensor | None,
+    ) -> th.Tensor:
+        """Normalize the selective-dynamics mask to the coordinate layout.
 
+        Args:
+            X: coordinates with shape ``(n_batch, n_atom, n_dim)``.
+            fixed_atom_tensor: optional mask broadcastable to ``X.shape``;
+                ``None`` means all atoms are mobile.
+
+        Returns:
+            A mask with the same shape, dtype, device, and contiguous layout as
+            ``X``.  Values are preserved (0 for fixed atoms, 1 for mobile).
+
+        Note:
+            Normalizing here gives every downstream path, eager or fused, the
+            same contract.  In particular, the fused ``vv2`` kernel can assume
+            a contiguous mask of the state dtype instead of converting int8 or
+            broadcast views element by element.
         """
         if fixed_atom_tensor is None:
             fixed_atom_tensor = th.ones_like(X, device=X.device)
         else:
             fixed_atom_tensor = fixed_atom_tensor.broadcast_to(X.shape)
-        if fixed_atom_tensor.shape == X.shape:
-            atom_masks = fixed_atom_tensor.to(X.device)
-        else:
-            raise RuntimeError(f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) does not match X (shape: {X.shape}).')
-
-        return atom_masks
+        if fixed_atom_tensor.shape != X.shape:
+            raise RuntimeError(
+                f'The shape of fixed_atom_tensor (shape: {fixed_atom_tensor.shape}) '
+                f'does not match X (shape: {X.shape}).'
+            )
+        # Materialize the broadcast view and cast int8/bool masks to the state
+        # dtype once, before any integrator or kernel touches them.
+        return fixed_atom_tensor.to(device=X.device, dtype=X.dtype).contiguous()
 
     @staticmethod
     def handle_grad_func(

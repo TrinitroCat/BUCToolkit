@@ -128,6 +128,9 @@ def velocity_verlet_2_kernel(
     Note:
         ``F_ptr`` must be writable: the eager engine stores the masked force in
         ``s.Force`` and the next step's first half-step reads it back.
+        ``mask_ptr`` must have the state dtype and a contiguous layout with the
+        same shape as ``V``; ``BaseMotion.handle_motion_mask`` materializes and
+        casts int8 or broadcast masks before the run.
     """
     dtype = V_ptr.dtype.element_ty
     pid = tl.program_id(axis=0)
@@ -201,7 +204,8 @@ def vv2(
     Args:
         V: flat velocities, updated in place.
         F: flat forces, masked and overwritten in place.
-        atom_masks: selective-dynamics mask.
+        atom_masks: selective-dynamics mask with the same dtype, shape, and
+            contiguous layout as ``V``; ``handle_motion_mask`` normalizes it.
         inv_M: flat inverse masses.
         time_step: MD time step in fs.
         block_size: Triton block size.

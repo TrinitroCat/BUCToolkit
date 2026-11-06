@@ -29,6 +29,7 @@ if _HAS_TRITON:
         KernelLauncher,
         autotune_block_size,
         resolve_block_sizes,
+        validate_fused_run_state,
     )
     from .fused_ops.VelocityVerlet import velocity_verlet_1_kernel, velocity_verlet_2_kernel
 
@@ -317,6 +318,33 @@ class NVE(_BaseMD):
         )
         if self.verbose >= 2:
             self.logger.warning(f"Error:{error}")
+
+    def _validate_run_state(
+            self,
+            s,
+            masses: th.Tensor,
+            atom_masks: th.Tensor,
+            batch_indices,
+    ) -> None:
+        """Validate the base MD state and the fused-kernel contract.
+
+        Args:
+            s: state container holding the run tensors.
+            masses: per-element masses with the shape of ``s.X``.
+            atom_masks: selective-dynamics mask with the shape of ``s.X``.
+            batch_indices: irregular-batch split sizes, or ``None``.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: if the common state or a fused buffer/layout is
+                invalid; the message lists every violation.
+        """
+        super()._validate_run_state(s, masses, atom_masks, batch_indices)
+        if getattr(self, '_block_size', None) is None:
+            return
+        validate_fused_run_state(self, s, masses, atom_masks, batch_indices)
 
     def _updateXV_fused(
             self,

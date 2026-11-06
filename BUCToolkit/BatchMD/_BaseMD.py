@@ -479,6 +479,107 @@ class _BaseMD(BaseMotion):
             else:
                 self.dumper.truncate()
 
+    def _validate_run_state(
+            self,
+            s,
+            masses: th.Tensor,
+            atom_masks: th.Tensor,
+            batch_indices: list[int] | tuple[int, ...] | th.Tensor | np.ndarray | None,
+    ) -> None:
+        """Validate the MD state once before the main loop.
+
+        Args:
+            s: state container holding ``X``, ``V``, ``Force``, ``Energy``,
+                ``Ek``, and ``temperature``.
+            masses: per-element masses with the shape of ``s.X``.
+            atom_masks: selective-dynamics mask with the shape of ``s.X``.
+            batch_indices: irregular-batch split sizes, or ``None``.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: if a state tensor violates the device, dtype, shape,
+                or contiguity contract.  The message lists every violation so
+                the model/inputs can be fixed in one pass.
+
+        Note:
+            The main loop only mutates these tensors through a few controlled
+            hooks; one validation here keeps the hot loop free of checks and
+            also protects the eager path from implicit dtype promotion or hard
+            to read low-level error stacks.
+        """
+        issues: list[str] = []
+        X = s.X
+        if not th.is_tensor(X):
+            raise RuntimeError(f'`s.X` is not a torch.Tensor (got {type(X).__name__}).')
+        device = X.device
+        dtype = X.dtype
+        if not X.is_floating_point():
+            issues.append(f'`s.X.dtype` is {dtype}; expected a floating-point dtype.')
+
+        def check(
+                name: str,
+                tensor: th.Tensor,
+                shape: tuple[int, ...] | None = None,
+                contiguous: bool = False,
+        ) -> None:
+            """Append a friendly violation for one state tensor."""
+            if not th.is_tensor(tensor):
+                issues.append(f'`{name}` is not a torch.Tensor (got {type(tensor).__name__}).')
+                return
+            if tensor.device != device:
+                issues.append(f'`{name}.device` is {tensor.device}; expected {device} (same as `s.X`).')
+            if tensor.dtype != dtype:
+                issues.append(f'`{name}.dtype` is {tensor.dtype}; expected {dtype} (same as `s.X`).')
+            if shape is not None and tuple(tensor.shape) != tuple(shape):
+                issues.append(f'`{name}.shape` is {tuple(tensor.shape)}; expected {tuple(shape)}.')
+            if contiguous and not tensor.is_contiguous():
+                issues.append(f'`{name}` is not contiguous; the integrator updates it in place.')
+
+        state_shape = tuple(X.shape)
+        check('s.V', s.V, state_shape, True)
+        check('s.Force', s.Force, state_shape, True)
+        check('masses', masses, state_shape, True)
+        check('atom_masks', atom_masks, state_shape, True)
+
+        n_batch = X.shape[0] if batch_indices is None else len(batch_indices)
+        check('s.Energy', s.Energy, (n_batch,))
+        check('s.Ek', s.Ek, (n_batch,))
+        check('s.temperature', s.temperature, (n_batch,))
+
+        if batch_indices is None:
+            if X.shape[0] != s.Energy.shape[0]:
+                issues.append(
+                    f'`s.Energy` has {s.Energy.shape[0]} batches, but `s.X` has {X.shape[0]}.'
+                )
+        else:
+            try:
+                if len(batch_indices) != s.Energy.shape[0]:
+                    issues.append(
+                        f'`batch_indices` has {len(batch_indices)} entries, but `s.Energy` has '
+                        f'{s.Energy.shape[0]} batches.'
+                    )
+                if sum(int(_b) for _b in batch_indices) != X.shape[1]:
+                    issues.append(
+                        f'`sum(batch_indices)` is {sum(int(_b) for _b in batch_indices)}, but '
+                        f'`s.X.shape[1]` is {X.shape[1]}.'
+                    )
+                if any(int(_b) <= 0 for _b in batch_indices):
+                    issues.append('`batch_indices` must contain positive atom counts.')
+            except (TypeError, ValueError):
+                issues.append('`batch_indices` must be a sequence of positive integers.')
+
+        if issues:
+            raise RuntimeError(
+                'Invalid MD state before the main loop:\n  - '
+                + '\n  - '.join(issues)
+                + '\nThe integrator expects `s.X`, `s.V`, `s.Force`, `masses`, and '
+                  '`atom_masks` to share the same device, dtype, shape, and contiguous '
+                  'layout; `s.Energy`, `s.Ek`, and `s.temperature` must share the batch '
+                  'dimension and dtype. Convert the model output or the inputs accordingly.'
+            )
+
     def __run_on_cuda(
             self,
             func: Any | nn.Module,
@@ -744,6 +845,8 @@ class _BaseMD(BaseMotion):
                 s.temperature.copy_(_t_tmp)
             self.Ek_T_graph = Ek_T_graph
             self.Ek = s.Ek
+            # Validate the complete state contract once, before the hot loop.
+            self._validate_run_state(s, masses, atom_masks, batch_indices)
             # preload a graph of mass center
             if is_fix_mass_center:
                 mass_center_graph = th.cuda.CUDAGraph()
@@ -1103,6 +1206,8 @@ class _BaseMD(BaseMotion):
                 temperature=th.zeros_like(Energy),
             )
             self.set_registered_var_values(s)
+            # Validate the complete state contract once, before the hot loop.
+            self._validate_run_state(s, masses, atom_masks, batch_indices)
 
             # dynamic dump buffers
             dump_names = self.get_dump_vars()

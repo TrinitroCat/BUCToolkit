@@ -602,7 +602,7 @@ class Trainer(_BaseAPI):
                             # grad clip
                             if self.GRAD_CLIP:
                                 nn.utils.clip_grad_norm_(
-                                    parameters=parameter_iterator,
+                                    parameters=_model.parameters(),  # use new iterator
                                     max_norm=self.GRAD_CLIP_MAX_NORM,
                                     **self.GRAD_CLIP_CONFIG
                                 )
