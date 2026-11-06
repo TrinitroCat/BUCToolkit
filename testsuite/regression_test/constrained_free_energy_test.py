@@ -166,11 +166,9 @@ class ConstrainedFreeEnergyTest(unittest.TestCase):
         pulling_rate = 1. / duration
 
         def moving_target(time_now: th.Tensor) -> th.Tensor:
-            return th.ones(
-                n_trajectory,
-                device=time_now.device,
-                dtype=time_now.dtype,
-            ) * (-1. + time_now / duration)
+            # Every pulled copy follows the same protocol, so the target is a
+            # single row that the constraint component broadcasts over the batch.
+            return (-1. + time_now / duration).reshape(1, 1)
 
         coordinates = th.zeros(n_trajectory, 1, 3)
         coordinates[:, 0, 0] = -1.

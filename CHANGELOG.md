@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Constraint targets passed through `constr_val` must now be two-dimensional
+  `(n_batch, n_constr)`. The single-row form `(1, n_constr)` is broadcast to
+  every batch sample instead of being rejected, while a one-dimensional target
+  is rejected because its single axis is ambiguous between "one value per
+  constraint shared by the batch" and "one value per batch sample". Shape
+  mismatch messages now report the expected and received shapes in the correct
+  order, and `BaseConstr.initialize` restarts the constraint clock at zero so a
+  reused component cannot inherit a stale trajectory time.
 - Made `MACEDataLoader` build MACE neighbor graphs lazily in a bounded
   background prefetch queue, so MACE training memory is bounded by the buffer
   instead of the full data set. Task APIs inject the resolved `MODEL_CONFIG`

@@ -73,6 +73,11 @@ class BaseConstr(BaseIO):
             `None` for constant function that always return [0., ]. It should support auto-gradient ops. see example below.
         constr_val: Callable[..., th.Tensor] | th.Tensor, the constraint value of `constr_func`,
             i.e., constraints are `constr_func(X) = constr_val`.
+            A tensor target, or the value returned by a callback, must be
+            two-dimensional with shape ``(n_batch, n_constr)``. A single-row
+            target ``(1, n_constr)`` is broadcast to every batch sample;
+            one-dimensional targets are rejected because their single axis is
+            ambiguous.
             A time-dependent callback may be `constr_val(t)` or
             `constr_val(t, c0)`, where `t` is a scalar Tensor and `c0` is the
             value of `constr_func(X_init)` computed at initialization.
@@ -162,6 +167,7 @@ class BaseConstr(BaseIO):
         self.time_step = 1.
         self.require_fixman = require_fixman
         self.retraction_solver = retraction_solver
+        self.n_batch, self.n_constr = None, None
 
         if isinstance(constr_val, th.Tensor):
             self.is_const_constr = True
@@ -264,15 +270,20 @@ class BaseConstr(BaseIO):
                 the eager implementation.
 
         Returns:
-            None. The method updates mass factors, the current constraint
-            target, Jacobian/QR state, compilation state, and projection cache.
+            None. The method restarts ``time_now`` at zero, updates mass
+            factors, the current constraint target, Jacobian/QR state,
+            compilation state, and projection cache. A single-row target is
+            broadcast to every batch sample, so ``constr_val_now`` always has
+            shape ``(n_batch, n_constr)`` afterwards, and inputing the batches with
+            different batch size in one instance may not be accepted .
 
         Raises:
             TypeError: If ``compile_jacobian`` is not ``bool``.
                 Also raised when a time-dependent ``constr_val`` callback has
                 no inspectable signature accepting ``(t)`` or ``(t, c0)``.
-            RuntimeError: If ``constr_val`` and ``constr_func(X)`` have
-                different shapes.
+            RuntimeError: If ``constr_val`` is not two-dimensional, or if it
+                does not match the batched shape ``(n_batch, n_constr)`` (or
+                its single-row form ``(1, n_constr)``).
             ValueError: If the batched constraint residual is not two-dimensional.
 
         Note:
@@ -284,13 +295,23 @@ class BaseConstr(BaseIO):
             raise TypeError(
                 f'`compile_jacobian` must be bool, but got {type(compile_jacobian)}.'
             )
+        # Re-zero the constraint clock even though `_initialize_constr` already
+        # does so: the constraint component must own this invariant so that
+        # direct callers, and any future engine wiring, cannot inherit a stale
+        # trajectory time. It is idempotent on the engine path because the
+        # clock is already 0 there.
+        self.time_now = th.scalar_tensor(0., device=self.device, dtype=FLOAT_TYPE)
         X = X.to(device=self.device, dtype=FLOAT_TYPE)
         if masses is not None:
             masses = masses.to(device=self.device, dtype=FLOAT_TYPE)
         if masses is None: masses = th.ones_like(X)
         self.sqrtM = th.sqrt(masses)  # M^1/2, (n_batch, n_atoms, n_dim)
         self.negsqrtM = 1 / th.sqrt(masses)  # M^-1/2
-        _y_check = th.vmap(self.constr_func)(X)
+
+        # Section: handle the cases of constr_val
+        _y_check = th.vmap(self.constr_func)(X)  # (n_batch, n_constr)
+        self.n_batch, self.n_constr = _y_check.shape
+        first_target = None
         if self._lazy_calc_constr_val:
             self.constr_val_now = _y_check
         elif not self.is_const_constr:
@@ -301,13 +322,13 @@ class BaseConstr(BaseIO):
                 constr_val_signature = inspect.signature(self.constr_val_func_raw)
             except (TypeError, ValueError) as error:
                 raise TypeError(
-                    '`constr_val` must have an inspectable signature accepting '
-                    '(t) or (t, c0).'
+                    '`constr_val` must have an inspectable signature accepting (t) or (t, c0).'
                 ) from error
 
             try:
                 constr_val_signature.bind(self.time_now, self._constr_val_c0)
             except TypeError:
+                # If trying binary signature failed, use unary signature instead.
                 try:
                     constr_val_signature.bind(self.time_now)
                 except TypeError as unary_error:
@@ -318,18 +339,54 @@ class BaseConstr(BaseIO):
                 self._constr_val_func = self.constr_val_func_raw
             else:
                 self._constr_val_uses_c0 = True
+                # Use a closure to wrap binary func. as a unary one to keep following code static.
+                #   old constr solver code is all written with assuming constr_val_func is unary. keep compatibility.
                 self._constr_val_func = lambda t: self.constr_val_func_raw(t, self._constr_val_c0)
-            self._update_constr(self.time_now)
+            # Take the first target before the batched update so that the
+            # one-off shape gate below can inspect its raw shape.
+            first_target = self._constr_val_wrapped(self.time_now)[0]
+        else:
+            first_target = self.constr_val_now
+
+        if first_target is not None:
+            # Strict one-off verification: the target shape is only checked
+            # here. The integration path broadcasts every later update without
+            # re-checking, because a target that changes shape mid-run is not an
+            # expected usage.
+            if first_target.ndim != 2:
+                raise RuntimeError(
+                    f'`constr_val` must be 2-D with shape ({self.n_batch}, {self.n_constr}) '
+                    f'or the single-row form (1, {self.n_constr}), but got '
+                    f'{tuple(first_target.shape)}.'
+                )
+            if first_target.shape[1] != self.n_constr or first_target.shape[0] not in (1, self.n_batch):
+                raise RuntimeError(
+                    f'`constr_val` must have the same shape as `constr_func` '
+                    f'returned, i.e. ({self.n_batch}, {self.n_constr}), or a single-row '
+                    f'target (1, {self.n_constr}) broadcast to every sample; but got '
+                    f'{tuple(first_target.shape)}.'
+                )
+            if self.is_const_constr:
+                self.constr_val_now = th.broadcast_to(
+                    first_target, (self.n_batch, self.n_constr),
+                )
+            else:
+                self._update_constr(self.time_now)  # update the self.constr_val_now
         if self.verbose > 0:
             self.logger.info(
-                f'Constraint values are now {np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
+                f'Constraint values are now '
+                f'{np.array2string(self.constr_val_now.squeeze().numpy(force=True), **SCIENTIFIC_ARRAY_FORMAT)}'
             )
         # check constr_val shape
         if _y_check.shape != self.constr_val_now.shape:
             raise RuntimeError(
-                f'`constr_val` must have the same shape as what constr_func returned {self.constr_val_now.shape}, but got {_y_check.shape}.'
+                f'`constr_val` must have the same shape as '
+                f'what constr_func returned {_y_check.shape}, but got {self.constr_val_now.shape}.'
             )
         self.constr_val_now = self.constr_val_now.to(self.device, dtype=FLOAT_TYPE)
+
+        # Section: handle the main constraints function
+
         # A previous initialization may have compiled a different run shape or
         # constraint callable.  Perform validation through the eager path, then
         # build a fresh graph for the current inputs below.
@@ -340,8 +397,9 @@ class BaseConstr(BaseIO):
         if y.ndim != 2:
             raise ValueError(f'`constr_func` must return a 2D tensor of shape (n_batch, n_constr), but got {y.shape}.')
         if compile_jacobian:
-            self._build_compiled_jacobian(X)
+            self._build_compiled_jacobian(X)  # update the attr `self._compiled_jac
         self._do_qr(jac)
+        # automatic threshold limitation detection
         if self._detect_dynamic_thres != 'None':
             # Numerical rank deficiency is a one-off initialization diagnostic;
             # it is not repeated in the projection loop.
@@ -388,12 +446,19 @@ class BaseConstr(BaseIO):
 
     def _constr_val_wrapped(self, t):
         """
-        Manage the time-dependent constraint values.
+        Evaluate a raw time-dependent constraint target for ``jacrev``.
+
+        The target is returned without broadcasting: the one-off shape gate
+        lives in ``initialize``, and ``_update_constr`` broadcasts the value and
+        its time derivative unconditionally afterwards.
+
         Args:
-            t:
+            t: Scalar time at which the target is evaluated.
 
         Returns:
-
+            A pair of identical raw target tensors: the value differentiated by
+            ``jacrev`` and the auxiliary value returned through
+            ``has_aux=True``.
         """
         if self.is_const_constr:
             return None
@@ -401,9 +466,6 @@ class BaseConstr(BaseIO):
             y = self._constr_val_func(t)
             if isinstance(y, (Tuple, List)):
                 y = th.vstack(y).mT
-            else:
-                y = y.view(self._constr_val_c0.shape)
-
             return y, y
 
     def _update_constr(self, t: th.Tensor | float):
@@ -422,7 +484,9 @@ class BaseConstr(BaseIO):
         Returns:
             None. For a time-dependent constraint, ``self.constr_val_now`` and
             ``self.d_constr`` are replaced by the value and time derivative at
-            ``t``. Constant constraints are unchanged.
+            ``t``, both with shape ``(n_batch, n_constr)``. Constant constraints
+            are unchanged. The raw callback target is broadcast to this shape
+            here; its shape was verified once by ``initialize``.
 
         Raises:
             ValueError: If ``t`` is not scalar.
@@ -440,9 +504,15 @@ class BaseConstr(BaseIO):
                 self._constr_val_wrapped,
                 has_aux=True,
             )(t)  # d constr_val(t) / dt
-            # ensure the returns from udf function keeping the dtype and device.
-            self.d_constr = self.d_constr.to(self.device, dtype=FLOAT_TYPE)
-            self.constr_val_now = self.constr_val_now.to(self.device, dtype=FLOAT_TYPE)
+            # Broadcast unconditionally: `initialize` verified the target shape
+            # once, so this path only has to batch the value and its derivative.
+            # and ensure the returns from udf function keeping the dtype and device.
+            self.d_constr = th.broadcast_to(
+                self.d_constr, (self.n_batch, self.n_constr),
+            ).to(self.device, dtype=FLOAT_TYPE)
+            self.constr_val_now = th.broadcast_to(
+                self.constr_val_now, (self.n_batch, self.n_constr),
+            ).to(self.device, dtype=FLOAT_TYPE)
 
     def _build_compiled_jacobian(self, X_sample: th.Tensor):
         """
@@ -465,7 +535,7 @@ class BaseConstr(BaseIO):
 
         Returns:
             None.  On success, ``self._compiled_jac`` stores the compiled
-            callable.  On failure it is reset to ``None`` so ``_jacobian`` uses
+            callable.  On failure, it is reset to ``None`` so ``_jacobian`` uses
             the eager implementation.
         """
         self._compiled_jac = None
@@ -597,7 +667,11 @@ class BaseConstr(BaseIO):
                     if not bool(th.isfinite(difference).all()):
                         return None
                     evaluation_floor = float(difference.max())
-                except Exception:
+                except Exception as e:
+                    if self.verbose > 0:
+                        self.logger.warning(
+                            f"Failed to estimate the constraint residual floor: {e}"
+                        )
                     return None
             return float(
                 2. * evaluation_floor

@@ -194,6 +194,11 @@ def constr_val(t: torch.Tensor, c0: torch.Tensor) -> torch.Tensor:
 其中 `c0` 会在每次 `initialize()` 时重新计算，并在该轨迹中保持不变。
 constr_val的返回值可以是任意的，并不要求在 `t=0` 时精确返回 `c0`。
 
+`constr_val` 的张量目标（或回调返回值）必须是二维的 `(n_batch, n_constraint)`；
+只写一行 `(1, n_constraint)` 时，该目标会广播到本批次的每个 image，因此上面的
+`reshape(1, 1)` 在 `N_IMAGES > 1` 时同样适用。一维目标（如 `reshape(1)`）会被
+拒绝，因为无法区分它表示"每个 image 一个值"还是"各约束共享一个值"。
+
 两个函数都必须对坐标可微。CLI 中省略 `MD.CONSTRAINTS_VAL_FUNC` 或设为
 `null`，即可保持初始约束值行为。
 

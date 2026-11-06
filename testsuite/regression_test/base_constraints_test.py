@@ -105,12 +105,15 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
         self.assertTrue(th.allclose(constr.d_constr, th.full_like(c0, 2.)))
 
     def test_binary_time_target_reinitialization_refreshes_c0(self):
-        """Each initialization binds the binary target to its new c0."""
+        """Each initialization binds the binary target to its new c0 and restarts the clock."""
         def target(t: th.Tensor, c0: th.Tensor) -> th.Tensor:
             return c0 + t
 
         constr, X = self._initialize_constraint(target)
         first_target = constr.constr_val_now.clone()
+        # A reused component must start the new trajectory at t=0, not at the
+        # clock left behind by the previous run.
+        constr.time_now += 5.
 
         X_second = X + 3.
         constr.initialize(
@@ -121,6 +124,7 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
             compile_jacobian=False,
         )
 
+        self.assertEqual(float(constr.time_now), 0.)
         self.assertTrue(th.allclose(first_target, th.tensor(((1.,), (2.,)))))
         self.assertTrue(th.allclose(
             constr.constr_val_now,
@@ -128,9 +132,9 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
         ))
 
     def test_unary_time_target_remains_compatible(self):
-        """The original constr_val(t) callback form remains supported."""
+        """The original constr_val(t) callback form remains supported and broadcasts a single row."""
         def target(t: th.Tensor) -> th.Tensor:
-            return th.full((2,), 3., dtype=t.dtype) + t
+            return th.full((1, 1), 3., dtype=t.dtype) + t
 
         constr, _ = self._initialize_constraint(target)
         self.assertTrue(th.allclose(constr.constr_val_now, th.tensor(((3.,), (3.,)))))
@@ -153,6 +157,32 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, 'same shape'):
             self._initialize_constraint(target)
+
+        # Single-axis targets are ambiguous between the batch axis and the
+        # constraint axis, so they are rejected even when the length matches.
+        with self.assertRaisesRegex(RuntimeError, '2-D'):
+            self._initialize_constraint(lambda t: th.tensor(3.) + t)
+        with self.assertRaisesRegex(RuntimeError, '2-D'):
+            self._initialize_constraint(lambda t: th.full((2,), 3.) + t)
+        # A per-sample batch axis must match the batch size.
+        with self.assertRaisesRegex(RuntimeError, 'same shape'):
+            self._initialize_constraint(th.tensor(((3.,), (4.,), (5.,))))
+
+    def test_constant_target_broadcasts_single_row(self):
+        """A single-row constant target is broadcast to every batch sample."""
+        constr, X = self._initialize_constraint(th.tensor(((1.5,),)))
+
+        self.assertTrue(th.allclose(constr.constr_val_now, th.full((2, 1), 1.5)))
+        # Displace one sample so the retraction has a residual to remove; the
+        # broadcast target must still be the one that is enforced.
+        X_projected = X.clone()
+        X_projected[:, 0, 0] += 0.5
+        constr._project2(X_projected, X.clone())
+        self.assertTrue(th.allclose(
+            X_projected[:, 0, 0],
+            th.full((2,), 1.5),
+            atol=1e-4,
+        ))
 
     def test_fixman_linear_constraint_has_zero_geometric_force(self):
         """A constant constraint Jacobian gives finite w and exactly zero G."""
@@ -222,6 +252,26 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
         self.assertTrue(th.allclose(jac, expected_jac, atol=1e-6))
         self.assertTrue(th.allclose(y, expected_y, atol=1e-6))
 
+        # A single-row target is normalized before compilation, so the compiled
+        # graph receives the same full-shape contract.
+        single_row = BaseConstr(
+            _distance_constraints,
+            constr_val[:1],
+            device=X.device,
+            verbose=0,
+        )
+        single_row.initialize(
+            func=None,
+            X=X,
+            Element_list=None,
+            masses=th.ones_like(X),
+        )
+        self.assertIsNotNone(single_row._compiled_jac)
+        self.assertTrue(th.allclose(
+            single_row.constr_val_now,
+            constr_val[:1].expand(3, 2),
+        ))
+
     def test_project2_refreshes_time_constraint_once(self):
         """Newton Jacobians reuse one time-dependent target per projection."""
         X_orig = th.tensor(
@@ -284,7 +334,7 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
             return th.linalg.norm(X[1] - X[0]).reshape(1)
 
         def distance_target(t: th.Tensor) -> th.Tensor:
-            return (1. + 0.01 * t).reshape(1)
+            return (1. + 0.01 * t).reshape(1, 1)
 
         X = th.tensor(
             (((0., 0., 0.), (1., 0., 0.)),),

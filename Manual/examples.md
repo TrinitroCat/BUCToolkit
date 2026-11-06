@@ -197,6 +197,13 @@ def constr_val(t: torch.Tensor, c0: torch.Tensor) -> torch.Tensor:
 Here `c0` is recomputed by every `initialize()` call and remains fixed for the
 trajectory. The callback can be arbitrary and thus does not have to return `c0` at `t=0`.
 
+A tensor target, or the value returned by the callback, must be two-dimensional
+with shape `(n_batch, n_constraint)`. A single row `(1, n_constraint)` is
+broadcast to every image of the batch, so the `reshape(1, 1)` above also works
+for `N_IMAGES > 1`. One-dimensional targets (for example `reshape(1)`) are
+rejected because their single axis cannot be distinguished between "one value
+per image" and "one shared value per constraint".
+
 Both functions must be differentiable with respect to coordinates. In the
 CLI, omit `MD.CONSTRAINTS_VAL_FUNC` or set it to `null` to retain the initial
 value behavior.
