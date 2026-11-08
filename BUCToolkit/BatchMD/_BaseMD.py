@@ -361,6 +361,67 @@ class _BaseMD(BaseMotion):
         for i, ee in enumerate(elem_list):
             self.logger.info(f'Structure {i:>5d}: {ee}')
 
+    def _init_check_y_grad(
+            self,
+            func: Callable,
+            X: th.Tensor,
+            grad_func: Callable,
+            func_args: Tuple,
+            func_kwargs: Dict,
+            grad_func_args: Tuple,
+            grad_func_kwargs: Dict,
+            is_grad_func_contain_y: bool,
+            require_grad: bool,
+            atom_masks: th.Tensor,
+            batch_indices: List[int] | Tuple[int, ...] | th.Tensor | None,
+    ) -> StdContainer:
+        """Evaluate and validate the initial optimizer state, and initialize the StdContainer `self.s`.
+
+        Args:
+            func: Device-prepared objective callable.
+            X: Normalized coordinates on the optimizer device.
+            grad_func: Normalized gradient callable.
+            func_args: Positional objective arguments.
+            func_kwargs: Keyword objective arguments.
+            grad_func_args: Positional gradient arguments.
+            grad_func_kwargs: Keyword gradient arguments.
+            is_grad_func_contain_y: Whether the gradient callable receives the
+                objective value.
+            require_grad: Whether objective evaluation requires autograd.
+            atom_masks: Canonical movable-coordinate mask with the shape of X.
+            batch_indices: Irregular per-structure atom counts, or ``None``.
+
+        Returns:
+            Live state containing the checked coordinates, energy, gradient,
+            and force.
+        """
+        with th.set_grad_enabled(require_grad):
+            X.requires_grad_(require_grad)
+            Energy = func(X, *func_args, **func_kwargs)  # Note: func must return th.Tensor(n_batch, )
+            if batch_indices is not None:
+                if len(Energy) != len(batch_indices):  # check batch number of output
+                    raise RuntimeError(
+                        f'batch number of `func` output ({len(Energy)}) '
+                        f'does not match the input `batch_indices` ({len(batch_indices)}).'
+                    )
+
+            if is_grad_func_contain_y:
+                Forces = - grad_func(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
+            else:
+                Forces = - grad_func(X, *grad_func_args, **grad_func_kwargs) * atom_masks
+            Forces = Forces.contiguous()
+            if Forces.shape != X.shape:
+                raise RuntimeError(f"Forces shape ({Forces.shape}) does not match input ({X.shape}).")
+
+        # wrap into StdContainer
+        return StdContainer(
+            X=X,
+            Force=Forces,
+            Energy=Energy,
+            Ek=th.zeros_like(Energy),
+            temperature=th.zeros_like(Energy),
+        )
+
     def initialize(
             self,
             func: Any | nn.Module,
@@ -369,9 +430,9 @@ class _BaseMD(BaseMotion):
             masses: th.Tensor,
             V_init: th.Tensor | None = None,
             grad_func: Any | nn.Module = None,
-            func_args: Sequence = tuple(),
+            func_args: tuple = tuple(),
             func_kwargs: Dict | None = None,
-            grad_func_args: Sequence = tuple(),
+            grad_func_args: tuple = tuple(),
             grad_func_kwargs: Dict | None = None,
             is_grad_func_contain_y: bool = True,
             require_grad: bool = False,
@@ -783,30 +844,21 @@ class _BaseMD(BaseMotion):
             atom_masks = atom_masks.contiguous()
             t_step = time.perf_counter()
             t_main_loop = time.perf_counter()
-            with th.set_grad_enabled(require_grad):
-                X.requires_grad_(require_grad)
-                Energy = func(X, *func_args, **func_kwargs)  # Note: func must return th.Tensor(n_batch, )
-                if batch_indices is not None:
-                    if len(Energy) != len(batch_indices):  # check batch number of output
-                        raise RuntimeError(
-                            f'batch number of `func` output ({len(Energy)}) does not match the input `batch_indices` ({len(batch_indices)}'
-                        )
-
-                if is_grad_func_contain_y:
-                    Forces = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Forces = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-                Forces = Forces.contiguous()
-
-            # wrap into StdContainer
-            s = StdContainer(
-                X=X,
-                V=V,
-                Force=Forces,
-                Energy=Energy,
-                Ek=th.zeros_like(Energy),
-                temperature=th.zeros_like(Energy),
+            s = self._init_check_y_grad(
+                func,
+                X,
+                grad_func_,
+                func_args,
+                func_kwargs,
+                grad_func_args,
+                grad_func_kwargs,
+                is_grad_func_contain_y,
+                require_grad,
+                atom_masks,
+                batch_indices
             )
+            self.s = s
+            s.V = V
             self.set_registered_var_values(s)
 
             # dynamic dump buffers
@@ -1181,30 +1233,21 @@ class _BaseMD(BaseMotion):
             masses = masses.contiguous()
             atom_masks = atom_masks.contiguous()
 
-            with th.set_grad_enabled(require_grad):
-                X.requires_grad_(require_grad)
-                Energy = func(X, *func_args, **func_kwargs)  # Note: func must return th.Tensor(n_batch, )
-                if batch_indices is not None:
-                    if len(Energy) != len(batch_indices):  # check batch number of output
-                        raise RuntimeError(
-                            f'batch number of `func` output ({len(Energy)}) does not match the input `batch_indices` ({len(batch_indices)}'
-                        )
-
-                if is_grad_func_contain_y:
-                    Forces = - grad_func_(X, Energy, *grad_func_args, **grad_func_kwargs) * atom_masks
-                else:
-                    Forces = - grad_func_(X, *grad_func_args, **grad_func_kwargs) * atom_masks
-                Forces = Forces.contiguous()
-
-            # wrap into StdContainer
-            s = StdContainer(
-                X=X,
-                V=V,
-                Force=Forces,
-                Energy=Energy,
-                Ek=th.zeros_like(Energy),
-                temperature=th.zeros_like(Energy),
+            s = self._init_check_y_grad(
+                func,
+                X,
+                grad_func_,
+                func_args,
+                func_kwargs,
+                grad_func_args,
+                grad_func_kwargs,
+                is_grad_func_contain_y,
+                require_grad,
+                atom_masks,
+                batch_indices
             )
+            self.s = s
+            s.V = V
             self.set_registered_var_values(s)
             # Validate the complete state contract once, before the hot loop.
             self._validate_run_state(s, masses, atom_masks, batch_indices)

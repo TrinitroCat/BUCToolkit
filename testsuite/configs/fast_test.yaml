@@ -6,6 +6,11 @@ test_MD:
     static: 100
     nve: 100
     nvt: 100
+test_BiasedMD:
+  steps:
+    nve: 100
+    nvt: 100
+    dynamic: 100
 test_CMD:
   steps:
     integrator: 100

@@ -15,6 +15,6 @@ from .NVE import NVE
 from .NVT import NVT
 from .ConstrNVT import ConstrNVT
 from .ConstrNVE import ConstrNVE
-from .BiasedMD import BiasedMD
+from .BiasedMD import BiasedMD, BiasedNVE, BiasedNVT
 
-__all__ = ['NVE', 'NVT', 'BiasedMD', 'ConstrNVE', 'ConstrNVT']
+__all__ = ['NVE', 'NVT', 'BiasedMD', 'BiasedNVE', 'BiasedNVT', 'ConstrNVE', 'ConstrNVT']

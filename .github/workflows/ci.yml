@@ -95,7 +95,8 @@ jobs:
           python -m unittest \
             fast_test.FastTest.test_IO \
             fast_test.FastTest.test_APIS \
-            fast_test.FastTest.test_VIB -v
+            fast_test.FastTest.test_VIB \
+            fast_test.FastTest.test_BiasedMD -v
 
       - name: Import and CLI smoke
         run: |

@@ -260,6 +260,7 @@ class NVE(_BaseMD):
         Returns:
             None.
         """
+        self.time_now = th.scalar_tensor(0., device=self.device, dtype=X.dtype)
         self.inv_m = (1.0 / masses).contiguous()
         self._updateXV = self._updateXV_eager
         if _HAS_TRITON and X.device.type == 'cuda' and X.dtype in (th.float16, th.float32, th.float64):

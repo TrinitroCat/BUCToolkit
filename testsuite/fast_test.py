@@ -19,6 +19,7 @@ from BUCToolkit.cli.main import launch_task
 from BUCToolkit.BatchStructures import read_freq, read_md_traj, read_opt_structures, read_mc_traj
 from BUCToolkit.api._io import _Model_Wrapper_pyg
 from BUCToolkit.BatchMD import NVE, NVT
+from BUCToolkit.BatchMD import BiasedNVE, BiasedNVT
 from BUCToolkit.BatchMD import ConstrNVE, ConstrNVT
 from BUCToolkit.BatchOptim import QN, CG, FIRE, Frequency
 from BUCToolkit.BatchMC import MMC
@@ -221,6 +222,136 @@ class FastTest(unittest.TestCase):
             self._assert_finite_trajectory(fbs, RUNNER_NAME[i])
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
         pass
+
+    def test_BiasedMD(self):
+        """Fast real-workflow check for external-potential MD.
+
+        Reuses the central MD fixtures (toy model, irregular batch, real
+        thermostat/device/output paths) and only checks that every runner
+        completes and that the registered external columns are finite.
+        Statistical acceptance is intentionally left to
+        ``MainTest.test_BiasedMD``.
+        """
+        os.makedirs(f'{self.out_pt}logs', exist_ok=True)
+        os.makedirs(f'{self.out_pt}results', exist_ok=True)
+        for pattern in ('logs/BIASED*.log', 'results/BIASED*'):
+            for path in glob.glob(os.path.join(self.out_pt, pattern)):
+                os.remove(path)
+
+        md_config = self._config('test_BiasedMD')
+        steps = md_config.get('steps', {})
+        nve_steps = steps.get('nve', 100)
+        nvt_steps = steps.get('nvt', 100)
+        dynamic_steps = steps.get('dynamic', 100)
+        TIME_STEP = 0.5
+        TEMPERATURE = 300.
+        K_EXT = 0.1
+
+        data = self.data
+        elem_list = self.elem_list
+        split = [len(_.pos) for _ in data.to_data_list()]
+
+        def ext_energy(X, *args):
+            parts = th.split(X[0], split, dim=0)
+            return th.stack([0.5 * K_EXT * th.sum(_p ** 2) for _p in parts])
+
+        def ext_grad(X, energy, *args):
+            return K_EXT * X
+
+        def ext_energy_dynamic(X, t, *args):
+            scale = 1.0 + 0.1 * th.sin(t)
+            parts = th.split(X[0], split, dim=0)
+            return th.stack([0.5 * K_EXT * scale * th.sum(_p ** 2) for _p in parts])
+
+        def ext_grad_dynamic(X, energy, t, *args):
+            return K_EXT * (1.0 + 0.1 * th.sin(t)) * X
+
+        def _nvt(name, thermostat, config, device='cpu'):
+            return BiasedNVT(
+                TIME_STEP, nvt_steps, thermostat, config,
+                TEMPERATURE, f'{self.out_pt}results/{name}', 10,
+                device=device, verbose=0, is_compile=False,
+            )
+
+        cases = [
+            (
+                'BIASED_NVE_CPU',
+                BiasedNVE(
+                    TIME_STEP, nve_steps, TEMPERATURE,
+                    f'{self.out_pt}results/BIASED_NVE_CPU', 10,
+                    device='cpu', verbose=0, is_compile=False,
+                ),
+                ext_energy, ext_grad, False, False,
+            ),
+            ('BIASED_CSVR_CPU', _nvt('BIASED_CSVR_CPU', 'CSVR', {'time_const': 100}),
+             ext_energy, ext_grad, False, False),
+            ('BIASED_LANG_CPU', _nvt('BIASED_LANG_CPU', 'Langevin', {'damping_coeff': 0.1}),
+             ext_energy, ext_grad, False, False),
+            ('BIASED_NOSE_CPU', _nvt('BIASED_NOSE_CPU', 'Nose-Hoover', {}),
+             ext_energy, ext_grad, False, False),
+            ('BIASED_DYN_CPU', _nvt('BIASED_DYN_CPU', 'Langevin', {'damping_coeff': 0.1}),
+             ext_energy_dynamic, ext_grad_dynamic, True, False),
+            ('BIASED_ARGS_CPU', _nvt('BIASED_ARGS_CPU', 'Langevin', {'damping_coeff': 0.1}),
+             ext_energy, ext_grad, False, True),
+        ]
+        if th.cuda.is_available():
+            cases.extend([
+                (
+                    'BIASED_NVE_GPU',
+                    BiasedNVE(
+                        TIME_STEP, nve_steps, TEMPERATURE,
+                        f'{self.out_pt}results/BIASED_NVE_GPU', 10,
+                        device='cuda:0', verbose=0, is_compile=False,
+                    ),
+                    ext_energy, ext_grad, False, False,
+                ),
+                ('BIASED_CSVR_GPU', _nvt('BIASED_CSVR_GPU', 'CSVR', {'time_const': 100}, 'cuda:0'),
+                 ext_energy, ext_grad, False, False),
+            ])
+
+        for name, runner, ext_pot, ext_grad_func, is_dynamic, append_args in cases:
+            print("*" * 89 + f"\nNow running {name} ...\n" + "*" * 89 + '\n')
+            device = runner.device
+            _data = data.to(device).clone()
+            model_test = self.model_test.to(device)
+            runner.set_external_potential(
+                ext_pot, ext_grad_func,
+                is_dynamic=is_dynamic,
+                is_args_append_main_func=append_args,
+            )
+            t_st = time.perf_counter()
+            runner.run(
+                model_test.Energy,
+                _data.pos,
+                elem_list,
+                None, None,
+                model_test.Grad,
+                (_data,), None,
+                (_data,), None,
+                False,
+                self.REQUIRE_GRAD,
+                split,
+                move_to_center_freq=-1,
+            )
+            if device.type == 'cuda':
+                th.cuda.synchronize()
+            print(f"{name} finished. Elapsed time: {(time.perf_counter() - t_st):.2f} s")
+
+            traj = read_md_traj(f'{self.out_pt}results/{name}', out_arrays=True)
+            self.assertIn('ExternalEnergy', traj, msg=f'{name} did not dump ExternalEnergy')
+            self.assertIn('ExternalForces', traj, msg=f'{name} did not dump ExternalForces')
+            for key in ('Energy', 'ExternalEnergy', 'ExternalForces'):
+                if key not in traj:
+                    continue
+                for frame in traj[key]:
+                    self.assertTrue(
+                        np.isfinite(np.asarray(frame, dtype=float)).all(),
+                        f'{name} produced non-finite {key}.',
+                    )
+            self._assert_finite_trajectory(
+                read_md_traj(f'{self.out_pt}results/{name}'), name,
+            )
+            os.remove(f'{self.out_pt}results/{name}')
 
     def _assert_finite_trajectory(self, trajectory, test_name: str) -> None:
         """Check numeric trajectory fields for NaN or infinite values.

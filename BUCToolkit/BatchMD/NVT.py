@@ -7,7 +7,7 @@
 #  Environment: Python 3.12
 
 from typing import Iterable, Dict, Any, List, Literal, Optional, Callable, Sequence, Tuple  # noqa: F401
-import warnings
+import os
 import math
 from itertools import accumulate
 
@@ -15,6 +15,7 @@ import numpy as np
 import torch as th
 from torch import nn
 
+from BUCToolkit.utils._Element_info import DTYPE
 from BUCToolkit.utils.index_ops import index_reduce
 from BUCToolkit.utils._CheckModules import check_module
 from ._BaseMD import _BaseMD
@@ -25,6 +26,8 @@ from BUCToolkit.Bases.BaseConstraints import BaseConstr
 # CUDA runs without Triton also fall back to the eager thermostats.
 triton = check_module('triton')
 _HAS_TRITON = triton is not None
+FLOAT_TYPE = os.environ.get('BT_FLOAT_TYPE', 'float32')
+FLOAT_TYPE = DTYPE.get(FLOAT_TYPE, th.float32)
 
 if _HAS_TRITON:
     from .fused_ops.utils import (
@@ -53,7 +56,7 @@ class NVT(_BaseMD):
     Canonical ensemble (NVT) molecular dynamics.
 
     Parameters:
-        time_step: float, time per step (ps).
+        time_step: float, time per step (fs).
         max_step: maxmimum steps.
         thermostat: str, the thermostat of NVT ensemble.
         thermostat_config: Dict|None, configs of thermostat. {'damping_coeff': float} for Langevin, {'time_const': float} for CSVR, {'virt_mass': float} for Nose-Hoover.
@@ -108,7 +111,7 @@ class NVT(_BaseMD):
     ) -> None:
         """
         Parameters:
-            time_step: float, time per step (ps).
+            time_step: float, time per step (fs).
             max_step: maximum steps.
             thermostat: str, the thermostat of NVT ensemble.
             thermostat_config: Dict|None, configs of thermostat. {'damping_coeff': float} for Langevin, {'time_const': float} for CSVR, {'virt_mass': float} for Nose-Hoover.
@@ -225,11 +228,11 @@ class NVT(_BaseMD):
             dtT = self.time_step
             tauT = self.time_const
             # c = exp(-dt/tau)  (scalar)
-            c = th.exp(th.scalar_tensor(-dtT / tauT, device=self.device, dtype=th.float32))
+            c = th.exp(th.scalar_tensor(-dtT / tauT, device=self.device, dtype=FLOAT_TYPE))
             self.sqrt_c = th.sqrt(c)
             self.one_sub_c = 1 - c
             # avoid divide-by-zero in K
-            self.epsK = th.scalar_tensor(1e-12, device=self.device, dtype=th.float32)
+            self.epsK = th.scalar_tensor(1e-12, device=self.device, dtype=FLOAT_TYPE)
             self._chi2_dist = th.distributions.chi2.Chi2(
                 df=th.clamp(self.free_degree.float() - 1.0, min=1.0)
             )
@@ -346,14 +349,15 @@ class NVT(_BaseMD):
             None. ``self.update_scheme`` is bound to the fused or eager
             implementation and the CSVR buffers are allocated.
         """
+        self.time_now = th.scalar_tensor(0., device=self.device, dtype=FLOAT_TYPE)
         self.update_scheme = self.__resolve_update_scheme(batch_indices, X, masses)
         # Pre-allocate random buffers for CSVR thermostat
         if self.thermostat == 'CSVR':
             _sample = X[0:1]
             # One random pair per batch, matching the eager CPU path.
             _K_shape = (self.free_degree.numel(),)
-            self._buf_R = th.empty(_K_shape, device=self.device, dtype=th.float32)
-            self._buf_S = th.empty(_K_shape, device=self.device, dtype=th.float32)
+            self._buf_R = th.empty(_K_shape, device=self.device, dtype=FLOAT_TYPE)
+            self._buf_S = th.empty(_K_shape, device=self.device, dtype=FLOAT_TYPE)
         else:
             self._buf_R = None
             self._buf_S = None

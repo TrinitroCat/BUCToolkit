@@ -25,6 +25,18 @@ import numpy as np
 import torch as th
 
 
+# Matplotlib 3.8 calls pyparsing's deprecated ``parseString`` and
+# ``resetCache`` while parsing fontconfig patterns.  pyparsing 3.3 emits a
+# warning for every call, which floods this optional plotting test's log.
+# The long-term fix is matplotlib>=3.10 (which uses ``parse_string`` /
+# ``reset_cache``); this filter only covers the older runtime.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*(parseString|resetCache).*",
+    category=DeprecationWarning,
+)
+
+
 def _load_matplotlib():
     """Load matplotlib lazily for optional plotting tests.
 
@@ -50,7 +62,6 @@ plt = _load_matplotlib()
 
 import main_test as main_test_module
 from _toy_harmonic_potential import build_cubic_lattice_data
-from main_test import MainTest
 
 
 READ_MD_TRAJ = main_test_module.read_md_traj
@@ -70,7 +81,7 @@ CONSTRAINT_COLORS = (
 
 
 @unittest.skipUnless(plt is not None, "matplotlib is not installed")
-class MainTestPlot(MainTest):
+class MainTestPlot(main_test_module.MainTest):
     """Run the existing motion tests and save their trajectories as figures."""
 
     def setUp(self):

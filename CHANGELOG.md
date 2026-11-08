@@ -17,6 +17,10 @@
   converting every structure. `ISFSMACEDataLoader` remains for pre-converted
   static paired data; dynamic NEB/CMD runs continue to use
   `ISFSPyGDataLoader` so `MACEWrapper.forward` rebuilds graphs per batch.
+- Exported `BiasedNVT` and `BiasedNVE`, and removed the package-level circular
+  import in `BiasedMD.py`. Added regression coverage for external-potential MD
+  and central-suite soft diagnostics for its equipartition and virial
+  consistency; existing constrained-manifold checks are unchanged.
 
 ## 1.0.1 (2026-10-27)
 

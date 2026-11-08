@@ -21,6 +21,7 @@ from BUCToolkit.cli.main import launch_task
 from BUCToolkit.BatchStructures import read_freq, read_md_traj, read_opt_structures, read_mc_traj
 from BUCToolkit.api._io import _Model_Wrapper_pyg
 from BUCToolkit.BatchMD import NVE, NVT
+from BUCToolkit.BatchMD import BiasedNVE, BiasedNVT
 from BUCToolkit.BatchMD import ConstrNVE, ConstrNVT
 from BUCToolkit.BatchOptim import QN, CG, FIRE, Frequency
 from BUCToolkit.BatchMC import MMC
@@ -30,6 +31,18 @@ from _toy_harmonic_potential import (HarmonicLatticePotential, SimpleSpringPoten
                                                MullerBrownPotential, FreeParticles, build_cubic_lattice_batch, build_cubic_lattice_data)
 from BUCToolkit.api._io import PygBatchUpdater
 from _test_config import get_test_section, load_test_config
+from _md_scientific_checks import (
+    EV_PER_AMU_A2_PER_FS2,
+    KB_EV_PER_K,
+    assert_statistical_equal,
+    check_equipartition,
+    check_statistical,
+    check_virial_theorem,
+    energy_drift_metric,
+    kinetic_energy,
+    production_start,
+    work_energy_integral,
+)
 
 INPUT_PATH = './inputs4test/'
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,11 +65,7 @@ class MainTest(unittest.TestCase):
         Returns: None
 
         """
-        err_msg = str(msg) if msg is not None else f'Statistical validation Failed.\na: {a}\nb: {b}'
-        if abs(a) * abs(b) < 1e-7:
-            atol = max(1e-7, atol)
-        if not math.isclose(a, b, rel_tol=rtol, abs_tol=atol):
-            raise AssertionError(err_msg)
+        assert_statistical_equal(a, b, rtol=rtol, atol=atol, msg=msg)
 
     def setUp(self):
         """Prepare the shared model fixture and load the selected YAML mode.
@@ -278,12 +287,7 @@ class MainTest(unittest.TestCase):
             max_coord1, max_coord2, max_coord3 = 0., 0., 0.
 
             # cut the short simulations
-            prebalance =  int(len(fbs) * 0.4)
-            while True:
-                if prebalance % 3 != 0:
-                    prebalance += 1
-                else:
-                    break
+            prebalance = production_start(len(fbs), fraction=0.4, stride=3)
 
             for ibs in range(prebalance, len(fbs), 3):
                 # potential energy
@@ -299,9 +303,9 @@ class MainTest(unittest.TestCase):
                 vacf2.append(np.sum(v0_2 * vn2)/(vv2 + 1e-20))
                 vacf3.append(np.sum(v0_3 * vn3)/(vv3 + 1e-20))
                 # kinetic energy
-                ek1.append(np.sum(0.5 * mass1[:, None] * vn1 * vn1 * 103.642696562621738))
-                ek2.append(np.sum(0.5 * mass2[:, None] * vn2 * vn2 * 103.642696562621738))
-                ek3.append(np.sum(0.5 * mass3[:, None] * vn3 * vn3 * 103.642696562621738))
+                ek1.append(kinetic_energy(vn1, mass1))
+                ek2.append(kinetic_energy(vn2, mass2))
+                ek3.append(kinetic_energy(vn3, mass3))
                 # total energy
                 etol1.append(ene1[-1] + ek1[-1])
                 etol2.append(ene2[-1] + ek2[-1])
@@ -360,41 +364,247 @@ class MainTest(unittest.TestCase):
                 continue
             if 'NVE' in RUNNER_NAME[i]:
                 for _i, _etol in enumerate((etol1, etol2, etol3)):
-                    _etol_var = len(_etol) * (max(_etol) - min(_etol))/sum(_etol)
-                    try:
-                        self.assertStatisticalEqual(
-                            _etol_var,
-                            0.,
-                            atol=md_convergence['nve_energy_atol'],
-                            msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                                f'test value: {_etol_var}\nstandard value: 0.'
-                        )
-                        print(f"Mean Ep: {TEST_VALUES[1]}, STD Ep: {TEST_VALUES[2]}")
-                        print(f'\n"NVE Energy" Test {_i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                                f'test value: {_etol_var}\nstandard value: 0.')
+                    check_statistical(
+                        'NVE Energy', energy_drift_metric(_etol), 0.,
+                        atol=md_convergence['nve_energy_atol'],
+                        printer=print, label=_i + 1,
+                    )
+                    print(f"Mean Ep: {TEST_VALUES[1]}, STD Ep: {TEST_VALUES[2]}")
                 continue
 
             # NVT test
-            for _i, tv in enumerate(TEST_VALUES):
-                for __i, _tv in enumerate(tv):
-                    try:
-                        self.assertStatisticalEqual(
-                            _tv,
-                            STANDARD_VALUES[_i][__i],
-                            rtol=md_convergence['nvt_rtol'],
-                            msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
-                        )
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
+            check_equipartition(
+                TEST_VALUES,
+                STANDARD_VALUES,
+                rtol=md_convergence['nvt_rtol'],
+                names=TEST_TERM_NAME,
+                printer=print,
+            )
 
             # purge chk files
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
         pass
+
+    def test_BiasedMD(self):
+        """Soft scientific validation of external-potential MD.
+
+        A free model plus a 3D harmonic trap has analytic equilibrium
+        statistics: equipartition gives ``<Ep> = <Ek> = 3/2 kT`` and the
+        virial theorem gives ``< -sum(r.F) > = 2 <K>``.  The standards are
+        hard-coded (DOF=3 per structure), so the runner's internal
+        ``free_degree`` is put under test rather than used as input.
+
+        All statistical checks are soft diagnostics; structural failures are
+        collected and reported after every runner has run.
+        """
+        os.makedirs(f'{self.out_pt}logs', exist_ok=True)
+        os.makedirs(f'{self.out_pt}results', exist_ok=True)
+        for path in glob.glob(os.path.join(self.out_pt, 'results/BIASED_MAIN*')):
+            os.remove(path)
+
+        config = self._config('test_BiasedMD')
+        steps = config.get('steps', {})
+        convergence = config.get('convergence', {})
+        nve_steps = steps.get('nve', 10000)
+        nvt_steps = steps.get('nvt', 50000)
+        dyn_steps = steps.get('dynamic', 5000)
+
+        N_BATCH = 8
+        N_ATOM = 1
+        DOF = 3 * N_ATOM
+        TIME_STEP = 0.5
+        TEMPERATURE = 500.
+        K_EXT = 0.2
+        MASS_H = MASS['H']
+        kT = KB_EV_PER_K * TEMPERATURE
+        OUT_FREQ = 10
+        alpha = 0.1
+        omega = 0.02
+
+        def free_energy(X):
+            return th.zeros(X.shape[0], dtype=X.dtype, device=X.device)
+
+        def free_grad(X, energy):
+            return th.zeros_like(X)
+
+        def trap_energy(X):
+            return 0.5 * K_EXT * th.sum(X ** 2, dim=(-2, -1))
+
+        def trap_grad(X, energy):
+            return K_EXT * X
+
+        def trap_energy_dynamic(X, t):
+            scale = 1.0 + alpha * th.sin(omega * t)
+            return 0.5 * K_EXT * scale * th.sum(X ** 2, dim=(-2, -1))
+
+        def trap_grad_dynamic(X, energy, t):
+            scale = 1.0 + alpha * th.sin(omega * t)
+            return K_EXT * scale * X
+
+        cpu_rng_state = th.random.get_rng_state()
+        th.manual_seed(12345)
+        X_init = 0.3 * th.randn(N_BATCH, N_ATOM, 3, dtype=th.float32)
+        elem_list = [['H']] * N_BATCH
+        hard_failures = []
+        soft_results = []
+
+        def _reshape(traj, key, tail):
+            arr = np.asarray(traj[key], dtype=float)
+            n_frames = arr.shape[0] // N_BATCH
+            return arr.reshape((n_frames, N_BATCH) + tail), n_frames
+
+        def _run_case(name, runner, ext_pot, ext_grad, is_dynamic=False):
+            out = f'{self.out_pt}results/BIASED_MAIN_{name}'
+            try:
+                runner.set_external_potential(
+                    ext_pot, ext_grad, is_dynamic=is_dynamic,
+                )
+                runner.run(
+                    free_energy, X_init.clone(), elem_list,
+                    V_init=None,
+                    grad_func=free_grad,
+                    is_grad_func_contain_y=True,
+                    require_grad=False,
+                )
+                traj = read_md_traj(out, out_arrays=True)
+            except Exception as exc:
+                print(f'{name}: run failed: {exc}')
+                hard_failures.append(name)
+                return None
+            if runner.free_degree.tolist() != [DOF] * N_BATCH:
+                print(f'{name}: unexpected free_degree {runner.free_degree.tolist()}')
+                hard_failures.append(f'{name}:free_degree')
+            return traj
+
+        # --- NVE: energy conservation ---
+        nve_out = f'{self.out_pt}results/BIASED_MAIN_NVE'
+        traj = _run_case(
+            'NVE',
+            BiasedNVE(
+                TIME_STEP, nve_steps, TEMPERATURE, nve_out, OUT_FREQ,
+                device='cpu', verbose=0, is_compile=False,
+                dump_quantities=('Energy', 'Ek', 'temperature', 'X', 'V', 'Force'),
+                log_quantities=('Energy',),
+            ),
+            trap_energy, trap_grad,
+        )
+        if traj is not None:
+            energy, n_frames = _reshape(traj, 'Energy', ())
+            ek, _ = _reshape(traj, 'Ek', ())
+            start = production_start(n_frames, fraction=0.4, stride=1)
+            total = energy + ek
+            for ib in range(N_BATCH):
+                soft_results.append(check_statistical(
+                    'NVE Energy', energy_drift_metric(total[start:, ib]), 0.,
+                    atol=convergence.get('nve_energy_atol', 1e-2),
+                    printer=print, label=ib + 1,
+                ))
+            if os.path.exists(nve_out):
+                os.remove(nve_out)
+
+        # --- NVT: equipartition and virial theorem ---
+        nvt_out = f'{self.out_pt}results/BIASED_MAIN_NVT'
+        traj = _run_case(
+            'NVT',
+            BiasedNVT(
+                TIME_STEP, nvt_steps, 'Langevin', {'damping_coeff': 0.05},
+                TEMPERATURE, nvt_out, OUT_FREQ,
+                device='cpu', verbose=0, is_compile=False,
+                dump_quantities=('Energy', 'Ek', 'temperature', 'X', 'V', 'Force'),
+                log_quantities=('Energy',),
+            ),
+            trap_energy, trap_grad,
+        )
+        if traj is not None:
+            ep, n_frames = _reshape(traj, 'Energy', ())
+            ek, _ = _reshape(traj, 'Ek', ())
+            temp, _ = _reshape(traj, 'temperature', ())
+            pos, _ = _reshape(traj, 'X', (N_ATOM, 3))
+            force, _ = _reshape(traj, 'Force', (N_ATOM, 3))
+            vel, _ = _reshape(traj, 'V', (N_ATOM, 3))
+            start = production_start(n_frames, fraction=0.4, stride=1)
+            ep = ep[start:]
+            ek = ek[start:]
+            pos = pos[start:]
+            force = force[start:]
+            vel = vel[start:]
+            values = [
+                [np.mean(ep[:, ib]) for ib in range(N_BATCH)],
+                [np.var(ep[:, ib]) for ib in range(N_BATCH)],
+                [np.mean(ek[:, ib]) for ib in range(N_BATCH)],
+                [np.var(ek[:, ib]) for ib in range(N_BATCH)],
+                [np.var(vel[:, ib]) * EV_PER_AMU_A2_PER_FS2 for ib in range(N_BATCH)],
+            ]
+            standards = [
+                [0.5 * DOF * kT] * N_BATCH,
+                [0.5 * DOF * kT * kT] * N_BATCH,
+                [0.5 * DOF * kT] * N_BATCH,
+                [0.5 * DOF * kT * kT] * N_BATCH,
+                [kT / MASS_H] * N_BATCH,
+            ]
+            soft_results.extend(check_equipartition(
+                values, standards,
+                rtol=convergence.get('nvt_rtol', 2e-1),
+                names=('Ep mean', 'Ep var', 'Ek mean', 'Ek var', 'single veloc. var'),
+                printer=print,
+            ))
+            # The mean velocity is a zero-centered finite-sample statistic, so
+            # compare it against a thermal-noise floor instead of 0 + tiny atol.
+            velocity_floor = float(np.sqrt(kT / MASS_H) * 1e-2)
+            for ib in range(N_BATCH):
+                soft_results.append(check_statistical(
+                    'single veloc. mean', float(np.mean(vel[:, ib])), 0.,
+                    atol=velocity_floor, printer=print, label=ib + 1,
+                ))
+            soft_results.append(check_statistical(
+                'temperature', float(np.mean(temp[start:])), TEMPERATURE,
+                rtol=convergence.get('nvt_rtol', 2e-1), printer=print,
+            ))
+            soft_results.append(check_virial_theorem(
+                'Virial theorem', pos, force, ek,
+                rtol=convergence.get('virial_rtol', 2e-1), printer=print,
+            ))
+            if os.path.exists(nvt_out):
+                os.remove(nvt_out)
+
+        # --- Dynamic external potential: work-energy identity ---
+        dyn_out = f'{self.out_pt}results/BIASED_MAIN_DYN'
+        traj = _run_case(
+            'DYN',
+            BiasedNVE(
+                TIME_STEP, dyn_steps, TEMPERATURE, dyn_out, OUT_FREQ,
+                device='cpu', verbose=0, is_compile=False,
+                dump_quantities=('Energy', 'Ek', 'temperature', 'X', 'V', 'Force'),
+                log_quantities=('Energy',),
+            ),
+            trap_energy_dynamic, trap_grad_dynamic, is_dynamic=True,
+        )
+        if traj is not None:
+            energy, n_frames = _reshape(traj, 'Energy', ())
+            ek, _ = _reshape(traj, 'Ek', ())
+            pos, _ = _reshape(traj, 'X', (N_ATOM, 3))
+            total = energy + ek
+            times = np.arange(n_frames, dtype=float) * OUT_FREQ * TIME_STEP
+            sum_sq = np.sum(pos ** 2, axis=(-2, -1))
+            dVdt = (
+                0.5 * K_EXT * alpha * omega
+                * np.cos(omega * times)[:, None] * sum_sq
+            )
+            for ib in range(N_BATCH):
+                soft_results.append(check_statistical(
+                    'Dynamic work',
+                    total[-1, ib] - total[0, ib],
+                    work_energy_integral(times, dVdt[:, ib]),
+                    rtol=convergence.get('work_energy_rtol', 2e-1),
+                    printer=print, label=ib + 1,
+                ))
+            if os.path.exists(dyn_out):
+                os.remove(dyn_out)
+
+        th.random.set_rng_state(cpu_rng_state)
+        passed = sum(1 for result in soft_results if result)
+        print(f'BiasedMD statistical summary: {passed}/{len(soft_results)} checks passed.')
+        self.assertFalse(hard_failures, msg=f'{hard_failures} did not run to completion.')
 
     def test_CMD(self):
         """
@@ -605,9 +815,7 @@ class MainTest(unittest.TestCase):
             max_coords = [0., 0., 0.]
             max_viol_per_constr = [0.0] * N_CONSTR
 
-            prebalance = int(len(fbs) * 0.4)
-            while prebalance % 3 != 0:
-                prebalance += 1
+            prebalance = production_start(len(fbs), fraction=0.4, stride=3)
 
             for ibs in range(prebalance, len(fbs), 3):
                 for ib in range(N_BATCH):
@@ -615,7 +823,7 @@ class MainTest(unittest.TestCase):
                     ene[ib].append(fbs.Energies[idx])
                     vn = fbs.Labels[idx]
                     vel[ib].append(vn)
-                    ek_val = np.sum(0.5 * mass_arr[:, None] * vn * vn * 103.642696562621738)
+                    ek_val = kinetic_energy(vn, mass_arr)
                     ek[ib].append(ek_val)
                     etol[ib].append(ene[ib][-1] + ek[ib][-1])
                     max_coords[ib] = max(np.abs(fbs.Coords[idx]).max(), max_coords[ib])
@@ -656,35 +864,22 @@ class MainTest(unittest.TestCase):
             # --- NVE: energy conservation test ---
             if 'NVE' in RUNNER_NAME[i]:
                 for _i, _etol in enumerate(etol):
-                    _etol_var = len(_etol) * (max(_etol) - min(_etol)) / sum(_etol)
-                    try:
-                        self.assertStatisticalEqual(
-                            _etol_var, 0.,
-                            atol=cmd_convergence['nve_energy_atol'],
-                            msg=f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                                f'test value: {_etol_var}\nstandard value: 0.'
-                        )
-                        print(f'\n"NVE Energy" Test {_i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"NVE Energy" Test {_i + 1} Failed:\n'
-                              f'test value: {_etol_var}\nstandard value: 0.')
+                    check_statistical(
+                        'NVE Energy', energy_drift_metric(_etol), 0.,
+                        atol=cmd_convergence['nve_energy_atol'],
+                        printer=print, label=_i + 1,
+                    )
                 os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
                 continue
 
             # --- NVT: thermostat equipartition tests ---
-            for _i, tv in enumerate(TEST_VALUES):
-                for __i, _tv in enumerate(tv):
-                    try:
-                        self.assertStatisticalEqual(
-                            _tv, STANDARD_VALUES[_i][__i],
-                            rtol=cmd_convergence['nvt_rtol'],
-                            msg=f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                                f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}'
-                        )
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} passed. <<<<<')
-                    except AssertionError:
-                        print(f'\n"{TEST_TERM_NAME[_i]}" Test {__i + 1} Failed:\n'
-                              f'test value: {_tv}\nstandard value: {STANDARD_VALUES[_i][__i]}')
+            check_equipartition(
+                TEST_VALUES,
+                STANDARD_VALUES,
+                rtol=cmd_convergence['nvt_rtol'],
+                names=TEST_TERM_NAME,
+                printer=print,
+            )
 
             os.remove(f"{self.out_pt}results/{RUNNER_NAME[i]}")
 

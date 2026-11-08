@@ -44,6 +44,7 @@ pyg = ["torch_geometric>=2.6.1"]
 prompt-toolkit = ["prompt-toolkit>=3.0.43"]
 mace = ["mace-torch", "e3nn"]
 triton = ["triton"]
+plot = ["matplotlib>=3.10"]
 test = ["pytest>=7.4"]
 
 [tool.setuptools]
