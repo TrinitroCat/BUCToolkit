@@ -917,32 +917,75 @@ runner = bt.BatchMD.ConstrNVT(
 runner.run(...)   # See the section `Using as a Python Package` above
 
 ```
-All constraints function are simultaneously solved by QR factorization 
-of mass-weighted Jacobian matrix (shape: (n_constr, n_atoms * n_dim)) 
-in parallel instead of serially iterating each constraint.
-* Vectors on the (co)tangent bundle (e.g., velocities, gradients) is **projected** to keep constrains:
+All constraint functions are solved simultaneously by a thin QR factorization of the
+mass-weighted constraint Jacobian (shape: `(n_constraint, n_atom * n_dim)`) instead of
+iterating the constraints one by one. For each batch sample, flatten the coordinates to
+`x`, write the constraints as `S(x) = q(t)`, and let `J = dS/dx`.
+
+* Vectors of the (co)tangent bundle (e.g., velocities, gradients) are kept on the
+  tangent space by **projection**:
 
 $$
-Q R = J_{\rm constraints}^T M^{-1/2}; Q = [Q_1, Q_2]
-$$
-$$
-P = M^{-1/2} Q_2 Q_2^T M^{1/2} = M^{-1/2} (I - Q_1 Q_1^T) M^{1/2}
-$$
-$$
-v = P \tilde{v}
+M^{-1/2} J^T = Q R, \qquad
+P = I - M^{-1/2} Q Q^T M^{1/2}, \qquad
+v = P \tilde{v},
 $$
 
-* Points on the constraint manifold (e.g., atom positions) is iteratively applied **retraction mapping**:
+where `Q^T Q = I`, hence `J P v = 0`. For a time-dependent target the manifold itself
+moves, so the projected velocity carries an additional normal component:
 
 $$
-y^{(i)} = S(X^{(i-1)})
-$$
-$$
-X^{(i)} = X^{(i-1)} - M^{-1/2} Q R^{-T} y^{(i)}
+v = P \tilde{v} + M^{-1/2} Q R^{-T} \dot{q}(t), \qquad J v = \dot{q}(t).
 $$
 
-until constraint error is less than the threshold. This is a Newton iterative form thus leading to 
-a quadratic convergence rate.
+* Points on the constraint manifold (e.g., atom positions) are brought back by a
+  **Newton iteration in a fixed reference normal basis**. Let `X_ref` be the reference
+  configuration and `t*` the constrained time. The basis
+
+$$
+M^{-1/2} J(X_{\mathrm{ref}})^T = Q_{\mathrm{ref}} R_{\mathrm{ref}},
+\qquad B = M^{-1/2} Q_{\mathrm{ref}},
+$$
+
+restricts the correction to the affine set
+
+$$
+X(\mu) = \tilde{X} + B \mu, \qquad S(X(\mu)) = q(t_*),
+$$
+
+whose only unknown is the `n_constraint`-dimensional multiplier `mu`. Newton's method on
+this reduced equation is
+
+$$
+A^{(k)} = J(X^{(k)}) B, \qquad r^{(k)} = S(X^{(k)}) - q(t_*), \qquad
+\mu^{(k+1)} = \mu^{(k)} - \alpha_k \left( A^{(k)} \right)^{-1} r^{(k)},
+$$
+
+starting from `mu = 0`. The `'newton'` solver takes `alpha_k = 1`, while the `'damped'`
+solver reduces `alpha_k` by backtracking until the maximum absolute residual decreases.
+Only the basis `B` is fixed and `J` is evaluated again in every sub-iteration, so this is
+a full Newton method on the reduced problem, locally quadratic for smooth constraints
+when `J(X*) B` is nonsingular and the initial residual is small enough. 
+
+#### Constrained geodesic (Christoffel) solver
+
+As an alternative to alternating projection and retraction, the geodesic equation of the
+constraint manifold can be integrated directly:
+
+$$
+\frac{dV}{dt} = -\Gamma(V, V) + M^{-1} F_{\mathrm{tan}},
+\qquad
+\Gamma(V, V) = M^{-1/2} Q R^{-T} \left[ (V \cdot \nabla) J \right] V,
+$$
+
+where `F_tan` is the tangent-projected physical force and `(V · ∇)J` is the directional
+derivative of the constraint Jacobian, obtained by a batched Hessian-vector product. The
+equation of motion is discretized with the implicit midpoint rule, and the Woodbury
+identity reduces the `n_atom * n_dim`-order Newton matrix to an `n_constraint`-order
+block, so the factorization cost follows the number of constraints rather than `3 N_atom`.
+The velocity update is relaxed by a factor `omega <= 1`.
+
+The solver is provided as the standalone entry `BaseConstr.christoffel_solver`.
 
 Note that complicated constraint functions may be computationally expensive.
 
