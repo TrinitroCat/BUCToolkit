@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- The central `main` MD and CMD tests now build samples with non-uniform masses:
+  every atom is drawn with equal probability from the light, medium and heavy
+  groups H / Al / Pd (a uniform draw split at 1/3 and 2/3). The equipartition
+  standards use `k_B T <1/m>`, and the energy plots use the same sampled masses,
+  so a missing or permuted mass factor can no longer hide behind a
+  single-element system.
+- Fixed the experimental `BaseConstr.christoffel_solver`. The constraint
+  directional derivative no longer subtracts the batched target inside a vmapped
+  per-sample call (which added a spurious batch axis), the mass-weighted normal
+  basis is factorized at the current coordinates instead of a stale projection,
+  and the Woodbury block is formed as `I + dt R^{-T} J' B`.
+- Corrected the constraint-solver formulas in the English and Chinese README:
+  the mass-weighted decomposition is `M^{-1/2} J^T = Q R`, the tangent-space
+  projection carries the normal term of a time-dependent target, and the
+  retraction is described as a Newton iteration in a fixed reference normal
+  basis. Added the constrained geodesic (Christoffel) solver description.
+
 - Constraint targets passed through `constr_val` must now be two-dimensional
   `(n_batch, n_constr)`. The single-row form `(1, n_constr)` is broadcast to
   every batch sample instead of being rejected, while a one-dimensional target

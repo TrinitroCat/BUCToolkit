@@ -457,7 +457,9 @@ class MainTestPlot(main_test_module.MainTest):
         temperature_series = []
         references = []
         dof = 3 * 5 ** 3 - 8
-        mass = np.full(5 ** 3, self.MASSES[1] if len(self.MASSES) > 1 else 26.9815385)
+        # The CMD samples mix Al and Pd atoms; reuse the masses that the parent
+        # test constructs for the same samples.
+        mass = np.asarray(self.cmd_masses, dtype=float)
         for sample_index in range(n_samples):
             potential = self._series(trajectory.Energies, sample_index, n_samples)
             velocities = self._to_numpy(trajectory.Labels[sample_index::n_samples])

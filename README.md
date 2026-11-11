@@ -965,7 +965,17 @@ starting from `mu = 0`. The `'newton'` solver takes `alpha_k = 1`, while the `'d
 solver reduces `alpha_k` by backtracking until the maximum absolute residual decreases.
 Only the basis `B` is fixed and `J` is evaluated again in every sub-iteration, so this is
 a full Newton method on the reduced problem, locally quadratic for smooth constraints
-when `J(X*) B` is nonsingular and the initial residual is small enough. 
+when `J(X*) B` is nonsingular and the initial residual is small enough. The correction
+`dX = B mu` is orthogonal to the reference tangent space in the mass metric,
+`u^T M dX = 0` for every `u` with `J(X_ref) u = 0`, and the constraint force it
+represents,
+
+$$
+F_c \propto M\, dX = J(X_{\mathrm{ref}})^T R_{\mathrm{ref}}^{-1} \mu
+$$
+
+is Euclidean-normal to the manifold. Hence `F_c · v = 0` for every velocity with
+`J v = 0`: the constraint force performs no work and the step conserves energy.
 
 #### Constrained geodesic (Christoffel) solver
 

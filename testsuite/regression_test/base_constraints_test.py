@@ -928,6 +928,59 @@ class BaseConstraintsRegressionTest(unittest.TestCase):
                         retraction_solver='rk4',
                     )
 
+    def test_christoffel_geodesic_matches_uniform_rotation(self):
+        """The geodesic solver follows the uniform rotation of a distance constraint."""
+        def distance_constraint(sample: th.Tensor) -> th.Tensor:
+            return th.linalg.norm(sample[1] - sample[0]).reshape(1)
+
+        for device in _device_list():
+            with self.subTest(device=device):
+                X_init = th.tensor(
+                    (((0., 0., 0.), (1., 0., 0.)),),
+                    dtype=th.float32,
+                    device=device,
+                )
+                V_init = th.tensor(
+                    (((0., 0., 0.), (0., 1., 0.)),),
+                    dtype=th.float32,
+                    device=device,
+                )
+                constr = BaseConstr(
+                    distance_constraint,
+                    th.tensor(((1.,),), dtype=th.float32, device=device),
+                    constr_threshold=1e-6,
+                    device=device,
+                    verbose=0,
+                )
+                constr.initialize(
+                    func=None,
+                    X=X_init,
+                    Element_list=None,
+                    masses=th.ones_like(X_init),
+                    compile_jacobian=False,
+                )
+                # The directional derivative keeps the documented per-sample
+                # layout; the batched target must not leak a second batch axis.
+                self.assertEqual(
+                    constr._jacobian_derivative(X_init, V_init).shape,
+                    (1, 1, 2, 3),
+                )
+
+                constr.time_step = 0.01
+                n_step = 100
+                X = X_init.clone()
+                V = V_init.clone()
+                kinetic_init = 0.5 * float((V ** 2).sum())
+                for _ in range(n_step):
+                    X, V = constr.christoffel_solver(X, V, omega=1.)
+
+                bond = X[0, 1] - X[0, 0]
+                angle = math.atan2(float(bond[1]), float(bond[0]))
+                kinetic = 0.5 * float((V ** 2).sum())
+                self.assertAlmostEqual(float(th.linalg.norm(bond)), 1., places=3)
+                self.assertLess(abs(angle - n_step * constr.time_step), 1e-2)
+                self.assertLess(abs(kinetic - kinetic_init), 2e-2)
+
     def test_solver_failure_reports_on_stderr_when_silent(self):
         """A stalled projection warns on stderr at verbose 0 and logs above it."""
         for device in _device_list():

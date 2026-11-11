@@ -433,16 +433,25 @@ class BaseConstr(BaseIO):
         y = th.atleast_1d(y)
         return y, y  # repeat the output to use `has_aux` in th.func.jacrev to return the function values
 
-    def _constr_func_for_hvp(self, X):
+    def _constr_func_for_hvp(self, X: th.Tensor) -> th.Tensor:
         """
-        Manage the constraint functions used for HVP.
-        Converting constraint functions into s_k(X) = constr_func(X) - constr_val, thereby constraints are s_k(X) = 0.
-        Returns:
+        Evaluate the constraint function for a batched Hessian-vector product.
 
+        Args:
+            X: Coordinates of one sample with shape ``(n_atom, n_dim)``.
+
+        Returns:
+            Constraint values with shape ``(n_constr, )``.
+
+        Note:
+            The constraint target is deliberately not subtracted here. A constant
+            shift does not change the Hessian, while subtracting the batched
+            ``self.constr_val_now`` inside a vmapped per-sample call broadcasts
+            the batch axis into the result and would break the documented
+            ``(n_batch, n_constr, n_atom, n_dim)`` layout of
+            ``_jacobian_derivative``.
         """
-        y = self.constr_func(X) - self.constr_val_now  # (n_batch, n_constr, )
-        y = th.atleast_1d(y)
-        return y
+        return th.atleast_1d(self.constr_func(X))
 
     def _constr_val_wrapped(self, t):
         """
@@ -1206,14 +1215,22 @@ class BaseConstr(BaseIO):
 
         Returns:
             X_new, V_new  – updated in-place.
+
+        Note:
+            The mass-weighted normal basis ``Q`` and the triangular factor ``R``
+            are factorized at the passed ``X``; they are then kept fixed over the
+            Newton sub-iterations of this step.
         """
         n_batch, n_atom, n_dim = X.shape
-        n_free = n_atom * n_dim
         dt = self.time_step
+
+        # The normal basis entering Gamma and the Woodbury reduction must belong
+        # to the current coordinates, not to an earlier projection.
+        jac, _ = self._jacobian(X)
+        self._do_qr(jac)
 
         # Precompute Woodbury blocks (independent of X_new, V_new)
         B = self.negsqrtM.reshape(n_batch, -1, 1) * self.Q  # (B, n_free, k)
-        B_T = B.mT.contiguous()                               # (B, k, n_free)
         eye_k = th.eye(self.R.shape[-1], device=X.device, dtype=X.dtype).expand(n_batch, -1, -1)
 
         V_old = V.clone()
@@ -1257,15 +1274,18 @@ class BaseConstr(BaseIO):
                 return X_new, V_new
 
             # --- Newton update with Woodbury identity ---
-            # dJ_flat^T = dJ.mT, shape (B, n_free, k)
-            dJ_T = dJ_flat.mT.contiguous()                     # (B, n_free, k)
-            dJ_T_B = th.bmm(dJ_T, B)                           # (B, k, k)
-            M_wood = eye_k + dt * dJ_T_B                       # I + dt * dJ^T B
+            # The linearized system is (I + dt * B * R^{-T} J') dV = -R_V with
+            # J' = dJ_flat of shape (B, n_constr, n_free). Its Woodbury reduction
+            # is the n_constr-square matrix I + dt * R^{-T} J' B.
+            rinvT_Jp = th.linalg.solve_triangular(
+                self.R.mT.contiguous(), dJ_flat, upper=False,
+            )                                                  # R^{-T} J'  (B, k, n_free)
+            M_wood = eye_k + dt * th.bmm(rinvT_Jp, B)          # (B, k, k)
             rv_flat = R_V.reshape(n_batch, -1, 1)               # (B, n_free, 1)
 
-            dJ_T_rv = th.bmm(dJ_T, rv_flat)                    # dJ^T @ R_V  (B, k, 1)
-            sol_W = th.linalg.solve(M_wood, dJ_T_rv)           # (I + dt dJ^T B)^{-1} dJ^T R_V
-            P_RV = rv_flat - dt * th.bmm(B, sol_W)              # P @ R_V  (B, n_free, 1)
+            rinvT_Jp_rv = th.bmm(rinvT_Jp, rv_flat)            # R^{-T} J' R_V  (B, k, 1)
+            sol_W = th.linalg.solve(M_wood, rinvT_Jp_rv)
+            P_RV = rv_flat - dt * th.bmm(B, sol_W)              # (B, n_free, 1)
 
             dV = P_RV.reshape(n_batch, n_atom, n_dim)
             dX = (R_X + 0.5 * dt * dV)

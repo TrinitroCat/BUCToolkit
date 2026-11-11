@@ -47,6 +47,37 @@ from _md_scientific_checks import (
 INPUT_PATH = './inputs4test/'
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+MIXED_ELEMENTS = ('H', 'Al', 'Pd')
+
+
+def draw_mixed_elements(n_atom: int, generator: np.random.Generator) -> list[str]:
+    """Assign H, Al or Pd to every atom of one sample by a uniform draw.
+
+    Args:
+        n_atom: Number of atoms in the sample.
+        generator: Generator providing the uniform draws on ``[0, 1)``. Pass a
+            seeded generator so that the test run is reproducible.
+
+    Returns:
+        Element symbols of the sample. Draws below ``1/3``, in
+        ``[1/3, 2/3)`` and in ``[2/3, 1)`` are assigned to H, Al and Pd
+        respectively, so the light, medium and heavy groups are equally likely.
+
+    Note:
+        A dedicated generator is used instead of the global NumPy state, so the
+        element draw cannot perturb the random stream of another test.
+    """
+    elements = []
+    for draw in generator.random(n_atom):
+        if draw < 1. / 3.:
+            elements.append(MIXED_ELEMENTS[0])
+        elif draw < 2. / 3.:
+            elements.append(MIXED_ELEMENTS[1])
+        else:
+            elements.append(MIXED_ELEMENTS[2])
+    return elements
+
+
 class MainTest(unittest.TestCase):
 
     TEST_MODE = 'main'
@@ -154,9 +185,23 @@ class MainTest(unittest.TestCase):
 
         # static test
         data = self.data
-        MASSES = self.MASSES
-        elem_list = self.elem_list
-        masses_list = self.masses_list
+        # Non-uniform masses: every sample draws each atom from the light,
+        # medium and heavy groups H / Al / Pd with equal probability, so the
+        # mass-weighted quantities (kinetic energy, free degree, thermostat
+        # statistics, mass-center removal) are exercised over a wide mass range.
+        # Uniform or regularly alternating samples would hide a missing or
+        # permuted mass factor.
+        element_generator = np.random.default_rng(2026)
+        elem_list = [[]]
+        masses_list = []
+        for n_atom in self.N:
+            sample_elements = draw_mixed_elements(n_atom, element_generator)
+            elem_list[0].extend(sample_elements)
+            masses_list.append([MASS[_e] for _e in sample_elements])
+        # Keep the shared fixtures in step so the plotting subclass reads the
+        # same masses as the checks below.
+        self.elem_list = elem_list
+        self.masses_list = masses_list
         DOF_vib = self.DOF_vib
         N = self.N
         kB = 8.617333262145e-5 # eV/K
@@ -331,7 +376,10 @@ class MainTest(unittest.TestCase):
                 [1.5 * (na - 3) * kB * TEMPERATURE for na in N],           # Ek mean
                 [1.5  * (na - 3) * (kB * TEMPERATURE)**2 for na in N],      # Ek var
                 [0., 0., 0.],                                              # single veloc. mean
-                [kB * TEMPERATURE / _m for _m in MASSES]                   # single veloc. var
+                [                                                          # single veloc. var
+                    kB * TEMPERATURE * float(np.mean(1. / np.asarray(_m)))
+                    for _m in masses_list
+                ]
             ]
             TEST_VALUES = [
                 [np.mean(np.asarray(_ep)) for _ep in (ene1, ene2, ene3)],
@@ -638,10 +686,17 @@ class MainTest(unittest.TestCase):
         CONSTR_THRESHOLD = cmd_convergence['constraint_threshold']
         N_CONSTR = 8  # 3 dist + 2 angle + 2 coord + 1 R_std
         N_BATCH = 3  # 3 batches, all same size → regular batch (B, N, 3)
-        N_ATOM = 5**3  # 125 Al atoms per batch → uniform
-        ELEM = 'Al'
-        MASS_val = MASS[ELEM]
-        MASSES_3 = [MASS_val] * N_BATCH
+        N_ATOM = 5**3  # 125 atoms per batch
+        # Non-uniform masses inside every sample: each atom is drawn from the
+        # light, medium and heavy groups H / Al / Pd with equal probability, so
+        # the mass-weighted projection (M^{-1/2}) and the thermostat statistics
+        # are exercised over a wide mass range. A single-element or regularly
+        # alternating sample would be invariant to a permuted mass factor.
+        SAMPLE_ELEMENTS = draw_mixed_elements(N_ATOM, np.random.default_rng(12345))
+        SAMPLE_MASSES = [MASS[_e] for _e in SAMPLE_ELEMENTS]
+        # Shared with the plotting subclass, which draws the kinetic energy of
+        # the same samples.
+        self.cmd_masses = np.asarray(SAMPLE_MASSES, dtype=float)
 
         # ============================================================
         from BUCToolkit.BatchStructures.batch import Batch
@@ -651,8 +706,8 @@ class MainTest(unittest.TestCase):
         # Regular input X: (B, N, 3)
         pos = th.stack([d.pos for d in data_list])
         pos0 = th.stack([d.pos0 for d in data_list])
-        elem_list = [[ELEM] * N_ATOM] * N_BATCH
-        masses_list = [[MASS_val] * N_ATOM] * N_BATCH
+        elem_list = [list(SAMPLE_ELEMENTS) for _ in range(N_BATCH)]
+        masses_list = [list(SAMPLE_MASSES) for _ in range(N_BATCH)]
 
         # Model
         raw_model = SimpleSpringPotential(graph.pos0, 10.)
@@ -762,7 +817,10 @@ class MainTest(unittest.TestCase):
             [0.5 * DOF_cmd * kB * TEMPERATURE] * N_BATCH,
             [0.5 * DOF_cmd * (kB * TEMPERATURE) ** 2] * N_BATCH,
             [0.] * N_BATCH,
-            [kB * TEMPERATURE / MASS_val] * N_BATCH,
+            [
+                kB * TEMPERATURE * float(np.mean(1. / np.asarray(_m)))
+                for _m in masses_list
+            ],
         ]
         TEST_TERM_NAME = [
             'Ep mean', 'Ep var', 'Ek mean', 'Ek var',
